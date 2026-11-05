@@ -1,0 +1,40 @@
+#ifndef PAGING_H
+#define PAGING_H
+#include "types.h"
+
+/* Флаги записей каталога и таблиц страниц (x86, 32 бит) */
+#define PG_PRESENT  0x001
+#define PG_WRITE    0x002
+#define PG_USER     0x004           /* доступно из ring 3 */
+#define PG_HUGE     0x080           /* в PDE: страница 4 МБ (нужен CR4.PSE) */
+
+/* Карта виртуальной памяти */
+#define IDENTITY_MAX 0x40000000u    /* 0..1 ГБ: вся RAM 1:1, только для ядра */
+#define USER_BASE    0x40000000u    /* 1..3 ГБ: память программы (своя у каждого процесса) */
+#define USER_TOP     0xC0000000u
+#define SHM_BASE     0xA0000000u    /* сюда отображается общая память (ipc.c) */
+#define SHM_END      0xB0000000u
+/* 0xD0000000..: куча ядра (heap.h) — общая для всех каталогов */
+
+void paging_init(void);
+
+/* операции над каталогом ядра */
+int  vmm_map(u32 virt, u32 phys, u32 flags);   /* 0 = ок, <0 = ошибка */
+u32  vmm_unmap(u32 virt);                      /* -> физ. адрес, 0 если не было */
+bool vmm_translate(u32 virt, u32 *phys);       /* в ТЕКУЩЕМ адресном пространстве */
+
+/* адресные пространства процессов: каталог задаётся его физ. адресом */
+u32  vmm_kernel_dir(void);
+u32  vmm_create_dir(void);                     /* новый каталог с ядром внутри */
+int  vmm_map_in(u32 dir, u32 virt, u32 phys, u32 flags);
+bool vmm_lookup(u32 dir, u32 virt, u32 *phys, u32 *flags);
+u32  vmm_unmap_in(u32 dir, u32 virt);         /* -> физ. адрес; кадр не освобождается */
+u32  vmm_destroy_dir(u32 dir);                 /* освободить всё пользовательское -> страниц */
+u32  vmm_clone_user(u32 src, u32 *pages);      /* копия пользовательской памяти (fork) */
+void vmm_switch(u32 dir);                      /* загрузить CR3 */
+u32  vmm_current_dir(void);
+
+u32  paging_identity_limit(void);
+u32  paging_table_count(void);
+
+#endif

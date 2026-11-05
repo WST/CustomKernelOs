@@ -1,0 +1,76 @@
+/* win.h — окна на рабочем столе MyOS.
+ *
+ *   window *w = win_create("Hello", 300, 200);    NULL — рабочий стол не запущен
+ *   gfx_clear(C_WHITE);                           рисуем как обычно (gfx.h) — в окно
+ *   gfx_text(10, 10, "Hi!", C_BLACK, TRANSPARENT);
+ *   win_update(w);                                показать нарисованное
+ *   struct event e;
+ *   while (win_event(&e, -1)) {                   ждать событие (-1 — сколько угодно)
+ *       if (e.type == EV_CLOSE) break;            нажали крестик
+ *       if (e.type == EV_MOUSE_DOWN) ...          e.x, e.y — внутри окна
+ *       if (e.type == EV_KEY) ...                 e.key — как у readkey()
+ *   }
+ *
+ * Как устроено: пиксели окна лежат в общей памяти (shm), которую видит и
+ * программа, и рабочий стол. Программа рисует, потом сообщением говорит
+ * «обнови такой-то прямоугольник», а рабочий стол копирует его на экран
+ * поверх обоев и под другими окнами. События идут обратно тоже сообщениями. */
+#ifndef WIN_H
+#define WIN_H
+#include "gfx.h"
+
+typedef struct window {
+    int id;                         /* номер у рабочего стола */
+    int w, h;                       /* размер области рисования */
+    color_t *pixels;                /* w * h пикселей */
+    int shm;
+} window;
+
+enum {
+    EV_NONE, EV_KEY, EV_MOUSE_DOWN, EV_MOUSE_UP, EV_MOUSE_MOVE,
+    EV_CLOSE,                       /* нажали крестик — обычно надо закрыться */
+    EV_FOCUS,                       /* e.key: 1 — окно стало активным, 0 — нет */
+    EV_QUIT,                        /* рабочий стол завершается */
+    EV_TIMEOUT,                     /* ничего не случилось за timeout_ms */
+    EV_MESSAGE,                     /* сообщение от другой программы: e.msg */
+};
+
+struct event {
+    int type;
+    window *win;
+    int key;                        /* EV_KEY */
+    int x, y;                       /* мышь: координаты в окне */
+    int buttons;                    /* MOUSE_LEFT | MOUSE_RIGHT ... */
+    struct msg msg;                 /* EV_MESSAGE */
+};
+
+window *win_create(const char *title, int w, int h);
+void    win_destroy(window *w);
+void    win_select(window *w);      /* дальше gfx_* рисуют в это окно */
+void    win_update(window *w);      /* показать всё окно */
+void    win_update_rect(window *w, int x, int y, int rw, int rh);
+void    win_set_title(window *w, const char *title);
+int     win_event(struct event *e, int timeout_ms);  /* 0 — рабочий стол пропал */
+int     win_desktop_pid(void);
+
+/* ---- простые элементы интерфейса (рисуют в выбранное окно) ---- */
+#define UI_FACE    RGB(240, 240, 240)
+#define UI_LIGHT   RGB(255, 255, 255)
+#define UI_SHADOW  RGB(160, 160, 160)
+#define UI_DARK    RGB(100, 100, 100)
+#define UI_TEXT    RGB(20, 20, 20)
+#define UI_ACCENT  RGB(0, 120, 215)
+#define UI_SELECT  RGB(204, 228, 247)
+
+void ui_button(int x, int y, int w, int h, const char *label, bool pressed);
+void ui_sunken(int x, int y, int w, int h, color_t bg);       /* поле ввода / список */
+void ui_text_center(int x, int y, int w, int h, const char *s, color_t c);
+bool ui_inside(int px, int py, int x, int y, int w, int h);
+
+/* ---- протокол с рабочим столом (для любопытных: см. desktop.c) ---- */
+enum {
+    WM_CREATE = 100, WM_CREATED, WM_UPDATE, WM_TITLE, WM_DESTROY,
+    WM_KEY = 200, WM_MOUSE, WM_CLOSE, WM_FOCUS, WM_QUIT,
+};
+
+#endif

@@ -1,0 +1,51 @@
+#ifndef FILE_H
+#define FILE_H
+#include "types.h"
+
+/* Открытый файл — объект ядра. Дескриптор (0, 1, 2, ...) в процессе — это
+ * просто индекс в его таблице указателей на такие объекты. После fork() или
+ * dup2() несколько дескрипторов (даже в разных процессах) указывают на ОДИН
+ * объект: у них общее смещение, а закрыт он будет, когда уйдёт последняя ссылка. */
+
+enum file_type { FILE_CONSOLE, FILE_DISK, FILE_PIPE, FILE_SOCKET };
+
+struct sock;
+
+#define PIPE_SIZE 4096
+
+struct pipe {
+    u8  buf[PIPE_SIZE];
+    u32 rpos, count;
+    u32 readers, writers;           /* сколько открытых концов осталось */
+};
+
+struct file {
+    enum file_type type;
+    u32  refs;
+    u8   mode;                      /* 0 чтение, 1 запись, 2 дозапись */
+    u32  ino, off;                  /* FILE_DISK */
+    struct pipe *pipe;              /* FILE_PIPE */
+    struct sock *sock;              /* FILE_SOCKET */
+};
+
+extern struct file console_file;    /* клавиатура + экран: stdin/stdout/stderr */
+
+#define TTY_RAW      1                 /* клавиши сразу, без эха и без сборки строки */
+#define TTY_NONBLOCK 2                 /* read не ждёт: нет клавиши — вернёт 0 */
+#define TTY_NOSIG    4                 /* Ctrl+C — обычная клавиша (код 3), а не убийство */
+
+u32  console_set_mode(u32 mode);       /* -> прежний режим */
+bool console_isig(void);
+void console_release(u32 pid);         /* процесс умер — вернуть терминал в норму */
+
+struct file *file_dup(struct file *f);
+void  file_close(struct file *f);
+struct file *file_open_disk(u32 ino, u8 mode, u32 off);
+struct file *file_open_socket(struct sock *s);
+int   pipe_create(struct file **rd, struct file **wr);
+
+/* buf — указатель в памяти текущего процесса (уже проверенный) */
+int   file_read(struct file *f, void *buf, u32 len);
+int   file_write(struct file *f, const void *buf, u32 len, bool is_stderr);
+
+#endif

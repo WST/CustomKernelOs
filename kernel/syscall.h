@@ -1,0 +1,119 @@
+#ifndef SYSCALL_H
+#define SYSCALL_H
+#include "idt.h"
+
+/* Номера системных вызовов. ДОЛЖНЫ совпадать с user/lib/myos.h.
+ * Вызов: int 0x80, eax = номер, ebx/ecx/edx = аргументы, результат в eax.
+ * Ошибка — отрицательное значение: -errno (как в Linux). */
+enum {
+    SYS_EXIT    = 0,    /* exit(code)                                   */
+    SYS_WRITE   = 1,    /* write(fd, buf, len)          -> записано     */
+    SYS_READ    = 2,    /* read(fd, buf, len)           -> прочитано    */
+    SYS_OPEN    = 3,    /* open(path, mode)             -> fd           */
+    SYS_CLOSE   = 4,    /* close(fd)                                    */
+    SYS_SBRK    = 5,    /* sbrk(increment)              -> старый brk   */
+    SYS_SLEEP   = 6,    /* sleep(ms)                                    */
+    SYS_GETPID  = 7,    /* getpid()                                     */
+    SYS_TICKS   = 8,    /* ticks()                      -> мс с загрузки */
+    SYS_YIELD   = 9,    /* yield()                                      */
+    SYS_FORK    = 10,   /* fork()                       -> 0 / pid       */
+    SYS_EXEC    = 11,   /* exec(path, argv)             -> не вернётся   */
+    SYS_WAITPID = 12,   /* waitpid(pid, &status, opts)  -> pid           */
+    SYS_PIPE    = 13,   /* pipe(int fds[2])                              */
+    SYS_DUP2    = 14,   /* dup2(old, new)               -> new           */
+    SYS_CHDIR   = 15,   /* chdir(path)                                   */
+    SYS_GETCWD  = 16,   /* getcwd(buf, len)                              */
+    SYS_READDIR = 17,   /* readdir(path, index, &ent)   -> 1 / 0 (конец) */
+    SYS_KILL    = 18,   /* kill(pid)                                     */
+    SYS_SETPGID = 19,   /* setpgid(pid, pgid)                            */
+    SYS_SETFG   = 20,   /* setfg(pgid): кого убивает Ctrl+C              */
+    SYS_MKDIR   = 21,   /* mkdir(path)                                   */
+    SYS_UNLINK  = 22,   /* unlink(path): файл или пустой каталог         */
+    SYS_PS      = 23,   /* ps(struct proc_info *buf, max) -> сколько     */
+    SYS_GETPPID = 24,   /* getppid()                                     */
+    SYS_TTYMODE = 25,   /* ttymode(mode): TTY_RAW|NONBLOCK|NOSIG -> старый */
+    SYS_STAT    = 26,   /* stat(path, &dirent_info): тип и размер        */
+    SYS_GFX_INFO    = 27,   /* gfx_info(&gfx_info)                       */
+    SYS_GFX_ACQUIRE = 28,   /* gfx_acquire(on): забрать экран у консоли  */
+    SYS_GFX_BLIT    = 29,   /* gfx_blit(pixels, &rect): кадр на экран    */
+    SYS_MOUSE       = 30,   /* mouse(&mouse_state)                       */
+    SYS_GFX_FONT    = 31,   /* gfx_font(buf[4096]): шрифт 8x16           */
+    SYS_TERMSIZE    = 32,   /* termsize() -> (столбцы << 16) | строки    */
+    SYS_SOCKET      = 33,   /* socket(1 TCP | 2 UDP) -> fd               */
+    SYS_CONNECT     = 34,   /* connect(fd, ip, port)                     */
+    SYS_BIND        = 35,   /* bind(fd, port)                            */
+    SYS_LISTEN      = 36,   /* listen(fd, backlog)                       */
+    SYS_ACCEPT      = 37,   /* accept(fd, &sockaddr) -> новый fd         */
+    SYS_SENDTO      = 38,   /* sendto(fd, buf, len, ip, port)            */
+    SYS_RECVFROM    = 39,   /* recvfrom(fd, buf, len, &sockaddr, мс)     */
+    SYS_NETINFO     = 40,   /* netinfo(&net_info)                        */
+    SYS_PING        = 41,   /* ping(ip, seq, мс) -> мс или -errno        */
+    SYS_NETCONFIG   = 42,   /* netconfig(что, значение): 1 = DNS         */
+    SYS_SHM_ALLOC   = 43,   /* shm_alloc(байт) -> id общей памяти        */
+    SYS_SHM_MAP     = 44,   /* shm_map(id) -> адрес в своём процессе     */
+    SYS_SHM_UNMAP   = 45,   /* shm_unmap(адрес)                          */
+    SYS_MSG_SEND    = 46,   /* msg_send(pid, &msg[64])                   */
+    SYS_MSG_RECV    = 47,   /* msg_recv(&msg[64], мс: 0 не ждать, -1 вечно) */
+    SYS_SERVICE     = 48,   /* service(1 зарегистрировать | 2 найти, имя) */
+    SYS_TIME        = 49,   /* time(&rtc_time): дата и время из CMOS     */
+    SYS_COUNT
+};
+
+/* коды ошибок (как в Linux) */
+#define EPERM        1
+#define ENOENT       2
+#define ESRCH        3
+#define EINTR        4
+#define EIO          5
+#define ENOEXEC      8
+#define EBADF        9
+#define ECHILD       10
+#define EAGAIN       11
+#define ENOMEM       12
+#define EFAULT       14
+#define EEXIST       17
+#define ENODEV       19
+#define ENOTDIR      20
+#define EISDIR       21
+#define EINVAL       22
+#define EMFILE       24
+#define EFBIG        27
+#define ENOSPC       28
+#define EPIPE        32
+#define ENAMETOOLONG 36
+#define ENOSYS       38
+#define ENOTEMPTY    39
+#define EADDRINUSE   98
+#define ENETDOWN     100
+#define ECONNRESET   104
+#define EISCONN      106
+#define EMSGSIZE     90
+#define ENOTCONN     107
+#define ETIMEDOUT    110
+#define ECONNREFUSED 111
+#define EHOSTUNREACH 113
+
+#define WNOHANG 1
+
+/* для readdir */
+struct dirent_info {
+    char name[28];
+    unsigned type;                  /* 1 файл, 2 каталог */
+    unsigned size;
+};
+
+/* для ps */
+struct proc_info {
+    unsigned pid, ppid, pgid;
+    char     name[16];
+    unsigned state;                 /* 0 ready 1 running 2 sleeping 3 blocked 4 zombie */
+    unsigned ring;
+    unsigned cpu_percent, cpu_ms, mem_kb;
+};
+
+struct gfx_info { unsigned width, height, bpp, pitch; };
+struct gfx_rect { int x, y, w, h; };
+
+void syscall_dispatch(struct regs *r);
+
+#endif

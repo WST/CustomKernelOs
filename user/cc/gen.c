@@ -1,0 +1,978 @@
+/* Генератор кода: дерево -> машинный код x86 (32 бит), плюс «компоновка» и запись ELF.
+ *
+ * Модель простая — «стековая машина»:
+ *   - результат выражения всегда в eax (целые, указатели), а дробный — в st(0) сопроцессора;
+ *   - у структур и массивов «значение» — это их адрес в eax;
+ *   - для a + b: считаем b, push eax, считаем a, pop ecx, add eax, ecx.
+ * Вызовы — как у gcc (cdecl): аргументы в стек справа налево, ответ в eax / st(0).
+ *
+ * Байты инструкций пишем прямо в буфер: E("0F B6 C0") — это movzx eax, al. */
+#include "cc.h"
+
+/* ------------------------------------------------------------ буферы */
+
+void buf_put(Buf *b, const void *p, int n) {
+    if (b->len + n > b->cap) {
+        int cap = b->cap ? b->cap * 2 : 4096;
+        while (cap < b->len + n) cap *= 2;
+        unsigned char *d = xcalloc(cap);
+        if (b->data) memcpy(d, b->data, b->len);
+        free(b->data);
+        b->data = d;
+        b->cap = cap;
+    }
+    memcpy(b->data + b->len, p, n);
+    b->len += n;
+}
+void buf_byte(Buf *b, int v) { unsigned char c = v; buf_put(b, &c, 1); }
+void buf_u32(Buf *b, unsigned v) { unsigned char c[4] = { v, v >> 8, v >> 16, v >> 24 }; buf_put(b, c, 4); }
+static void put_u32_at(Buf *b, int pos, unsigned v) {
+    b->data[pos] = v; b->data[pos + 1] = v >> 8; b->data[pos + 2] = v >> 16; b->data[pos + 3] = v >> 24;
+}
+
+static Buf text;                    /* код */
+
+static int hexval(int c) { return c <= '9' ? c - '0' : (c | 32) - 'a' + 10; }
+
+/* E("8B 45 08") — записать байты, заданные шестнадцатеричной строкой */
+static void E(const char *s) {
+    while (*s) {
+        if (*s == ' ') { s++; continue; }
+        buf_byte(&text, hexval(s[0]) * 16 + hexval(s[1]));
+        s += 2;
+    }
+}
+static void imm32(unsigned v) { buf_u32(&text, v); }
+static bool fits8(int v) { return v >= -128 && v <= 127; }
+
+/* ------------------------------------------------------------ метки и переходы */
+
+static int  *label_pos;             /* label -> смещение в text (-1 — ещё не поставлена) */
+static int   label_cap;
+typedef struct { int pos, label; } Fixup;
+static Fixup *fixups;
+static int    n_fixups, cap_fixups;
+
+static void label_here(int l) {
+    if (l >= label_cap) {
+        int cap = label_cap ? label_cap : 1024;
+        while (cap <= l) cap *= 2;
+        int *p = xcalloc(sizeof(int) * cap);
+        if (label_pos) memcpy(p, label_pos, sizeof(int) * label_cap);
+        for (int i = label_cap; i < cap; i++) p[i] = -1;
+        free(label_pos);
+        label_pos = p;
+        label_cap = cap;
+    }
+    label_pos[l] = text.len;
+}
+
+static void add_fixup(int label) {
+    if (n_fixups == cap_fixups) {
+        cap_fixups = cap_fixups ? cap_fixups * 2 : 256;
+        Fixup *f = xcalloc(sizeof(Fixup) * cap_fixups);
+        if (fixups) memcpy(f, fixups, sizeof(Fixup) * n_fixups);
+        free(fixups);
+        fixups = f;
+    }
+    fixups[n_fixups].pos = text.len;
+    fixups[n_fixups].label = label;
+    n_fixups++;
+    imm32(0);
+}
+
+static void jmp(int l) { E("E9"); add_fixup(l); }
+static void je(int l)  { E("0F 84"); add_fixup(l); }
+static void jne(int l) { E("0F 85"); add_fixup(l); }
+
+static void resolve_fixups(void) {
+    for (int i = 0; i < n_fixups; i++) {
+        int l = fixups[i].label;
+        if (l >= label_cap || label_pos[l] < 0) error("internal error: unresolved label %d", l);
+        put_u32_at(&text, fixups[i].pos, label_pos[l] - (fixups[i].pos + 4));
+    }
+    n_fixups = 0;
+}
+
+/* ------------------------------------------------------------ ссылки на символы */
+
+typedef struct Reloc2 {
+    int  pos;                       /* где в text */
+    char *name;
+    bool rel;                       /* true — call rel32, false — абсолютный адрес */
+} Reloc2;
+static Reloc2 *relocs;
+static int n_relocs, cap_relocs;
+
+static void sym_ref(char *name, bool rel) {
+    if (n_relocs == cap_relocs) {
+        cap_relocs = cap_relocs ? cap_relocs * 2 : 256;
+        Reloc2 *r = xcalloc(sizeof(Reloc2) * cap_relocs);
+        if (relocs) memcpy(r, relocs, sizeof(Reloc2) * n_relocs);
+        free(relocs);
+        relocs = r;
+    }
+    relocs[n_relocs].pos = text.len;
+    relocs[n_relocs].name = name;
+    relocs[n_relocs].rel = rel;
+    n_relocs++;
+    imm32(0);
+}
+
+/* ------------------------------------------------------------ простые инструкции */
+
+static int depth;                   /* сколько байт мы сами положили в стек (для проверки) */
+
+static void push_eax(void) { E("50"); depth += 4; }
+static void pop_ecx(void)  { E("59"); depth -= 4; }
+
+static void mov_eax_imm(int v) {
+    if (v == 0) E("31 C0");
+    else { E("B8"); imm32(v); }
+}
+
+static void add_esp(int n) {
+    if (!n) return;
+    if (fits8(n)) { E("83 C4"); buf_byte(&text, n); }
+    else { E("81 C4"); imm32(n); }
+}
+static void sub_esp(int n) {
+    if (!n) return;
+    if (fits8(n)) { E("83 EC"); buf_byte(&text, n); }
+    else { E("81 EC"); imm32(n); }
+}
+
+/* lea eax, [ebp + off] */
+static void lea_eax_ebp(int off) {
+    if (fits8(off)) { E("8D 45"); buf_byte(&text, off); }
+    else { E("8D 85"); imm32(off); }
+}
+
+static void push_double(void) { sub_esp(8); E("DD 1C 24"); depth += 8; }      /* fstp qword [esp] */
+static void pop_double_cmp(void) { add_esp(8); depth -= 8; }
+
+/* копировать ecx байт: [eax] -> [edx]; портит esi, edi */
+static void copy_bytes(int size) {
+    E("89 C6");                     /* mov esi, eax */
+    E("89 D7");                     /* mov edi, edx */
+    E("B9"); imm32(size);           /* mov ecx, size */
+    E("F3 A4");                     /* rep movsb */
+}
+
+/* ------------------------------------------------------------ загрузка и запись */
+
+static void load(Type *ty) {
+    switch (ty->kind) {
+    case TY_ARRAY: case TY_STRUCT: case TY_UNION: case TY_FUNC: return;
+    case TY_FLOAT: E("D9 00"); return;                          /* fld dword [eax] */
+    case TY_DOUBLE: E("DD 00"); return;                         /* fld qword [eax] */
+    default: break;
+    }
+    if (ty->size == 1) { if (ty->is_unsigned || ty->kind == TY_BOOL) E("0F B6 00"); else E("0F BE 00"); }
+    else if (ty->size == 2) { if (ty->is_unsigned) E("0F B7 00"); else E("0F BF 00"); }
+    else E("8B 00");                                            /* mov eax, [eax] */
+}
+
+/* адрес лежит в стеке, значение — в eax / st(0) */
+static void store(Type *ty) {
+    pop_ecx();
+    switch (ty->kind) {
+    case TY_STRUCT: case TY_UNION:
+        E("89 CA");                                             /* mov edx, ecx */
+        E("51");                                                /* push ecx */
+        copy_bytes(ty->size);
+        E("58");                                                /* pop eax: значение = адрес приёмника */
+        return;
+    case TY_FLOAT: E("D9 11"); return;                          /* fst dword [ecx] */
+    case TY_DOUBLE: E("DD 11"); return;                         /* fst qword [ecx] */
+    default: break;
+    }
+    if (ty->size == 1) E("88 01");
+    else if (ty->size == 2) E("66 89 01");
+    else E("89 01");
+}
+
+/* сравнить результат с нулём: после этого ZF=1, если он ноль */
+static void cmp_zero(Type *ty) {
+    if (is_flonum(ty)) {
+        E("D9 EE");                                             /* fldz */
+        E("DA E9");                                             /* fucompp */
+        E("DF E0");                                             /* fnstsw ax */
+        E("9E");                                                /* sahf */
+    } else {
+        E("85 C0");                                             /* test eax, eax */
+    }
+}
+
+/* ------------------------------------------------------------ приведение типов */
+
+enum { I8, I16, I32, U8, U16, U32, F32, F64 };
+
+static int type_id(Type *ty) {
+    switch (ty->kind) {
+    case TY_CHAR: return ty->is_unsigned ? U8 : I8;
+    case TY_SHORT: return ty->is_unsigned ? U16 : I16;
+    case TY_INT: return ty->is_unsigned ? U32 : I32;
+    case TY_FLOAT: return F32;
+    case TY_DOUBLE: return F64;
+    case TY_BOOL: return U8;
+    case TY_ENUM: return I32;
+    default: return U32;
+    }
+}
+
+static void round_to_float(void) {
+    sub_esp(4); E("D9 1C 24"); E("D9 04 24"); add_esp(4);     /* fstp dword [esp]; fld dword [esp] */
+}
+
+static void float_to_int(void) {
+    sub_esp(12);
+    E("D9 3C 24");                                              /* fnstcw [esp] */
+    E("66 8B 04 24");                                           /* mov ax, [esp] */
+    E("66 0D 00 0C");                                           /* or ax, 0C00h: округлять к нулю, как в Си */
+    E("66 89 44 24 02");                                        /* mov [esp+2], ax */
+    E("D9 6C 24 02");                                           /* fldcw [esp+2] */
+    E("DF 7C 24 04");                                           /* fistp qword [esp+4] */
+    E("D9 2C 24");                                              /* fldcw [esp] */
+    E("8B 44 24 04");                                           /* mov eax, [esp+4] */
+    add_esp(12);
+}
+
+static void int_truncate(int to) {
+    switch (to) {
+    case I8:  E("0F BE C0"); break;
+    case U8:  E("0F B6 C0"); break;
+    case I16: E("0F BF C0"); break;
+    case U16: E("0F B7 C0"); break;
+    }
+}
+
+static void gen_cast(Type *from, Type *to) {
+    if (to->kind == TY_VOID) {
+        if (is_flonum(from)) E("DD D8");                        /* fstp st0: выбросить */
+        return;
+    }
+    if (to->kind == TY_BOOL) {
+        cmp_zero(from);
+        E("0F 95 C0 0F B6 C0");                                 /* setne al; movzx eax, al */
+        return;
+    }
+    int f = type_id(from), t = type_id(to);
+    if (f == F32 || f == F64) {
+        if (t == F64) return;
+        if (t == F32) { round_to_float(); return; }
+        float_to_int();
+        int_truncate(t);
+        return;
+    }
+    if (t == F32 || t == F64) {
+        if (f == U32) { E("6A 00 50 DF 2C 24"); add_esp(8); }   /* push 0; push eax; fild qword [esp] */
+        else { E("50 DB 04 24"); add_esp(4); }                  /* push eax; fild dword [esp] */
+        if (t == F32) round_to_float();
+        return;
+    }
+    if (to->size < 4 && (to->size < from->size || to->is_unsigned != from->is_unsigned)) int_truncate(t);
+}
+
+/* ------------------------------------------------------------ выражения */
+
+static Obj *cur_fn;
+static int  ret_label;
+static void gen_expr(Node *node);
+static void gen_stmt(Node *node);
+
+static void gen_addr(Node *node) {
+    switch (node->kind) {
+    case ND_VAR:
+        if (node->var->is_local) lea_eax_ebp(node->var->offset);
+        else { E("B8"); sym_ref(node->var->name, false); }       /* mov eax, адрес */
+        return;
+    case ND_DEREF:
+        gen_expr(node->lhs);
+        return;
+    case ND_COMMA:
+        gen_expr(node->lhs);
+        if (is_flonum(node->lhs->ty)) E("DD D8");
+        gen_addr(node->rhs);
+        return;
+    case ND_MEMBER:
+        gen_addr(node->lhs);
+        if (node->member->offset) {
+            if (fits8(node->member->offset)) { E("83 C0"); buf_byte(&text, node->member->offset); }
+            else { E("05"); imm32(node->member->offset); }
+        }
+        return;
+    case ND_FUNCALL:
+        if (node->ret_buffer) { gen_expr(node); return; }
+        break;
+    case ND_ASSIGN: case ND_COND: case ND_STMT_EXPR:
+        if (node->ty->kind == TY_STRUCT || node->ty->kind == TY_UNION) { gen_expr(node); return; }
+        break;
+    default: break;
+    }
+    error_tok(node->tok, "not an lvalue");
+}
+
+/* значение выражения не нужно (оператор-выражение, левая часть запятой) */
+static void gen_discard(Node *node) {
+    gen_expr(node);
+    if (is_flonum(node->ty)) E("DD D8");
+}
+
+static void gen_num(Node *node) {
+    if (node->ty->kind == TY_DOUBLE || node->ty->kind == TY_FLOAT) {
+        double d = node->fval;
+        if (d == 0 && 1 / d > 0) { E("D9 EE"); return; }        /* fldz */
+        if (d == 1) { E("D9 E8"); return; }                     /* fld1 */
+        if (node->ty->kind == TY_FLOAT) {
+            float f = (float)d;
+            unsigned u;
+            memcpy(&u, &f, 4);
+            E("68"); imm32(u);
+            E("D9 04 24");                                      /* fld dword [esp] */
+            add_esp(4);
+            return;
+        }
+        unsigned u[2];
+        memcpy(u, &d, 8);
+        E("68"); imm32(u[1]);
+        E("68"); imm32(u[0]);
+        E("DD 04 24");                                          /* fld qword [esp] */
+        add_esp(8);
+        return;
+    }
+    mov_eax_imm(node->val);
+}
+
+static void gen_funcall(Node *node) {
+    int nargs = 0;
+    for (Node *a = node->args; a; a = a->next) nargs++;
+    Node **args = xcalloc(sizeof(Node *) * (nargs + 1));
+    int i = 0;
+    for (Node *a = node->args; a; a = a->next) args[i++] = a;
+
+    int pushed = 0;
+    for (i = nargs - 1; i >= 0; i--) {                          /* справа налево */
+        Node *a = args[i];
+        gen_expr(a);
+        Type *ty = a->ty;
+        if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+            int sz = align_to(ty->size, 4);
+            sub_esp(sz);
+            E("89 E2");                                         /* mov edx, esp */
+            copy_bytes(ty->size);
+            pushed += sz;
+        } else if (ty->kind == TY_FLOAT) {
+            sub_esp(4); E("D9 1C 24");                          /* fstp dword [esp] */
+            pushed += 4;
+        } else if (ty->kind == TY_DOUBLE) {
+            sub_esp(8); E("DD 1C 24");
+            pushed += 8;
+        } else {
+            E("50");
+            pushed += 4;
+        }
+    }
+    free(args);
+    if (node->ret_buffer) {                                     /* куда вернуть структуру */
+        lea_eax_ebp(node->ret_buffer->offset);
+        E("50");
+        pushed += 4;
+    }
+    Node *fn = node->lhs;
+    if (fn->kind == ND_VAR && fn->var->ty->kind == TY_FUNC) {
+        E("E8"); sym_ref(fn->var->name, true);                  /* call имя */
+    } else {
+        gen_expr(fn);
+        E("FF D0");                                             /* call eax */
+    }
+    add_esp(pushed);
+}
+
+static void gen_syscall(Node *node) {
+    static const char *pop[] = { "58", "5B", "59", "5A", "5E", "5F" };   /* eax ebx ecx edx esi edi */
+    int n = 0;
+    for (Node *a = node->args; a; a = a->next) { gen_expr(a); E("50"); n++; }
+    for (int i = n - 1; i >= 0; i--) E(pop[i]);
+    E("CD 80");                                                 /* int 0x80 */
+}
+
+static void gen_cmp_double(Node *node) {
+    gen_expr(node->rhs);
+    push_double();
+    gen_expr(node->lhs);
+    E("DC 1C 24");                                              /* fcomp qword [esp] */
+    E("DF E0 9E");                                              /* fnstsw ax; sahf */
+    switch (node->kind) {
+    case ND_EQ: E("0F 94 C0"); break;                           /* sete */
+    case ND_NE: E("0F 95 C0"); break;                           /* setne */
+    case ND_LT: E("0F 92 C0"); break;                           /* setb */
+    default:    E("0F 96 C0"); break;                           /* setbe */
+    }
+    E("0F B6 C0");
+    pop_double_cmp();
+}
+
+
+/* ------------------------------------------------------------ короткие пути
+ * Самые частые случаи — локальная переменная и число — обходятся без push/pop. */
+
+static bool is_scalar_int(Type *ty) {
+    return is_integer(ty) || ty->kind == TY_PTR;
+}
+
+/* локальная переменная целого типа или указатель */
+static bool is_local_scalar(Node *n) {
+    return n->kind == ND_VAR && n->var->is_local && is_scalar_int(n->ty);
+}
+
+/* приведение, которое ничего не меняет в 32-битном регистре */
+static Node *strip_nop_cast(Node *n) {
+    while (n->kind == ND_CAST && is_scalar_int(n->ty) && is_scalar_int(n->lhs->ty) &&
+           n->ty->size == 4 && n->ty->kind != TY_BOOL &&
+           (n->lhs->ty->size == 4 || n->lhs->kind == ND_VAR || n->lhs->kind == ND_NUM))
+        n = n->lhs;
+    return n;
+}
+
+/* значение можно сразу положить в ecx */
+static bool is_simple(Node *n) {
+    n = strip_nop_cast(n);
+    return (n->kind == ND_NUM && !is_flonum(n->ty)) || is_local_scalar(n);
+}
+
+/* modrm с [ebp + off]: reg — номер регистра (0 eax, 1 ecx) */
+static void ebp_operand(int reg, int off) {
+    if (fits8(off)) { buf_byte(&text, 0x45 | (reg << 3)); buf_byte(&text, off); }
+    else { buf_byte(&text, 0x85 | (reg << 3)); imm32(off); }
+}
+
+static void load_local(int reg, Node *n) {
+    Type *ty = n->ty;
+    int off = n->var->offset;
+    if (ty->size == 1) { E((ty->is_unsigned || ty->kind == TY_BOOL) ? "0F B6" : "0F BE"); }
+    else if (ty->size == 2) { E(ty->is_unsigned ? "0F B7" : "0F BF"); }
+    else E("8B");
+    ebp_operand(reg, off);
+}
+
+static void gen_to_ecx(Node *n) {
+    n = strip_nop_cast(n);
+    if (n->kind == ND_NUM) { E("B9"); imm32(n->val); }
+    else load_local(1, n);
+}
+
+static void gen_branch(Node *node, int label, bool when);
+
+static void gen_expr(Node *node) {
+    switch (node->kind) {
+    case ND_NULL_EXPR: return;
+    case ND_NUM: gen_num(node); return;
+    case ND_NEG:
+        gen_expr(node->lhs);
+        if (is_flonum(node->ty)) E("D9 E0");                    /* fchs */
+        else E("F7 D8");                                        /* neg eax */
+        return;
+    case ND_VAR:
+        if (node->var->is_local && is_scalar_int(node->ty)) { load_local(0, node); return; }
+        if (node->var->is_local && node->ty->kind == TY_DOUBLE) { E("DD"); ebp_operand(0, node->var->offset); return; }
+        if (node->var->is_local && node->ty->kind == TY_FLOAT) { E("D9"); ebp_operand(0, node->var->offset); return; }
+        gen_addr(node);
+        load(node->ty);
+        return;
+    case ND_MEMBER:
+        gen_addr(node);
+        load(node->ty);
+        return;
+    case ND_DEREF:
+        gen_expr(node->lhs);
+        load(node->ty);
+        return;
+    case ND_ADDR:
+        gen_addr(node->lhs);
+        return;
+    case ND_ASSIGN:
+        if (node->lhs->kind == ND_VAR && node->lhs->var->is_local &&
+            (is_scalar_int(node->ty) || is_flonum(node->ty))) {     /* x = ... прямо в [ebp+off] */
+            gen_expr(node->rhs);
+            Type *ty = node->ty;
+            int off = node->lhs->var->offset;
+            if (ty->kind == TY_DOUBLE) E("DD"), ebp_operand(2, off);          /* fst qword */
+            else if (ty->kind == TY_FLOAT) E("D9"), ebp_operand(2, off);      /* fst dword */
+            else if (ty->size == 1) E("88"), ebp_operand(0, off);
+            else if (ty->size == 2) E("66 89"), ebp_operand(0, off);
+            else E("89"), ebp_operand(0, off);
+            return;
+        }
+        gen_addr(node->lhs);
+        push_eax();
+        gen_expr(node->rhs);
+        store(node->ty);
+        return;
+    case ND_STMT_EXPR:
+        for (Node *n = node->body; n; n = n->next) {
+            if (!n->next && n->kind == ND_EXPR_STMT) gen_expr(n->lhs);
+            else gen_stmt(n);
+        }
+        return;
+    case ND_COMMA:
+        gen_discard(node->lhs);
+        gen_expr(node->rhs);
+        return;
+    case ND_CAST:
+        gen_expr(node->lhs);
+        gen_cast(node->lhs->ty, node->ty);
+        return;
+    case ND_MEMZERO:
+        lea_eax_ebp(node->var->offset);
+        E("89 C7");                                             /* mov edi, eax */
+        E("B9"); imm32(node->var->ty->size);
+        E("31 C0 F3 AA");                                       /* xor eax, eax; rep stosb */
+        return;
+    case ND_COND: {
+        int lelse = new_label(), lend = new_label();
+        gen_branch(node->cond, lelse, false);
+        gen_expr(node->then);
+        jmp(lend);
+        label_here(lelse);
+        gen_expr(node->els);
+        label_here(lend);
+        return;
+    }
+    case ND_NOT:
+        gen_expr(node->lhs);
+        cmp_zero(node->lhs->ty);
+        E("0F 94 C0 0F B6 C0");                                 /* sete al; movzx eax, al */
+        return;
+    case ND_BITNOT:
+        gen_expr(node->lhs);
+        E("F7 D0");
+        return;
+    case ND_LOGAND: {
+        int lfalse = new_label(), lend = new_label();
+        gen_expr(node->lhs);
+        cmp_zero(node->lhs->ty);
+        je(lfalse);
+        gen_expr(node->rhs);
+        cmp_zero(node->rhs->ty);
+        je(lfalse);
+        mov_eax_imm(1);
+        jmp(lend);
+        label_here(lfalse);
+        mov_eax_imm(0);
+        label_here(lend);
+        return;
+    }
+    case ND_LOGOR: {
+        int ltrue = new_label(), lend = new_label();
+        gen_expr(node->lhs);
+        cmp_zero(node->lhs->ty);
+        jne(ltrue);
+        gen_expr(node->rhs);
+        cmp_zero(node->rhs->ty);
+        jne(ltrue);
+        mov_eax_imm(0);
+        jmp(lend);
+        label_here(ltrue);
+        mov_eax_imm(1);
+        label_here(lend);
+        return;
+    }
+    case ND_FUNCALL: gen_funcall(node); return;
+    case ND_SYSCALL: gen_syscall(node); return;
+    default: break;
+    }
+
+    /* двухместные операции */
+    if (is_flonum(node->lhs->ty)) {
+        if (node->kind == ND_EQ || node->kind == ND_NE || node->kind == ND_LT || node->kind == ND_LE) {
+            gen_cmp_double(node);
+            return;
+        }
+        gen_expr(node->rhs);
+        push_double();
+        gen_expr(node->lhs);
+        switch (node->kind) {
+        case ND_ADD: E("DC 04 24"); break;                      /* fadd qword [esp] */
+        case ND_SUB: E("DC 24 24"); break;                      /* fsub */
+        case ND_MUL: E("DC 0C 24"); break;                      /* fmul */
+        case ND_DIV: E("DC 34 24"); break;                      /* fdiv */
+        default: error_tok(node->tok, "invalid expression");
+        }
+        pop_double_cmp();
+        return;
+    }
+
+    if (is_simple(node->rhs)) {                                 /* правый операнд простой: без push/pop */
+        gen_expr(node->lhs);
+        gen_to_ecx(node->rhs);
+    } else {
+        gen_expr(node->rhs);
+        push_eax();
+        gen_expr(node->lhs);
+        pop_ecx();
+    }
+    bool u = node->lhs->ty->is_unsigned;
+    switch (node->kind) {
+    case ND_ADD: E("01 C8"); return;
+    case ND_SUB: E("29 C8"); return;
+    case ND_MUL: E("0F AF C1"); return;
+    case ND_DIV: case ND_MOD:
+        if (u) E("31 D2 F7 F1");                                /* xor edx, edx; div ecx */
+        else E("99 F7 F9");                                     /* cdq; idiv ecx */
+        if (node->kind == ND_MOD) E("89 D0");
+        return;
+    case ND_BITAND: E("21 C8"); return;
+    case ND_BITOR: E("09 C8"); return;
+    case ND_BITXOR: E("31 C8"); return;
+    case ND_SHL: E("D3 E0"); return;
+    case ND_SHR: if (node->ty->is_unsigned) E("D3 E8"); else E("D3 F8"); return;
+    case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
+        E("39 C8");                                             /* cmp eax, ecx */
+        if (node->kind == ND_EQ) E("0F 94 C0");
+        else if (node->kind == ND_NE) E("0F 95 C0");
+        else if (node->kind == ND_LT) E(u ? "0F 92 C0" : "0F 9C C0");
+        else E(u ? "0F 96 C0" : "0F 9E C0");
+        E("0F B6 C0");
+        return;
+    default: break;
+    }
+    error_tok(node->tok, "invalid expression");
+}
+
+/* Переход на label, если условие истинно (when=true) или ложно (when=false).
+ * Сравнения целых сразу дают cmp + jcc, без промежуточного 0/1. */
+static void gen_branch(Node *node, int label, bool when) {
+    switch (node->kind) {
+    case ND_NOT:
+        gen_branch(node->lhs, label, !when);
+        return;
+    case ND_LOGAND:
+        if (!when) { gen_branch(node->lhs, label, false); gen_branch(node->rhs, label, false); }
+        else { int skip = new_label(); gen_branch(node->lhs, skip, false); gen_branch(node->rhs, label, true); label_here(skip); }
+        return;
+    case ND_LOGOR:
+        if (when) { gen_branch(node->lhs, label, true); gen_branch(node->rhs, label, true); }
+        else { int skip = new_label(); gen_branch(node->lhs, skip, true); gen_branch(node->rhs, label, false); label_here(skip); }
+        return;
+    case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
+        if (is_flonum(node->lhs->ty)) break;
+        if (is_simple(node->rhs)) { gen_expr(node->lhs); gen_to_ecx(node->rhs); }
+        else { gen_expr(node->rhs); push_eax(); gen_expr(node->lhs); pop_ecx(); }
+        E("39 C8");                                             /* cmp eax, ecx */
+        {
+            bool u = node->lhs->ty->is_unsigned;
+            int cc;                                             /* код условия «истина» */
+            switch (node->kind) {
+            case ND_EQ: cc = 0x84; break;                       /* je */
+            case ND_NE: cc = 0x85; break;                       /* jne */
+            case ND_LT: cc = u ? 0x82 : 0x8C; break;            /* jb / jl */
+            default:    cc = u ? 0x86 : 0x8E; break;            /* jbe / jle */
+            }
+            if (!when) cc ^= 1;                                 /* обратное условие — соседний код */
+            buf_byte(&text, 0x0F);
+            buf_byte(&text, cc);
+            add_fixup(label);
+        }
+        return;
+    default: break;
+    }
+    gen_expr(node);
+    cmp_zero(node->ty);
+    if (when) jne(label); else je(label);
+}
+
+/* ------------------------------------------------------------ операторы */
+
+static void gen_stmt(Node *node) {
+    switch (node->kind) {
+    case ND_IF: {
+        int lelse = new_label(), lend = new_label();
+        gen_branch(node->cond, lelse, false);
+        gen_stmt(node->then);
+        jmp(lend);
+        label_here(lelse);
+        if (node->els) gen_stmt(node->els);
+        label_here(lend);
+        return;
+    }
+    case ND_FOR: {
+        int lbegin = new_label();
+        if (node->init) gen_stmt(node->init);
+        label_here(lbegin);
+        if (node->cond) gen_branch(node->cond, node->brk_label, false);
+        gen_stmt(node->then);
+        label_here(node->cont_label);
+        if (node->inc) gen_discard(node->inc);
+        jmp(lbegin);
+        label_here(node->brk_label);
+        return;
+    }
+    case ND_DO: {
+        int lbegin = new_label();
+        label_here(lbegin);
+        gen_stmt(node->then);
+        label_here(node->cont_label);
+        gen_branch(node->cond, lbegin, true);
+        label_here(node->brk_label);
+        return;
+    }
+    case ND_SWITCH:
+        gen_expr(node->cond);
+        if (is_flonum(node->cond->ty)) error_tok(node->tok, "switch on a floating value");
+        for (Node *n = node->case_next; n; n = n->case_next) {
+            if (n->case_begin == n->case_end) {
+                E("3D"); imm32(n->case_begin);                  /* cmp eax, imm */
+                je(n->case_label);
+            } else {
+                E("89 C1");                                     /* mov ecx, eax */
+                E("81 E9"); imm32(n->case_begin);               /* sub ecx, begin */
+                E("81 F9"); imm32(n->case_end - n->case_begin); /* cmp ecx, len */
+                E("0F 86"); add_fixup(n->case_label);           /* jbe */
+            }
+        }
+        if (node->default_case) jmp(node->default_case->case_label);
+        jmp(node->brk_label);
+        gen_stmt(node->then);
+        label_here(node->brk_label);
+        return;
+    case ND_CASE:
+        label_here(node->case_label);
+        gen_stmt(node->lhs);
+        return;
+    case ND_BLOCK:
+        for (Node *n = node->body; n; n = n->next) gen_stmt(n);
+        return;
+    case ND_GOTO:
+        jmp(node->val);
+        return;
+    case ND_LABEL:
+        label_here(node->val);
+        gen_stmt(node->lhs);
+        return;
+    case ND_RETURN:
+        if (node->lhs) {
+            gen_expr(node->lhs);
+            Type *ty = node->lhs->ty;
+            if (ty->kind == TY_STRUCT || ty->kind == TY_UNION) {
+                E("8B 55 08");                                  /* mov edx, [ebp+8]: куда класть */
+                copy_bytes(ty->size);
+                E("8B 45 08");                                  /* mov eax, [ebp+8] */
+            }
+        }
+        jmp(ret_label);
+        return;
+    case ND_EXPR_STMT:
+        gen_discard(node->lhs);
+        return;
+    default: break;
+    }
+    error_tok(node->tok, "invalid statement");
+}
+
+/* ------------------------------------------------------------ функции */
+
+static void assign_offsets(Obj *fn) {
+    int off = 8;
+    Type *rt = fn->ty->return_ty;
+    if (rt->kind == TY_STRUCT || rt->kind == TY_UNION) off += 4;   /* скрытый адрес для ответа */
+    for (Obj *p = fn->params; p; p = p->next) {
+        p->offset = off;
+        off += align_to(p->ty->size, 4);
+    }
+    int bottom = 0;
+    for (Obj *v = fn->locals; v && v != fn->params; v = v->next) {
+        int align = v->ty->align < 4 ? (v->ty->size >= 4 ? 4 : v->ty->align) : v->ty->align;
+        if (align > 4) align = 4;
+        bottom = align_to(bottom + v->ty->size, align);
+        v->offset = -bottom;
+    }
+    fn->stack_size = align_to(bottom, 4);
+}
+
+static void gen_function(Obj *fn) {
+    cur_fn = fn;
+    assign_offsets(fn);
+    fn->section = 1;
+    fn->addr = text.len;
+    ret_label = new_label();
+    E("55 89 E5");                                              /* push ebp; mov ebp, esp */
+    if (fn->stack_size) { E("81 EC"); imm32(fn->stack_size); }
+    depth = 0;
+    gen_stmt(fn->body);
+    if (!strcmp(fn->name, "main")) mov_eax_imm(0);              /* main без return вернёт 0 */
+    label_here(ret_label);
+    E("89 EC 5D C3");                                           /* mov esp, ebp; pop ebp; ret */
+    resolve_fixups();
+}
+
+/* ------------------------------------------------------------ компоновка */
+
+#define HBUCKETS 1024
+typedef struct Sym { struct Sym *next; char *name; Obj *obj; } Sym;
+static Sym *symtab[HBUCKETS];
+
+static unsigned shash(const char *s) {
+    unsigned h = 2166136261u;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h % HBUCKETS;
+}
+
+static Obj *sym_find(const char *name) {
+    for (Sym *s = symtab[shash(name)]; s; s = s->next)
+        if (!strcmp(s->name, name)) return s->obj;
+    return NULL;
+}
+
+/* собрать определения всех файлов в одну таблицу имён */
+static void build_symtab(Obj *prog) {
+    for (Obj *o = prog; o; o = o->next) {
+        bool def = o->is_function ? (o->body != NULL) : (o->is_definition || o->is_tentative || o->init_data != NULL);
+        if (!def) continue;
+        unsigned h = shash(o->name);
+        Sym *s = symtab[h];
+        while (s && strcmp(s->name, o->name)) s = s->next;
+        if (s) {
+            Obj *old = s->obj;
+            if (o->is_function || old->is_function) error("multiple definition of '%s'", o->name);
+            if (o->init_data && old->init_data) error("multiple definition of '%s'", o->name);
+            if (o->init_data || o->ty->size > old->ty->size) s->obj = o;   /* int x; + int x = 5; */
+            continue;
+        }
+        s = xcalloc(sizeof(Sym));
+        s->name = o->name;
+        s->obj = o;
+        s->next = symtab[h];
+        symtab[h] = s;
+    }
+}
+
+/* оставить только то, до чего можно дойти от main */
+static void mark_live(const char *name, const char *from) {
+    Obj *o = sym_find(name);
+    if (!o) error("undefined reference to '%s'%s%s", name, from ? " in " : "", from ? from : "");
+    if (o->is_live) return;
+    o->is_live = true;
+    for (int i = 0; i < o->n_refs; i++) mark_live(o->refs[i], o->name);
+    for (Reloc *r = o->rel; r; r = r->next) mark_live(r->label, o->name);
+}
+
+static void write_file(const char *path, Buf *b) {
+#ifdef CC_HOST
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
+#else
+    int fd = open(path, O_WRITE);
+#endif
+    if (fd < 0) error("cannot write %s", path);
+    int off = 0;
+    while (off < b->len) {
+        int n = write(fd, b->data + off, b->len - off);
+        if (n <= 0) error("write error: %s", path);
+        off += n;
+    }
+    close(fd);
+}
+
+void codegen(Obj *prog, const char *out_path) {
+    build_symtab(prog);
+    mark_live("main", NULL);
+    mark_live("exit", NULL);
+
+    /* место под заголовки ELF: 52 + 2*32 = 116 байт, код с 0x80 */
+    for (int i = 0; i < 0x80; i++) buf_byte(&text, 0);
+    unsigned entry = TEXT_BASE + text.len;
+    if (opt_linux) {
+        E("8B 04 24 8D 4C 24 04 51 50");                        /* argc = [esp], argv = esp+4 */
+    } else {
+        E("FF 74 24 08 FF 74 24 08");                           /* ядро: _start(argc, argv) */
+    }
+    E("E8"); sym_ref("main", true);
+    E("50 E8"); sym_ref("exit", true);
+    E("EB FE");
+
+    /* код всех нужных функций */
+    for (Obj *o = prog; o; o = o->next)
+        if (o->is_function && o->body && o->is_live && sym_find(o->name) == o) gen_function(o);
+
+    /* строки и прочие только-для-чтения данные — тоже в сегмент кода */
+    for (Obj *o = prog; o; o = o->next) {
+        if (o->is_function || !o->is_rodata || !o->is_live || sym_find(o->name) != o) continue;
+        while (text.len % (o->align > 4 ? 4 : o->align)) buf_byte(&text, 0);
+        o->section = 1;
+        o->addr = text.len;
+        buf_put(&text, o->init_data, o->ty->size);
+    }
+
+    /* данные: с новой страницы */
+    unsigned data_vaddr = (TEXT_BASE + text.len + 4095) & ~4095u;
+    Buf data = {0};
+    for (Obj *o = prog; o; o = o->next) {
+        if (o->is_function || o->is_rodata || !o->is_live || sym_find(o->name) != o || !o->init_data) continue;
+        int al = o->align < 1 ? 1 : o->align;
+        while (data.len % al) buf_byte(&data, 0);
+        o->section = 2;
+        o->addr = data.len;
+        buf_put(&data, o->init_data, o->ty->size);
+    }
+    if (!data.len) buf_u32(&data, 0);
+    int bss = data.len;
+    for (Obj *o = prog; o; o = o->next) {
+        if (o->is_function || o->is_rodata || !o->is_live || sym_find(o->name) != o || o->init_data) continue;
+        if (o->ty->size < 0) error("'%s' has incomplete type", o->name);
+        int al = o->align < 1 ? 1 : o->align;
+        bss = align_to(bss, al);
+        o->section = 3;
+        o->addr = bss;
+        bss += o->ty->size;
+    }
+
+    /* адреса символов */
+    #define ADDR(o) ((o)->section == 1 ? TEXT_BASE + (o)->addr : data_vaddr + (o)->addr)
+    for (int i = 0; i < n_relocs; i++) {
+        Obj *o = sym_find(relocs[i].name);
+        if (!o || !o->section) error("undefined reference to '%s'", relocs[i].name);
+        unsigned a = ADDR(o);
+        if (relocs[i].rel) put_u32_at(&text, relocs[i].pos, a - (TEXT_BASE + relocs[i].pos + 4));
+        else put_u32_at(&text, relocs[i].pos, a);
+    }
+    for (Obj *o = prog; o; o = o->next) {
+        if (!o->is_live || sym_find(o->name) != o || o->is_function) continue;
+        for (Reloc *r = o->rel; r; r = r->next) {
+            Obj *t = sym_find(r->label);
+            if (!t || !t->section) error("undefined reference to '%s'", r->label);
+            unsigned v = ADDR(t) + r->addend;
+            if (o->section == 1) put_u32_at(&text, o->addr + r->offset, v);
+            else put_u32_at(&data, o->addr + r->offset, v);
+        }
+    }
+
+    /* заголовки ELF */
+    unsigned data_off = (text.len + 4095) & ~4095u;
+    Buf h = {0};
+    buf_put(&h, "\x7f" "ELF\x01\x01\x01\0\0\0\0\0\0\0\0\0", 16);
+    buf_byte(&h, 2); buf_byte(&h, 0);                           /* e_type = EXEC */
+    buf_byte(&h, 3); buf_byte(&h, 0);                           /* e_machine = 386 */
+    buf_u32(&h, 1);                                             /* e_version */
+    buf_u32(&h, entry);
+    buf_u32(&h, 52);                                            /* e_phoff */
+    buf_u32(&h, 0);                                             /* e_shoff */
+    buf_u32(&h, 0);                                             /* e_flags */
+    buf_byte(&h, 52); buf_byte(&h, 0);                          /* e_ehsize */
+    buf_byte(&h, 32); buf_byte(&h, 0);                          /* e_phentsize */
+    buf_byte(&h, 2); buf_byte(&h, 0);                           /* e_phnum */
+    buf_u32(&h, 0);                                             /* shentsize, shnum */
+    buf_byte(&h, 0); buf_byte(&h, 0);                           /* shstrndx */
+    /* сегмент кода: R-X */
+    buf_u32(&h, 1); buf_u32(&h, 0); buf_u32(&h, TEXT_BASE); buf_u32(&h, TEXT_BASE);
+    buf_u32(&h, text.len); buf_u32(&h, text.len); buf_u32(&h, 5); buf_u32(&h, 0x1000);
+    /* сегмент данных: RW- */
+    buf_u32(&h, 1); buf_u32(&h, data_off); buf_u32(&h, data_vaddr); buf_u32(&h, data_vaddr);
+    buf_u32(&h, data.len); buf_u32(&h, bss); buf_u32(&h, 6); buf_u32(&h, 0x1000);
+    memcpy(text.data, h.data, h.len);
+
+    Buf out = {0};
+    buf_put(&out, text.data, text.len);
+    while ((unsigned)out.len < data_off) buf_byte(&out, 0);
+    buf_put(&out, data.data, data.len);
+    write_file(out_path, &out);
+}
