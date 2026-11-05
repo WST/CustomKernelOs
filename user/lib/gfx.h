@@ -52,6 +52,7 @@ struct gfx_info2 {
 #define GFX_CAP_GPU       8         /* копирование/заливку умеет сама видеокарта */
 #define GFX_CAP_GPU_ON    16        /* ...и сейчас она это делает */
 #define GFX_CAP_CURSOR_ON 32
+#define GFX_CAP_ALPHA_CURSOR 64      /* аппаратный курсор с прозрачностью */
 int  gfx_info2(struct gfx_info2 *gi);
 int  gfx_set_mode(int w, int h);    /* 0 или -EINVAL */
 int  gfx_check_mode(void);          /* 1 — разрешение сменилось, буфер пересоздан */
@@ -190,5 +191,10 @@ void gfx_cursor_erase(void);
 #define CURSOR_H 28
 #define CURSOR_HOT_X 2               /* где «кончик» стрелки внутри картинки */
 #define CURSOR_HOT_Y 3
+/* вид курсора (для стола: «тянуть край окна»); gfx_hw_cursor(1) после смены — перезагрузить в карту */
+enum { GFX_CURSOR_ARROW, GFX_CURSOR_RESIZE_H, GFX_CURSOR_RESIZE_V, GFX_CURSOR_RESIZE_D1, GFX_CURSOR_RESIZE_D2 };
+void gfx_cursor_shape(int shape);
+int  gfx_cursor_get_shape(void);
+void gfx_cursor_hot(int *hx, int *hy);  /* «горячая точка» текущего вида */
 
 #endif

@@ -17,8 +17,19 @@
  * Видеокарта: перетаскиваемое окно не перерисовываем, а просим карту сдвинуть
  * его пиксели прямо на экране (gfx_hw_copy) — дорисовываем только открывшиеся
  * куски и тень. Разрешение может смениться в любой момент — тогда пересоздаём
- * обои и раскладку. */
+ * обои и раскладку.
+ *
+ * Окна, которые это разрешили (win_set_resizable), можно растягивать за края
+ * и разворачивать (кнопка, двойной щелчок по заголовку, перетащить к верхнему
+ * краю). Буфер окна при этом новый: стол просит программу (WM_RESIZE), та
+ * заводит общую память нужного размера и присылает её (WM_SETBUF). Пока ответа
+ * нет, рамку рисуем уже нового размера, а недостающее — цветом фона окна.
+ *
+ * В обзоре (Activities) можно сразу печатать — это поиск программ, в том
+ * числе по-русски. Справа в панели — раскладка клавиатуры (en/ru). */
 #include "win.h"
+
+static int iabs(int v) { return v < 0 ? -v : v; }
 
 #define TOPBAR_H  32
 #define HEAD_H    40                    /* заголовок окна */
@@ -34,17 +45,24 @@ static color_t *wallpaper;              /* обои, нарисованные о
 static color_t *back;                   /* сюда собираем кадр */
 static bool hwcur;                      /* курсор рисует видеокарта */
 static int drag = -1;                   /* окно, которое тащим */
+static int capture = -1;                /* окно, где нажали кнопку */
+static int resizing = -1, rs_edges, rs_mx, rs_my, rs_x, rs_y, rs_w, rs_h;   /* тянем край окна */
 static int mouse_x, mouse_y;
 
 /* ------------------------------------------------------------ программы */
 
-struct app { const char *name, *prog; bool fav; };
+struct app { const char *name, *prog; bool fav; const char *keywords; };
 static const struct app apps[] = {
-    { "Browser", "browser", true },     { "Files", "files", true },
-    { "Terminal", "terminal", true },   { "Notepad", "notepad", true },
-    { "Calculator", "calc", true },     { "Paint", "draw", true },
-    { "Minesweeper", "mines", true },   { "Task Manager", "taskmgr", true },
-    { "Display", "display", false },    { "About MyOS", "about", false },
+    { "Browser", "browser", true, "браузер интернет web internet сайт" },
+    { "Files", "files", true, "файлы папки folder" },
+    { "Terminal", "terminal", true, "терминал консоль shell sh командная" },
+    { "Notepad", "notepad", true, "блокнот текст редактор editor text" },
+    { "Calculator", "calc", true, "калькулятор" },
+    { "Paint", "draw", true, "рисование рисовать draw" },
+    { "Minesweeper", "mines", true, "сапёр сапер мины игра game" },
+    { "Task Manager", "taskmgr", true, "диспетчер задач процессы process" },
+    { "Display", "display", false, "экран дисплей разрешение settings настройки" },
+    { "About MyOS", "about", false, "о системе версия" },
 };
 #define N_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
 enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_TASKMGR, APP_DISPLAY, APP_ABOUT };
@@ -59,11 +77,17 @@ struct win {
     int  owner;                         /* pid программы */
     int  shm;
     color_t *px;
-    int  w, h;                          /* размер содержимого */
+    int  w, h;                          /* размер содержимого на экране (рамки) */
+    int  bw, bh;                        /* размер буфера программы (отстаёт, пока она не ответит) */
     int  x, y;                          /* левый верхний угол заголовка */
     char title[40];
     bool minimized;
     int  app;                           /* номер в apps[] или -1 */
+    bool resizable, maximized;
+    int  min_w, min_h;
+    int  rx, ry, rw, rh;                /* куда вернуть из развёрнутого */
+    bool awaiting;                      /* попросили новый буфер, ждём WM_SETBUF */
+    unsigned asked_at;
 };
 
 static struct win wins[MAXWIN];
@@ -125,7 +149,8 @@ static struct rect win_full(struct win *w) {
 }
 static void dirty_win(struct win *w) { add_dirty_r(win_full(w)); }
 static void dirty_head(struct win *w) { add_dirty(w->x - 2, w->y - 2, outer_w(w) + 4, HEAD_H + 2); }
-static void dirty_cursor(int x, int y) { add_dirty(x - CURSOR_HOT_X, y - CURSOR_HOT_Y, CURSOR_W, CURSOR_H); }
+/* с запасом: у стрелки «горячая точка» в углу, у двойных стрелок — в центре */
+static void dirty_cursor(int x, int y) { add_dirty(x - 14, y - 14, CURSOR_W + 16, CURSOR_H + 16); }
 
 /* ------------------------------------------------------------ значки (векторные, сетка 48x48) */
 
@@ -353,11 +378,13 @@ static void make_wallpaper(void) {
 /* ------------------------------------------------------------ верхняя панель */
 
 static char clock_text[40];
-static int hover_top = -1;              /* 0 — Activities, 1 — часы, 2 — системные значки */
+static int hover_top = -1;              /* 0 — Activities, 1 — часы, 2 — системные значки, 3 — раскладка */
+static int kb_lang;                     /* раскладка клавиатуры: 0 en, 1 ru */
 static bool sysmenu_open, overview_open;
 
 static struct rect act_rect(void) { return mkrect(6, 4, text_width(FONT_UI_MEDIUM, 14, "Activities") + 24, TOPBAR_H - 8); }
 static struct rect tray_rect(void) { return mkrect(SW - 108, 4, 100, TOPBAR_H - 8); }
+static struct rect lang_rect(void) { return mkrect(SW - 108 - 46, 4, 42, TOPBAR_H - 8); }
 static struct rect clock_rect(void) {
     int w = text_width(FONT_UI_MEDIUM, 14, clock_text) + 24;
     return mkrect((SW - w) / 2, 4, w, TOPBAR_H - 8);
@@ -401,7 +428,11 @@ static void tray_icons(int x, int y) {
 
 static void draw_topbar(void) {
     gfx_fill_rect(0, 0, SW, TOPBAR_H, TOP_BG);
-    struct rect a = act_rect(), c = clock_rect(), t = tray_rect();
+    struct rect a = act_rect(), c = clock_rect(), t = tray_rect(), l = lang_rect();
+    if (hover_top == 3) gfx_round_rect_a(l.x, l.y, l.w, l.h, l.h / 2, C_WHITE, 36);
+    const char *ls = kb_lang ? "ru" : "en";
+    text_draw(FONT_UI_MEDIUM, 14, l.x + (l.w - text_width(FONT_UI_MEDIUM, 14, ls)) / 2,
+              (TOPBAR_H - text_line_h(FONT_UI_MEDIUM, 14)) / 2, ls, RGB(245, 245, 245));
     if (hover_top == 0 || overview_open) gfx_round_rect_a(a.x, a.y, a.w, a.h, a.h / 2, C_WHITE, overview_open ? 60 : 36);
     if (hover_top == 1) gfx_round_rect_a(c.x, c.y, c.w, c.h, c.h / 2, C_WHITE, 36);
     if (hover_top == 2 || sysmenu_open) gfx_round_rect_a(t.x, t.y, t.w, t.h, t.h / 2, C_WHITE, sysmenu_open ? 60 : 36);
@@ -584,6 +615,53 @@ static int hover_ov = -1;
 #define OV_CELL_H 132
 #define OV_ICON   72
 
+/* поиск: что напечатано и какие программы подходят */
+static char search[64];
+static int  search_len;
+static int  ov_list[N_APPS], ov_n, ov_sel;
+static bool ov_kbd;                     /* выбирали стрелками — показать выбранное */
+
+static int lower_cp(int c) {
+    if (c >= 'A' && c <= 'Z') return c + 32;
+    if (c >= 0x410 && c <= 0x42F) return c + 0x20;                /* А-Я */
+    if (c == 0x401 || c == 0x451) return 0x435;                   /* Ё, ё -> е */
+    return c;
+}
+
+static int decode_lower(const char *s, int *out, int max) {
+    int n = 0;
+    while (*s && n < max) out[n++] = lower_cp(utf8_next(&s));
+    return n;
+}
+
+static bool contains(const char *hay, const int *nd, int nn) {
+    int h[160];
+    int hn = decode_lower(hay, h, 160);
+    for (int i = 0; i + nn <= hn; i++) {
+        if (i > 0 && h[i - 1] != ' ') continue;                   /* только с начала слова */
+        int k = 0;
+        while (k < nn && h[i + k] == nd[k]) k++;
+        if (k == nn) return true;
+    }
+    return false;
+}
+
+static void ov_filter(void) {
+    int nd[64];
+    int nn = decode_lower(search, nd, 64);
+    ov_n = 0;
+    for (int a = 0; a < N_APPS; a++)
+        if (!nn || contains(apps[a].name, nd, nn) || contains(apps[a].prog, nd, nn) || contains(apps[a].keywords, nd, nn))
+            ov_list[ov_n++] = a;
+    ov_sel = 0;
+}
+
+#define OV_TOP 96                       /* сверху — поле поиска */
+static struct rect search_rect(void) {
+    int w = 380;
+    return mkrect(DOCK_W + (SW - DOCK_W - w) / 2, TOPBAR_H + 26, w, 40);
+}
+
 static int ov_cols(void) {
     int c = (SW - DOCK_W - 80) / OV_CELL_W;
     if (c > 6) c = 6;
@@ -591,10 +669,13 @@ static int ov_cols(void) {
     return c;
 }
 
-static struct rect ov_cell(int i) {
-    int cols = ov_cols(), rows = (N_APPS + cols - 1) / cols;
+static struct rect ov_cell(int i) {                               /* i — номер среди найденных */
+    int cols = ov_cols(), rows = (ov_n + cols - 1) / cols;
+    if (rows < 1) rows = 1;
     int gw = cols * OV_CELL_W, gh = rows * OV_CELL_H;
-    int x0 = DOCK_W + (SW - DOCK_W - gw) / 2, y0 = TOPBAR_H + (SH - TOPBAR_H - gh) / 2;
+    int top = TOPBAR_H + OV_TOP;
+    int x0 = DOCK_W + (SW - DOCK_W - gw) / 2, y0 = top + (SH - top - gh) / 3;
+    if (y0 < top) y0 = top;
     return mkrect(x0 + (i % cols) * OV_CELL_W, y0 + (i / cols) * OV_CELL_H, OV_CELL_W, OV_CELL_H);
 }
 
@@ -629,20 +710,50 @@ static void draw_overview(struct rect r) {
             out[x] = gfx_mix(gfx_mix(r0[x0], r0[x1], wx), gfx_mix(r1[x0], r1[x1], wx), wy);
         }
     }
-    for (int i = 0; i < N_APPS; i++) {
+    /* поле поиска */
+    struct rect sr = search_rect();
+    if (intersect(r, sr, NULL)) {
+        gfx_round_rect_a(sr.x, sr.y, sr.w, sr.h, sr.h / 2, C_WHITE, search_len ? 44 : 30);
+        int mx = sr.x + 22, my = sr.y + sr.h / 2;                 /* лупа */
+        for (int k = 0; k < 24; k++) {                            /* кольцо отрезками */
+            static const short cs[25] = { 256, 247, 222, 181, 128, 66, 0, -66, -128, -181, -222, -247,
+                                          -256, -247, -222, -181, -128, -66, 0, 66, 128, 181, 222, 247, 256 };
+            int k2 = (k + 1) % 24, c0 = cs[k], s0 = cs[(k + 18) % 24], c1 = cs[k2], s1 = cs[(k2 + 18) % 24];
+            gfx_line16((mx - 1) * 16 + c0 * 5 * 16 / 256, (my - 2) * 16 + s0 * 5 * 16 / 256,
+                       (mx - 1) * 16 + c1 * 5 * 16 / 256, (my - 2) * 16 + s1 * 5 * 16 / 256, 30, RGB(235, 235, 235), 255);
+        }
+        gfx_line16((mx + 3) * 16, (my + 2) * 16, (mx + 8) * 16, (my + 7) * 16, 36, RGB(235, 235, 235), 255);
+        int tx = sr.x + 42, ty = sr.y + (sr.h - text_line_h(FONT_UI, 15)) / 2;
+        if (search_len) {
+            int tw = text_draw_fit(FONT_UI, 15, tx, ty, search, sr.w - 62, RGB(250, 250, 250));
+            if (tw > sr.w - 62) tw = sr.w - 62;
+            gfx_fill_rect(tx + tw + 1, sr.y + 10, 2, sr.h - 20, RGB(250, 250, 250));      /* каретка */
+        } else {
+            text_draw(FONT_UI, 15, tx, ty, "Type to search", RGB(190, 190, 190));
+        }
+    }
+    if (!ov_n) {
+        const char *s = "No results";
+        struct rect c = ov_cell(0);
+        text_draw(FONT_UI_MEDIUM, 18, DOCK_W + (SW - DOCK_W - text_width(FONT_UI_MEDIUM, 18, s)) / 2, c.y + 40, s,
+                  RGB(220, 220, 220));
+    }
+    for (int i = 0; i < ov_n; i++) {
         struct rect c = ov_cell(i);
         if (!intersect(r, c, NULL)) continue;
-        if (i == hover_ov) gfx_round_rect_a(c.x + 6, c.y + 6, c.w - 12, c.h - 12, 16, C_WHITE, 34);
+        int app = ov_list[i];
+        bool sel = (search_len || ov_kbd) && i == ov_sel;
+        if (i == hover_ov || sel) gfx_round_rect_a(c.x + 6, c.y + 6, c.w - 12, c.h - 12, 16, C_WHITE, sel ? 52 : 34);
         int ix = c.x + (c.w - OV_ICON) / 2, iy = c.y + 14;
-        gfx_draw_argb(ix, iy, app_icon(i, 1, OV_ICON), OV_ICON, OV_ICON);
-        const char *s = apps[i].name;
+        gfx_draw_argb(ix, iy, app_icon(app, 1, OV_ICON), OV_ICON, OV_ICON);
+        const char *s = apps[app].name;
         int tw = text_width(FONT_UI, 14, s);
         text_draw(FONT_UI, 14, c.x + (c.w - tw) / 2, iy + OV_ICON + 12, s, RGB(245, 245, 245));
     }
 }
 
-static int overview_at(int x, int y) {
-    for (int i = 0; i < N_APPS; i++) {
+static int overview_at(int x, int y) {                            /* -> номер среди найденных */
+    for (int i = 0; i < ov_n; i++) {
         struct rect c = ov_cell(i);
         if (ui_inside(x, y, c.x + 6, c.y + 6, c.w - 12, c.h - 12)) return i;
     }
@@ -651,32 +762,50 @@ static int overview_at(int x, int y) {
 
 /* ------------------------------------------------------------ рамки окон */
 
-static int hover_close = -1, hover_min = -1;
+static int hover_close = -1, hover_min = -1, hover_max = -1;
 
-static void btn_centers(struct win *w, int *close_x, int *min_x, int *cy) {
+/* кнопки справа: закрыть, развернуть (только у растягиваемых), свернуть */
+static void btn_centers(struct win *w, int *close_x, int *max_x, int *min_x, int *cy) {
     int right = w->x + outer_w(w);
     *close_x = right - 8 - BTN_R;
-    *min_x = *close_x - 2 * BTN_R - 10;
+    if (w->resizable) { *max_x = *close_x - 2 * BTN_R - 10; *min_x = *max_x - 2 * BTN_R - 10; }
+    else { *max_x = -10000; *min_x = *close_x - 2 * BTN_R - 10; }
     *cy = w->y + HEAD_H / 2;
 }
+
+/* 0 — мимо, 1 — закрыть, 2 — развернуть, 3 — свернуть */
+static int head_button(struct win *w, int x, int y) {
+    int cxc, cxx, cxm, cy;
+    btn_centers(w, &cxc, &cxx, &cxm, &cy);
+    int r2 = (BTN_R + 2) * (BTN_R + 2), dy = y - cy;
+    if ((x - cxc) * (x - cxc) + dy * dy <= r2) return 1;
+    if ((x - cxx) * (x - cxx) + dy * dy <= r2) return 2;
+    if ((x - cxm) * (x - cxm) + dy * dy <= r2) return 3;
+    return 0;
+}
+
+static int win_radius(struct win *w) { return w->maximized ? 0 : RADIUS; }
 
 static void draw_frame(int idx) {
     struct win *w = &wins[idx];
     bool active = idx == focus;
-    int ow = outer_w(w), oh = outer_h(w);
-    /* тень и тонкая обводка */
-    gfx_shadow(w->x, w->y, ow, oh, RADIUS, active ? SH_BLUR : SH_BLUR - 6, active ? SH_DY : 2,
-               active ? 120 : 70, w->x, w->y, ow, oh);
-    gfx_round_rect_ex(w->x - 1, w->y - 1, ow + 2, RADIUS + 2, RADIUS + 1, 3, C_BLACK, 40);
-    gfx_fill_rect_a(w->x - 1, w->y + RADIUS + 1, 1, oh - RADIUS, C_BLACK, 40);
-    gfx_fill_rect_a(w->x + ow, w->y + RADIUS + 1, 1, oh - RADIUS, C_BLACK, 40);
-    gfx_fill_rect_a(w->x - 1, w->y + oh, ow + 2, 1, C_BLACK, 40);
+    int ow = outer_w(w), oh = outer_h(w), rad = win_radius(w);
+    /* тень и тонкая обводка (у развёрнутого — не нужны: вокруг панель и док) */
+    if (!w->maximized) {
+        gfx_shadow(w->x, w->y, ow, oh, RADIUS, active ? SH_BLUR : SH_BLUR - 6, active ? SH_DY : 2,
+                   active ? 120 : 70, w->x, w->y, ow, oh);
+        gfx_round_rect_ex(w->x - 1, w->y - 1, ow + 2, RADIUS + 2, RADIUS + 1, 3, C_BLACK, 40);
+        gfx_fill_rect_a(w->x - 1, w->y + RADIUS + 1, 1, oh - RADIUS, C_BLACK, 40);
+        gfx_fill_rect_a(w->x + ow, w->y + RADIUS + 1, 1, oh - RADIUS, C_BLACK, 40);
+        gfx_fill_rect_a(w->x - 1, w->y + oh, ow + 2, 1, C_BLACK, 40);
+    }
     /* заголовок */
     color_t hb = active ? RGB(235, 235, 235) : RGB(250, 250, 250);
-    gfx_round_rect_ex(w->x, w->y, ow, HEAD_H, RADIUS, 3, hb, 255);
+    if (rad) gfx_round_rect_ex(w->x, w->y, ow, HEAD_H, rad, 3, hb, 255);
+    else gfx_fill_rect(w->x, w->y, ow, HEAD_H, hb);
     gfx_fill_rect(w->x, w->y + HEAD_H - 1, ow, 1, active ? RGB(214, 214, 214) : RGB(228, 228, 228));
-    int cxc, cxm, cy;
-    btn_centers(w, &cxc, &cxm, &cy);
+    int cxc, cxx, cxm, cy;
+    btn_centers(w, &cxc, &cxx, &cxm, &cy);
     color_t ic = active ? RGB(46, 52, 54) : RGB(150, 150, 150);
     /* закрыть */
     bool hc = hover_close == idx;
@@ -684,8 +813,20 @@ static void draw_frame(int idx) {
     color_t xc = hc ? C_WHITE : ic;
     gfx_line16((cxc - 4) * 16, (cy - 4) * 16, (cxc + 4) * 16, (cy + 4) * 16, 26, xc, 255);
     gfx_line16((cxc + 4) * 16, (cy - 4) * 16, (cxc - 4) * 16, (cy + 4) * 16, 26, xc, 255);
+    /* развернуть: квадрат; у развёрнутого — два квадрата («вернуть») */
+    if (w->resizable) {
+        if (hover_max == idx) gfx_disc16(cxx * 16, cy * 16, BTN_R * 16, active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+        int q = w->maximized ? 3 : 4, ox = w->maximized ? -1 : 0, oy = w->maximized ? 1 : 0;
+        int x0 = (cxx - q + ox) * 16, y0 = (cy - q + oy) * 16, x1 = (cxx + q + ox) * 16, y1 = (cy + q + oy) * 16;
+        gfx_line16(x0, y0, x1, y0, 24, ic, 255); gfx_line16(x1, y0, x1, y1, 24, ic, 255);
+        gfx_line16(x1, y1, x0, y1, 24, ic, 255); gfx_line16(x0, y1, x0, y0, 24, ic, 255);
+        if (w->maximized) {                                       /* задний квадрат: только видимые края */
+            gfx_line16(x0 + 48, y0 - 48, x1 + 48, y0 - 48, 24, ic, 255);
+            gfx_line16(x1 + 48, y0 - 48, x1 + 48, y1 - 48, 24, ic, 255);
+        }
+    }
     /* свернуть */
-    if (hover_min == idx) gfx_disc16(cxm * 16, cy * 16, BTN_R * 16, RGB(214, 214, 214), 255);
+    if (hover_min == idx) gfx_disc16(cxm * 16, cy * 16, BTN_R * 16, active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
     gfx_line16((cxm - 5) * 16, (cy + 3) * 16 + 8, (cxm + 5) * 16, (cy + 3) * 16 + 8, 26, ic, 255);
     /* название — по центру, жирным */
     int pad = w->x + ow - (cxm - BTN_R) + 8;                     /* справа заняты кнопки — столько же слева */
@@ -713,9 +854,18 @@ static void compose(struct rect r) {
             if (!intersect(r, win_full(w), NULL)) continue;
             draw_frame(zorder[k]);
             struct rect cr = { w->x, w->y + HEAD_H, w->w, w->h }, part;
-            if (intersect(r, cr, &part))                          /* содержимое — только нужный кусок */
-                for (int y = part.y; y < part.y + part.h; y++)
-                    memcpy(back + y * SW + part.x, w->px + (y - cr.y) * w->w + (part.x - cr.x), part.w * 4);
+            if (intersect(r, cr, &part)) {                        /* содержимое — только нужный кусок */
+                color_t fill = w->px[w->bw * w->bh - 1];          /* буфер ещё старого размера — добить фоном */
+                for (int y = part.y; y < part.y + part.h; y++) {
+                    int ly = y - cr.y, lx = part.x - cr.x, n = 0;
+                    color_t *d = back + y * SW + part.x;
+                    if (ly < w->bh && lx < w->bw) {
+                        n = w->bw - lx < part.w ? w->bw - lx : part.w;
+                        memcpy(d, w->px + ly * w->bw + lx, n * 4);
+                    }
+                    for (; n < part.w; n++) d[n] = fill;
+                }
+            }
         }
     }
     if (intersect(r, dock_rect(), NULL)) draw_dock();
@@ -723,7 +873,7 @@ static void compose(struct rect r) {
     if (sysmenu_open && intersect(r, mkrect(SW - SM_W - 40, TOPBAR_H, SM_W + 40, sysmenu_rect().h + 30), NULL)) draw_sysmenu();
     if (intersect(r, tip_rect(), NULL)) draw_tip();
     gfx_no_clip();
-    struct rect cur = { mouse_x - CURSOR_HOT_X, mouse_y - CURSOR_HOT_Y, CURSOR_W, CURSOR_H };
+    struct rect cur = { mouse_x - 14, mouse_y - 14, CURSOR_W + 16, CURSOR_H + 16 };
     if (!hwcur && intersect(r, cur, NULL)) {
         gfx_set_clip(r.x, r.y, r.w, r.h);
         gfx_cursor_draw(mouse_x, mouse_y);
@@ -791,7 +941,10 @@ static void remove_window(int idx) {
     nz = j;
     if (hover_close == idx) hover_close = -1;
     if (hover_min == idx) hover_min = -1;
+    if (hover_max == idx) hover_max = -1;
     if (drag == idx) drag = -1;
+    if (resizing == idx) resizing = -1;
+    if (capture == idx) capture = -1;
     if (focus == idx) { focus = -1; set_focus(top_visible()); }
     hover_dock = -1;
     dock_changed();
@@ -828,6 +981,85 @@ static void fit_window(struct win *w) {
 
 static void close_popups(void);
 
+/* ------------------------------------------------------------ размер окон */
+
+/* попросить у программы буфер под нынешний размер рамки (по одной просьбе за раз) */
+static void request_buffer(int idx) {
+    struct win *w = &wins[idx];
+    if (w->awaiting || (w->w == w->bw && w->h == w->bh)) return;
+    send(w->owner, WM_RESIZE, idx, w->w, w->h, 0);
+    w->awaiting = true;
+    w->asked_at = ticks();
+}
+
+static void set_geometry(int idx, int x, int y, int cw, int ch) {
+    struct win *w = &wins[idx];
+    if (x == w->x && y == w->y && cw == w->w && ch == w->h) return;
+    if (!w->minimized) dirty_win(w);
+    w->x = x; w->y = y; w->w = cw; w->h = ch;
+    if (!w->minimized) dirty_win(w);
+    request_buffer(idx);
+}
+
+static void maximize(int idx, bool on) {
+    struct win *w = &wins[idx];
+    if (!w->resizable || on == w->maximized) return;
+    dirty_win(w);
+    if (on) {
+        w->rx = w->x; w->ry = w->y; w->rw = w->w; w->rh = w->h;
+        w->maximized = true;
+        set_geometry(idx, DOCK_W, TOPBAR_H, SW - DOCK_W, SH - TOPBAR_H - HEAD_H);
+    } else {
+        w->maximized = false;
+        set_geometry(idx, w->rx, w->ry, w->rw, w->rh);
+    }
+    dirty_win(w);
+}
+
+/* края окна, за которые тянут: где мышь — какие края (E_*) и у какого окна */
+#define EDGE_OUT 8                      /* снаружи окна (в тени) */
+#define EDGE_IN  4                      /* и чуть внутри */
+#define CORNER   18                     /* у углов зона длиннее */
+enum { E_L = 1, E_R = 2, E_T = 4, E_B = 8 };
+
+static int edge_at(int px, int py, int *widx) {
+    if (overview_open || py < TOPBAR_H || px < DOCK_W) return 0;
+    for (int k = nz - 1; k >= 0; k--) {
+        struct win *w = &wins[zorder[k]];
+        if (w->minimized) continue;
+        int ox = w->x, oy = w->y, ow = outer_w(w), oh = outer_h(w);
+        if (!ui_inside(px, py, ox - EDGE_OUT, oy - EDGE_OUT, ow + 2 * EDGE_OUT, oh + 2 * EDGE_OUT)) continue;
+        bool inside = ui_inside(px, py, ox, oy, ow, oh);
+        if (!w->resizable || w->maximized) { if (inside) return 0; continue; }
+        int e = 0;
+        if (px < ox + EDGE_IN) e |= E_L;
+        if (px >= ox + ow - EDGE_IN) e |= E_R;
+        if (py < oy + 3) e |= E_T;
+        if (py >= oy + oh - EDGE_IN) e |= E_B;
+        if (e & (E_L | E_R)) { if (py < oy + CORNER) e |= E_T; if (py >= oy + oh - CORNER) e |= E_B; }
+        if (e & (E_T | E_B)) { if (px < ox + CORNER) e |= E_L; if (px >= ox + ow - CORNER) e |= E_R; }
+        if (!e) return 0;                                         /* внутри окна */
+        *widx = zorder[k];
+        return e;
+    }
+    return 0;
+}
+
+static int edge_cursor(int e) {
+    if (e == (E_L | E_T) || e == (E_R | E_B)) return GFX_CURSOR_RESIZE_D1;
+    if (e == (E_R | E_T) || e == (E_L | E_B)) return GFX_CURSOR_RESIZE_D2;
+    if (e & (E_L | E_R)) return GFX_CURSOR_RESIZE_H;
+    if (e & (E_T | E_B)) return GFX_CURSOR_RESIZE_V;
+    return GFX_CURSOR_ARROW;
+}
+
+static void set_cursor_shape(int shape) {
+    if (shape == gfx_cursor_get_shape()) return;
+    dirty_cursor(mouse_x, mouse_y);
+    gfx_cursor_shape(shape);
+    if (hwcur) gfx_hw_cursor(1);                                  /* новая картинка — в карту */
+}
+
 /* сменилось разрешение экрана */
 static void screen_resized(void) {
     SW = gfx_w; SH = gfx_h;
@@ -838,7 +1070,14 @@ static void screen_resized(void) {
     if (overview_open) { overview_open = false; free(overview_bg); overview_bg = NULL; }
     drag = -1;
     dock_build();
-    for (int i = 0; i < MAXWIN; i++) if (wins[i].used) fit_window(&wins[i]);
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!wins[i].used) continue;
+        if (wins[i].maximized) {
+            wins[i].x = DOCK_W; wins[i].y = TOPBAR_H;
+            wins[i].w = SW - DOCK_W; wins[i].h = SH - TOPBAR_H - HEAD_H;
+            request_buffer(i);
+        } else fit_window(&wins[i]);
+    }
     struct mouse ms;
     mouse_get(&ms);
     mouse_x = ms.x; mouse_y = ms.y;
@@ -877,7 +1116,7 @@ static void move_window(struct win *w, int nx, int ny) {
                 dirty_minus(old_full, dst);
                 dirty_minus(win_full(w), dst);
                 if (!hwcur) {                                     /* курсор уехал вместе с окном — вернуть */
-                    add_dirty(mouse_x + dx - CURSOR_HOT_X - 1, mouse_y + dy - CURSOR_HOT_Y - 1, CURSOR_W + 2, CURSOR_H + 2);
+                    dirty_cursor(mouse_x + dx, mouse_y + dy);
                     dirty_cursor(mouse_x, mouse_y);
                 }
             }
@@ -923,7 +1162,7 @@ static void handle_msg(struct msg *m) {
         w->owner = m->from;
         w->shm = m->a;
         w->px = px;
-        w->w = m->b; w->h = m->c;
+        w->w = w->bw = m->b; w->h = w->bh = m->c;
         memcpy(w->title, m->data, 39);
         w->title[39] = 0;
         w->app = app_by_pid(m->from);
@@ -946,7 +1185,7 @@ static void handle_msg(struct msg *m) {
         struct win *w = &wins[m->a];
         if (w->minimized || overview_open) return;
         int rw = m->d & 0xFFFF, rh = (m->d >> 16) & 0xFFFF;
-        struct rect r = { m->b, m->c, rw, rh }, all = { 0, 0, w->w, w->h };
+        struct rect r = { m->b, m->c, rw, rh }, all = { 0, 0, w->w < w->bw ? w->w : w->bw, w->h < w->bh ? w->h : w->bh };
         if (!intersect(r, all, &r)) return;
         add_dirty(w->x + r.x, w->y + HEAD_H + r.y, r.w, r.h);
         return;
@@ -962,6 +1201,29 @@ static void handle_msg(struct msg *m) {
         if (m->a < 0 || m->a >= MAXWIN || !wins[m->a].used || wins[m->a].owner != m->from) return;
         remove_window(m->a);
         return;
+    case WM_RESIZABLE: {
+        if (m->a < 0 || m->a >= MAXWIN || !wins[m->a].used || wins[m->a].owner != m->from) return;
+        struct win *w = &wins[m->a];
+        w->resizable = true;
+        w->min_w = m->b < 120 ? 120 : m->b;
+        w->min_h = m->c < 60 ? 60 : m->c;
+        dirty_head(w);
+        return;
+    }
+    case WM_SETBUF: {                                             /* программа завела буфер нового размера */
+        if (m->a < 0 || m->a >= MAXWIN || !wins[m->a].used || wins[m->a].owner != m->from) return;
+        struct win *w = &wins[m->a];
+        w->awaiting = false;
+        if (m->c <= 0 || m->d <= 0 || m->c > 2560 || m->d > 1600) return;
+        color_t *px = shm_map(m->b);
+        if (!px) return;
+        shm_unmap(w->px);
+        w->px = px; w->shm = m->b;
+        w->bw = m->c; w->bh = m->d;
+        if (!w->minimized && !overview_open) add_dirty(w->x, w->y + HEAD_H, w->w, w->h);
+        request_buffer(m->a);                                     /* пока ждали, рамку могли ещё растянуть */
+        return;
+    }
     case WM_DISPLAY:                                              /* Display / mode: курсор */
         set_hw_cursor(m->a != 0);
         return;
@@ -1023,8 +1285,9 @@ static void update_clock(void) {
 
 /* ------------------------------------------------------------ мышь */
 
-static int drag_dx, drag_dy;
-static int capture = -1;                                          /* окно, где нажали кнопку */
+static int drag_dx, drag_dy, drag_px, drag_py;
+static unsigned last_click_t;                                     /* двойной щелчок по заголовку */
+static int last_click_win = -1, last_click_x, last_click_y;
 static unsigned prev_buttons;
 static bool quit;
 
@@ -1073,6 +1336,9 @@ static void set_overview(bool on) {
         make_overview_bg();
         if (!overview_bg) return;
         hover_ov = -1;
+        search[0] = 0; search_len = 0;
+        ov_kbd = false;
+        ov_filter();
     } else {
         free(overview_bg);
         overview_bg = NULL;
@@ -1082,6 +1348,47 @@ static void set_overview(bool on) {
 }
 
 static void close_popups(void) { close_sysmenu(); }
+
+/* клавиши в обзоре: печать — поиск, Enter — запустить, стрелки — выбрать */
+static void overview_key(int k) {
+    struct rect area = mkrect(DOCK_W, TOPBAR_H, SW - DOCK_W, SH - TOPBAR_H);
+    if (k == 27) {
+        if (search_len) { search[0] = 0; search_len = 0; ov_filter(); add_dirty_r(area); }
+        else set_overview(false);
+        return;
+    }
+    if (k == '\r' || k == '\n') {
+        if (ov_n) { int a = ov_list[ov_sel]; set_overview(false); launch(a); }
+        return;
+    }
+    if (k == KEY_LEFT || k == KEY_RIGHT || k == KEY_UP || k == KEY_DOWN) {
+        if (!ov_n) return;
+        int d = k == KEY_LEFT ? -1 : k == KEY_RIGHT ? 1 : k == KEY_UP ? -ov_cols() : ov_cols();
+        int n = ov_sel + d;
+        if (n < 0 || n >= ov_n) return;
+        ov_kbd = true;
+        add_dirty_r(ov_cell(ov_sel));
+        ov_sel = n;
+        add_dirty_r(ov_cell(ov_sel));
+        return;
+    }
+    if (k == 8 || k == 127) {
+        if (!search_len) return;
+        search_len--;
+        while (search_len > 0 && ((unsigned char)search[search_len] & 0xC0) == 0x80) search_len--;
+        search[search_len] = 0;
+    } else if ((k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS))) {
+        char u[4];
+        int n = utf8_put(u, k);
+        if (search_len + n >= (int)sizeof(search)) return;
+        memcpy(search + search_len, u, n);
+        search_len += n;
+        search[search_len] = 0;
+    } else return;
+    ov_filter();
+    hover_ov = -1;
+    add_dirty_r(area);
+}
 
 static void dock_click(int i) {
     if (i == n_dock) { set_overview(!overview_open); return; }
@@ -1111,7 +1418,8 @@ static void mouse_down(int x, int y) {
         if (ui_inside(x, y, tray_rect().x, 0, tray_rect().w, TOPBAR_H)) return;
     }
     if (y < TOPBAR_H) {                                           /* верхняя панель */
-        struct rect a = act_rect(), t = tray_rect();
+        struct rect a = act_rect(), t = tray_rect(), l = lang_rect();
+        if (ui_inside(x, y, l.x, 0, l.w, TOPBAR_H)) { kb_lang = kblayout(!kb_lang); add_dirty(0, 0, SW, TOPBAR_H); return; }
         if (x < a.x + a.w) set_overview(!overview_open);
         else if (x >= t.x) {
             sysmenu_open = true;
@@ -1125,10 +1433,20 @@ static void mouse_down(int x, int y) {
     int d = dock_at(x, y);
     if (d >= 0) { dock_click(d); return; }
     if (d == -1) return;
+    int ew, e = edge_at(x, y, &ew);
+    if (e) {                                                      /* тянем край окна */
+        struct win *w = &wins[ew];
+        raise(ew);
+        resizing = ew; rs_edges = e;
+        rs_mx = x; rs_my = y;
+        rs_x = w->x; rs_y = w->y; rs_w = w->w; rs_h = w->h;
+        return;
+    }
     if (overview_open) {
+        if (ui_inside(x, y, search_rect().x, search_rect().y, search_rect().w, search_rect().h)) return;
         int a = overview_at(x, y);
         set_overview(false);
-        if (a >= 0) launch(a);
+        if (a >= 0) launch(ov_list[a]);
         return;
     }
     int idx = window_at(x, y);
@@ -1136,15 +1454,22 @@ static void mouse_down(int x, int y) {
         struct win *w = &wins[idx];
         raise(idx);
         if (y < w->y + HEAD_H) {                                  /* заголовок */
-            int cxc, cxm, cy;
-            btn_centers(w, &cxc, &cxm, &cy);
-            int ddx = x - cxc, ddy = y - cy;
-            if (ddx * ddx + ddy * ddy <= (BTN_R + 2) * (BTN_R + 2)) { send(w->owner, WM_CLOSE, idx, 0, 0, 0); return; }
-            ddx = x - cxm;
-            if (ddx * ddx + ddy * ddy <= (BTN_R + 2) * (BTN_R + 2)) { minimize(idx); return; }
+            int b = head_button(w, x, y);
+            if (b == 1) { send(w->owner, WM_CLOSE, idx, 0, 0, 0); return; }
+            if (b == 2) { maximize(idx, !w->maximized); return; }
+            if (b == 3) { minimize(idx); return; }
+            unsigned now = ticks();
+            if (w->resizable && last_click_win == idx && now - last_click_t < 450 &&
+                iabs(x - last_click_x) < 6 && iabs(y - last_click_y) < 6) {
+                last_click_win = -1;
+                maximize(idx, !w->maximized);
+                return;
+            }
+            last_click_win = idx; last_click_t = now; last_click_x = x; last_click_y = y;
             drag = idx;
             drag_dx = x - w->x;
             drag_dy = y - w->y;
+            drag_px = x; drag_py = y;
             return;
         }
         capture = idx;
@@ -1156,6 +1481,34 @@ static void mouse_down(int x, int y) {
 
 static void mouse_move(int ox, int oy, int x, int y) {
     if (!hwcur) { dirty_cursor(ox, oy); dirty_cursor(x, y); }
+    if (resizing >= 0) {
+        struct win *w = &wins[resizing];
+        int dx = x - rs_mx, dy = y - rs_my;
+        int nw = rs_w, nh = rs_h;
+        if (rs_edges & E_R) nw = rs_w + dx;
+        if (rs_edges & E_L) nw = rs_w - dx;
+        if (rs_edges & E_B) nh = rs_h + dy;
+        if (rs_edges & E_T) nh = rs_h - dy;
+        if (nw < w->min_w) nw = w->min_w;
+        if (nh < w->min_h) nh = w->min_h;
+        if (nw > 2560) nw = 2560;
+        if (nh > 1600) nh = 1600;
+        int nx = rs_edges & E_L ? rs_x + rs_w - nw : rs_x;
+        int ny = rs_edges & E_T ? rs_y + rs_h - nh : rs_y;
+        if (ny < TOPBAR_H) { nh -= TOPBAR_H - ny; ny = TOPBAR_H; }
+        set_geometry(resizing, nx, ny, nw, nh);
+        return;
+    }
+    if (drag >= 0 && wins[drag].maximized) {                      /* потянули развёрнутое — вернуть размер */
+        struct win *w = &wins[drag];
+        if (iabs(x - drag_px) < 8 && iabs(y - drag_py) < 8) return;
+        int ratio = drag_dx * 256 / (w->w > 0 ? w->w : 1);
+        maximize(drag, false);
+        int nx = x - ratio * w->w / 256, ny = y - drag_dy;
+        drag_dx = x - nx;
+        set_geometry(drag, nx, ny < TOPBAR_H ? TOPBAR_H : ny, w->w, w->h);
+        return;
+    }
     if (drag >= 0) {
         struct win *w = &wins[drag];
         int nx = x - drag_dx, ny = y - drag_dy;
@@ -1174,9 +1527,11 @@ static void mouse_move(int ox, int oy, int x, int y) {
     int ht = -1;
     if (y < TOPBAR_H) {
         struct rect a = act_rect(), c = clock_rect(), t = tray_rect();
+        struct rect l = lang_rect();
         if (x < a.x + a.w) ht = 0;
         else if (ui_inside(x, y, c.x, 0, c.w, TOPBAR_H)) ht = 1;
         else if (x >= t.x) ht = 2;
+        else if (ui_inside(x, y, l.x, 0, l.w, TOPBAR_H)) ht = 3;
     }
     set_hover_top(ht);
     int d = dock_at(x, y);
@@ -1184,23 +1539,23 @@ static void mouse_move(int ox, int oy, int x, int y) {
     if (overview_open) {
         int a = overview_at(x, y);
         if (a != hover_ov) {
-            if (hover_ov >= 0) add_dirty_r(ov_cell(hover_ov));
+            if (hover_ov >= 0 && hover_ov < ov_n) add_dirty_r(ov_cell(hover_ov));
             hover_ov = a;
             if (a >= 0) add_dirty_r(ov_cell(a));
         }
         return;
     }
-    int idx = window_at(x, y);
-    int hc = -1, hm = -1;
+    int ew, e = edge_at(x, y, &ew);
+    set_cursor_shape(edge_cursor(e));
+    int idx = e ? -1 : window_at(x, y);
+    int hc = -1, hm = -1, hx = -1;
     if (idx >= 0 && y < wins[idx].y + HEAD_H) {
-        int cxc, cxm, cy;
-        btn_centers(&wins[idx], &cxc, &cxm, &cy);
-        int ddy = y - cy;
-        if ((x - cxc) * (x - cxc) + ddy * ddy <= (BTN_R + 2) * (BTN_R + 2)) hc = idx;
-        else if ((x - cxm) * (x - cxm) + ddy * ddy <= (BTN_R + 2) * (BTN_R + 2)) hm = idx;
+        int b = head_button(&wins[idx], x, y);
+        if (b == 1) hc = idx; else if (b == 2) hx = idx; else if (b == 3) hm = idx;
     }
     set_hover(&hover_close, hc);
     set_hover(&hover_min, hm);
+    set_hover(&hover_max, hx);
     int target = capture >= 0 ? capture : (idx == focus ? idx : -1);
     if (target >= 0 && wins[target].used) {
         struct win *w = &wins[target];
@@ -1211,6 +1566,12 @@ static void mouse_move(int ox, int oy, int x, int y) {
 }
 
 static void mouse_up(int x, int y) {
+    if (resizing >= 0) { request_buffer(resizing); resizing = -1; }
+    if (drag >= 0 && y < TOPBAR_H + 2 && wins[drag].resizable && !wins[drag].maximized) {
+        struct win *w = &wins[drag];                              /* дотащили до верха — развернуть */
+        w->y = TOPBAR_H;
+        maximize(drag, true);
+    }
     drag = -1;
     if (capture >= 0 && wins[capture].used) {
         struct win *w = &wins[capture];
@@ -1236,6 +1597,7 @@ int main(void) {
     mouse_x = ms.x; mouse_y = ms.y;
     prev_buttons = ms.buttons;
     update_clock();
+    kb_lang = kblayout(-1);
     int cw, ch, want_hw = 0;
     if (gfx_load_config(&cw, &ch, &want_hw) == 0 && want_hw) set_hw_cursor(true);
     add_dirty(0, 0, SW, SH);
@@ -1272,13 +1634,18 @@ int main(void) {
         /* режим терминала общий на всех: если кто-то (оболочка в консоли) его сменил,
          * readkey() заснул бы до нажатия клавиши — возвращаем свой */
         ttymode(TTY_RAW | TTY_NONBLOCK | TTY_NOSIG);
+        int lang = kblayout(-1);                                  /* Alt+Shift переключили в ядре */
+        if (lang != kb_lang) { kb_lang = lang; add_dirty(0, 0, SW, TOPBAR_H); }
         int k;
         while ((k = readkey()) > 0) {
-            if (k == 27 && (sysmenu_open || overview_open)) { close_sysmenu(); set_overview(false); continue; }
+            if (overview_open) { close_sysmenu(); overview_key(k); continue; }
+            if (k == 27 && sysmenu_open) { close_sysmenu(); continue; }
             if (focus >= 0 && wins[focus].used && !overview_open) send(wins[focus].owner, WM_KEY, focus, k, 0, 0);
         }
 
         while (waitpid(-1, NULL, WNOHANG) > 0) {}                 /* прибрать запущенные нами программы */
+        for (int i = 0; i < MAXWIN; i++)                          /* программа не ответила на WM_RESIZE */
+            if (wins[i].used && wins[i].awaiting && ticks() - wins[i].asked_at > 1500) wins[i].awaiting = false;
         if (ticks() - last_check > 500) {
             last_check = ticks();
             update_clock();

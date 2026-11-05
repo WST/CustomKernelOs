@@ -145,15 +145,15 @@ $(BUILD)/user/cc: $(CC_OBJS) $(ULIB) user/user.ld
 
 # cc для Linux — чтобы быстро гонять тесты компилятора (make cctest)
 $(BUILD)/cc-host: $(CC_SRC) user/cc/cc.h | $(BUILD)
-	gcc -DCC_HOST -O1 -g -Wall -Wno-unused-function -o $@ $(CC_SRC)
+	gcc -std=gnu17 -DCC_HOST -O1 -g -Wall -Wno-unused-function -o $@ $(CC_SRC)
 
 programs: $(UBINS)
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
 $(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/fs.h kernel/string.c | $(BUILD)
-	gcc -O1 -c tools/host_io.c -o $(BUILD)/host_io.o
-	gcc -O1 -w -fno-builtin -DHOST_TEST -Ikernel tools/myfs.c kernel/fs.c kernel/string.c \
+	gcc -std=gnu17 -O1 -c tools/host_io.c -o $(BUILD)/host_io.o
+	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tools/myfs.c kernel/fs.c kernel/string.c \
 	    $(BUILD)/host_io.o -o $@
 
 # Диск: если его нет — создаём пустой (myfs сам его отформатирует)
@@ -199,19 +199,19 @@ cleandisk:
 
 # Юнит-тесты (запускаются на хосте, не в QEMU)
 test: | $(BUILD)
-	gcc -O1 -Wall -Wno-unused-function -Iuser/lib tests/tls_test.c -o $(BUILD)/tls_test
+	gcc -std=gnu17 -O1 -Wall -Wno-unused-function -Iuser/lib tests/tls_test.c -o $(BUILD)/tls_test
 	./$(BUILD)/tls_test
-	gcc -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/string.c -o $(BUILD)/fs_test
+	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/string.c -o $(BUILD)/fs_test
 	./$(BUILD)/fs_test
-	gcc -O1 -w -fno-builtin -Ikernel -include tests/host_env.h \
+	gcc -std=gnu17 -O1 -w -fno-builtin -Ikernel -include tests/host_env.h \
 	    tests/heap_test.c kernel/heap.c kernel/string.c -o $(BUILD)/heap_test
 	./$(BUILD)/heap_test
 
 # Тесты JavaScript на Linux: язык и встроенные объекты, потом DOM браузера на тестовой странице
 JS_SRC := $(patsubst %,user/lib/%.c,$(JSLIB))
 jstest: user/lib/dom_prelude.h | $(BUILD)
-	gcc -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/js_host.c $(JS_SRC) -o $(BUILD)/js-host
-	gcc -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/dom_host.c $(JS_SRC) \
+	gcc -std=gnu17 -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/js_host.c $(JS_SRC) -o $(BUILD)/js-host
+	gcc -std=gnu17 -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/dom_host.c $(JS_SRC) \
 	    user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/dom-host
 	./$(BUILD)/js-host tests/js/lang.js | tee $(BUILD)/jstest.out
 	@grep -q " 0 failed" $(BUILD)/jstest.out
@@ -226,7 +226,7 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 
 # Сглаженная графика и шрифты на Linux: пробная картинка build/gfxtest.ppm
 gfxtest: | $(BUILD)
-	gcc -m32 -O1 -g -fno-builtin -nostdinc -w -Iuser/lib tests/gfx_host.c user/lib/gfx.c user/lib/vec.c \
+	gcc -std=gnu17 -m32 -O1 -g -fno-builtin -nostdinc -w -Iuser/lib tests/gfx_host.c user/lib/gfx.c user/lib/vec.c \
 	    user/lib/font.c -o $(BUILD)/gfx-host
 	./$(BUILD)/gfx-host fonts > $(BUILD)/gfxtest.ppm && echo "==> $(BUILD)/gfxtest.ppm"
 

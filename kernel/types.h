@@ -13,9 +13,11 @@ typedef unsigned int       size_t;
 typedef unsigned long      uptr;      /* целое размером с указатель */
 
 #define NULL ((void *)0)
+#if !defined(__STDC_VERSION__) || __STDC_VERSION__ < 202311L   /* в C23 bool/true/false — уже ключевые слова */
 typedef _Bool bool;
 #define true  1
 #define false 0
+#endif
 
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)

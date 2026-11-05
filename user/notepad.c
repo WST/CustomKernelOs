@@ -2,11 +2,12 @@
  *
  *   стрелки, Home/End, PgUp/PgDn — двигаться; мышь — поставить курсор
  *   Ctrl+S — сохранить, Ctrl+O — открыть (имя в поле сверху), Ctrl+N — новый
- *   Tab — 4 пробела */
+ *   Tab — 4 пробела
+ * Текст — UTF-8 (русские буквы с клавиатуры); курсор и столбцы — в буквах.
+ * Окно можно растягивать и разворачивать. */
 #include "win.h"
 
-#define W 640
-#define H 440
+static int W = 640, H = 440;
 #define BAR_H 32
 #define STATUS_H 22
 #define TEXT_X 6
@@ -32,6 +33,20 @@ static const char *btn_labels[] = { "New", "Open", "Save" };
 #define NAME_X 206
 
 /* ------------------------------------------------------------ текст */
+
+/* UTF-8: байт-продолжение? */
+static bool cont(char c) { return ((unsigned char)c & 0xC0) == 0x80; }
+static int col_of(int li, int byte) {                   /* байт -> столбец (буква) */
+    int k = 0;
+    for (int i = 0; i < byte && i < lens[li]; i++) if (!cont(lines[li][i])) k++;
+    return k;
+}
+static int byte_of(int li, int col) {                   /* столбец -> байт */
+    int i = 0;
+    while (i < lens[li] && col > 0) { i++; while (i < lens[li] && cont(lines[li][i])) i++; col--; }
+    return i;
+}
+static int u8_chars(const char *s) { int k = 0; for (; *s; s++) if (!cont(*s)) k++; return k; }
 
 static void ensure_cap(int r, int need) {
     if (caps[r] >= need) return;
@@ -117,20 +132,25 @@ static void draw(void) {
     ui_sunken(NAME_X, 4, W - NAME_X - 6, 24, editing_name ? C_WHITE : RGB(248, 248, 248));
     if (!path[0] && !editing_name) gfx_text(NAME_X + 6, 8, "(file name)", UI_SHADOW, TRANSPARENT);
     else gfx_text(NAME_X + 6, 8, path, UI_TEXT, TRANSPARENT);
-    if (editing_name) gfx_fill_rect(NAME_X + 6 + name_len * 8, 8, 2, 16, UI_TEXT);
+    if (editing_name) gfx_fill_rect(NAME_X + 6 + u8_chars(path) * 8, 8, 2, 16, UI_TEXT);
 
     int th = H - BAR_H - STATUS_H;
     gfx_fill_rect(0, BAR_H, W, th, C_WHITE);
     for (int r = 0; r < VIS_ROWS && top + r < n_lines; r++) {
         int li = top + r;
-        char buf[VIS_COLS + 1];
-        int n = 0;
-        for (int c = left; c < lens[li] && n < VIS_COLS; c++) buf[n++] = lines[li][c];
+        static char buf[1100];
+        int n = 0, b = byte_of(li, left), shown = 0;
+        while (b < lens[li] && shown < VIS_COLS && n < 1090) {
+            buf[n++] = lines[li][b++];
+            while (b < lens[li] && cont(lines[li][b]) && n < 1090) buf[n++] = lines[li][b++];
+            shown++;
+        }
         buf[n] = 0;
         gfx_text(TEXT_X, TEXT_Y + r * 16, buf, UI_TEXT, TRANSPARENT);
     }
-    if (!editing_name && cur_r >= top && cur_r < top + VIS_ROWS && cur_c >= left)
-        gfx_fill_rect(TEXT_X + (cur_c - left) * 8, TEXT_Y + (cur_r - top) * 16, 2, 16, UI_TEXT);
+    int ccol = col_of(cur_r, cur_c);
+    if (!editing_name && cur_r >= top && cur_r < top + VIS_ROWS && ccol >= left)
+        gfx_fill_rect(TEXT_X + (ccol - left) * 8, TEXT_Y + (cur_r - top) * 16, 2, 16, UI_TEXT);
     /* полоса прокрутки */
     int sb_x = W - 12;
     gfx_fill_rect(sb_x, BAR_H, 12, th, RGB(235, 235, 235));
@@ -143,7 +163,7 @@ static void draw(void) {
     gfx_fill_rect(0, H - STATUS_H, W, STATUS_H, UI_FACE);
     gfx_fill_rect(0, H - STATUS_H, W, 1, UI_SHADOW);
     char st[96];
-    snprintf(st, sizeof(st), "Ln %d, Col %d   %d lines   %s", cur_r + 1, cur_c + 1, n_lines, status_msg);
+    snprintf(st, sizeof(st), "Ln %d, Col %d   %d lines   %s", cur_r + 1, ccol + 1, n_lines, status_msg);
     gfx_text(8, H - STATUS_H + 3, st, UI_DARK, TRANSPARENT);
     win_update(win);
 }
@@ -151,8 +171,9 @@ static void draw(void) {
 static void keep_visible(void) {
     if (cur_r < top) top = cur_r;
     if (cur_r >= top + VIS_ROWS) top = cur_r - VIS_ROWS + 1;
-    if (cur_c < left) left = cur_c;
-    if (cur_c >= left + VIS_COLS) left = cur_c - VIS_COLS + 1;
+    int col = col_of(cur_r, cur_c);
+    if (col < left) left = col;
+    if (col >= left + VIS_COLS) left = col - VIS_COLS + 1;
 }
 
 static void changed(void) {
@@ -174,9 +195,12 @@ static void name_key(int k) {
     } else if (k == 27) {
         editing_name = false;
     } else if ((k == 8 || k == 127) && name_len) {
-        path[--name_len] = 0;
-    } else if (k >= 32 && k < 127 && name_len < (int)sizeof(path) - 1) {
-        path[name_len++] = k;
+        name_len--;
+        while (name_len > 0 && cont(path[name_len])) name_len--;
+        path[name_len] = 0;
+    } else if (((k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS)))
+               && name_len < (int)sizeof(path) - 4) {
+        name_len += utf8_put(path + name_len, k);
         path[name_len] = 0;
     }
 }
@@ -185,15 +209,22 @@ static void text_key(int k) {
     if (k == CTRL('s')) { save(); set_title(); return; }
     if (k == CTRL('o')) { editing_name = true; name_len = strlen(path); strcpy(status_msg, "file name, then Enter"); return; }
     if (k == CTRL('n')) { clear_text(); path[0] = 0; modified = false; set_title(); return; }
+    int col = col_of(cur_r, cur_c);                       /* вверх-вниз — в тот же столбец (в буквах) */
     switch (k) {
-    case KEY_UP:    if (cur_r > 0) cur_r--; break;
-    case KEY_DOWN:  if (cur_r < n_lines - 1) cur_r++; break;
-    case KEY_LEFT:  if (cur_c > 0) cur_c--; else if (cur_r > 0) { cur_r--; cur_c = lens[cur_r]; } break;
-    case KEY_RIGHT: if (cur_c < lens[cur_r]) cur_c++; else if (cur_r < n_lines - 1) { cur_r++; cur_c = 0; } break;
+    case KEY_UP:    if (cur_r > 0) cur_r--; cur_c = byte_of(cur_r, col); break;
+    case KEY_DOWN:  if (cur_r < n_lines - 1) cur_r++; cur_c = byte_of(cur_r, col); break;
+    case KEY_LEFT:
+        if (cur_c > 0) { cur_c--; while (cur_c > 0 && cont(lines[cur_r][cur_c])) cur_c--; }
+        else if (cur_r > 0) { cur_r--; cur_c = lens[cur_r]; }
+        break;
+    case KEY_RIGHT:
+        if (cur_c < lens[cur_r]) { cur_c++; while (cur_c < lens[cur_r] && cont(lines[cur_r][cur_c])) cur_c++; }
+        else if (cur_r < n_lines - 1) { cur_r++; cur_c = 0; }
+        break;
     case KEY_HOME:  cur_c = 0; break;
     case KEY_END:   cur_c = lens[cur_r]; break;
-    case KEY_PGUP:  cur_r -= VIS_ROWS; if (cur_r < 0) cur_r = 0; break;
-    case KEY_PGDN:  cur_r += VIS_ROWS; if (cur_r >= n_lines) cur_r = n_lines - 1; break;
+    case KEY_PGUP:  cur_r -= VIS_ROWS; if (cur_r < 0) cur_r = 0; cur_c = byte_of(cur_r, col); break;
+    case KEY_PGDN:  cur_r += VIS_ROWS; if (cur_r >= n_lines) cur_r = n_lines - 1; cur_c = byte_of(cur_r, col); break;
     case '\n': case '\r':
         insert_line(cur_r + 1, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
         lens[cur_r] = cur_c;
@@ -202,8 +233,10 @@ static void text_key(int k) {
         break;
     case 8: case 127:
         if (cur_c > 0) {
-            memmove(lines[cur_r] + cur_c - 1, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
-            lens[cur_r]--; cur_c--;
+            int st = cur_c - 1;
+            while (st > 0 && cont(lines[cur_r][st])) st--;           /* буква целиком */
+            memmove(lines[cur_r] + st, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
+            lens[cur_r] -= cur_c - st; cur_c = st;
         } else if (cur_r > 0) {
             int pl = lens[cur_r - 1];
             ensure_cap(cur_r - 1, pl + lens[cur_r] + 1);
@@ -216,8 +249,10 @@ static void text_key(int k) {
         break;
     case KEY_DEL:
         if (cur_c < lens[cur_r]) {
-            memmove(lines[cur_r] + cur_c, lines[cur_r] + cur_c + 1, lens[cur_r] - cur_c - 1);
-            lens[cur_r]--;
+            int e = cur_c + 1;
+            while (e < lens[cur_r] && cont(lines[cur_r][e])) e++;
+            memmove(lines[cur_r] + cur_c, lines[cur_r] + e, lens[cur_r] - e);
+            lens[cur_r] -= e - cur_c;
         } else if (cur_r < n_lines - 1) {
             ensure_cap(cur_r, lens[cur_r] + lens[cur_r + 1] + 1);
             memcpy(lines[cur_r] + lens[cur_r], lines[cur_r + 1], lens[cur_r + 1]);
@@ -229,13 +264,18 @@ static void text_key(int k) {
     case '\t':
         for (int i = 0; i < 4; i++) text_key(' ');
         return;
-    default:
-        if (k < 32 || k >= 127) return;
-        ensure_cap(cur_r, lens[cur_r] + 2);
-        memmove(lines[cur_r] + cur_c + 1, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
-        lines[cur_r][cur_c++] = k;
-        lens[cur_r]++;
+    default: {
+        bool other = k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS);   /* русская буква и т.п. */
+        if ((k < 32 || k >= 127) && !other) return;
+        char u[4];
+        int n = utf8_put(u, k);
+        ensure_cap(cur_r, lens[cur_r] + n + 1);
+        memmove(lines[cur_r] + cur_c + n, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
+        memcpy(lines[cur_r] + cur_c, u, n);
+        cur_c += n;
+        lens[cur_r] += n;
         changed();
+    }
     }
     if (cur_c > lens[cur_r]) cur_c = lens[cur_r];
 }
@@ -257,14 +297,14 @@ static void click(int x, int y) {
         if (r >= n_lines) r = n_lines - 1;
         int c = left + (x - TEXT_X + 4) / 8;
         if (c < 0) c = 0;
-        if (c > lens[r]) c = lens[r];
-        cur_r = r; cur_c = c;
+        cur_r = r; cur_c = byte_of(r, c);
     }
 }
 
 int main(int argc, char **argv) {
     win = win_create("Notepad", W, H);
     if (!win) { dprintf(STDERR, "notepad: the desktop is not running\n"); return 1; }
+    win_set_resizable(win, 420, 200);
     clear_text();
     if (argc > 1) {
         snprintf(path, sizeof(path), "%s", argv[1]);
@@ -288,6 +328,7 @@ int main(int argc, char **argv) {
         if (e.type == EV_KEY) { if (editing_name) name_key(e.key); else text_key(e.key); keep_visible(); }
         else if (e.type == EV_MOUSE_DOWN) { click(e.x, e.y); keep_visible(); }
         else if (e.type == EV_MOUSE_UP) pressed_btn = -1;
+        else if (e.type == EV_RESIZE) { W = e.x; H = e.y; keep_visible(); }
         else continue;
         draw();
     }

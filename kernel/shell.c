@@ -43,7 +43,7 @@ static void readline(char *line, bool use_history) {
     int len = 0, hpos = hist_count;
     line[0] = 0;
     for (;;) {
-        char c = kb_getchar();
+        int c = kb_getchar();
         if (c == '\n') { vga_putc('\n'); line[len] = 0; return; }
         if (c == KEY_CTRL_C) { vga_puts("^C\n"); line[0] = 0; return; }
         if (c == '\b') { if (len > 0) { len--; vga_putc('\b'); } continue; }
@@ -56,7 +56,7 @@ static void readline(char *line, bool use_history) {
             else { hpos = hist_count; replace_line(line, &len, ""); }
             continue;
         }
-        if ((u8)c < 32 || (u8)c >= 127) continue;
+        if (c < 32 || c >= 127) continue;
         if (len < LINE_MAX) { line[len++] = c; vga_putc(c); }
     }
 }

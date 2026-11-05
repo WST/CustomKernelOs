@@ -193,15 +193,30 @@ static int visible_len(const char *s) {          /* длина без escape-п�
     return n;
 }
 
+/* длина в буквах (UTF-8: продолжения 10xxxxxx не считаем) */
+static int u8len(const char *s, int n) {
+    int k = 0;
+    for (int i = 0; i < n; i++) if (((unsigned char)s[i] & 0xC0) != 0x80) k++;
+    return k;
+}
+
 static void render(const char *prompt, const char *buf, int len, int cur) {
-    static char out[512];
+    static char out[1024];
     int plen = visible_len(prompt);
     int avail = SCREEN_W - 1 - plen;
     if (avail < 10) avail = 10;
-    int off = cur > avail ? cur - avail : 0;
-    int show = len - off < avail ? len - off : avail;
+    int ccur = u8len(buf, cur), off = 0;
+    for (int skip = ccur > avail ? ccur - avail : 0; skip > 0 && off < len; skip--) {   /* целыми буквами */
+        off++;
+        while (off < len && ((unsigned char)buf[off] & 0xC0) == 0x80) off++;
+    }
+    int show = 0;
+    for (int k = 0; off + show < len && k < avail; k++) {
+        show++;
+        while (off + show < len && ((unsigned char)buf[off + show] & 0xC0) == 0x80) show++;
+    }
     int n = snprintf(out, sizeof(out), "\r%s%.*s\x1b[K\r", prompt, show, buf + off);
-    int col = plen + cur - off;
+    int col = plen + ccur - u8len(buf, off);
     if (col > 0) n += snprintf(out + n, sizeof(out) - n, "\x1b[%dC", col);
     write(STDOUT, out, n);
 }
@@ -295,15 +310,29 @@ static int edit_line(const char *prompt, char *buf, int max) {
         last_tab = false;
         if (k == '\r' || k == '\n') break;
         if (k >= 32 && k < 127) { char ch = k; insert(buf, &len, &cur, max, &ch, 1); }
+        else if (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS)) {   /* русская буква и т.п. */
+            char u[4];
+            insert(buf, &len, &cur, max, u, utf8_put(u, k));
+        }
         else if (k == '\b' || k == 127) {
-            if (cur > 0) { for (int i = cur - 1; i < len - 1; i++) buf[i] = buf[i + 1]; len--; cur--; }
+            if (cur > 0) {
+                int st = cur - 1;
+                while (st > 0 && ((unsigned char)buf[st] & 0xC0) == 0x80) st--;
+                for (int i = 0; i < len - cur; i++) buf[st + i] = buf[cur + i];
+                len -= cur - st; cur = st;
+            }
         }
         else if (k == KEY_DEL || (k == CTRL('d') && len > 0)) {
-            if (cur < len) { for (int i = cur; i < len - 1; i++) buf[i] = buf[i + 1]; len--; }
+            if (cur < len) {
+                int e = cur + 1;
+                while (e < len && ((unsigned char)buf[e] & 0xC0) == 0x80) e++;
+                for (int i = 0; i < len - e; i++) buf[cur + i] = buf[e + i];
+                len -= e - cur;
+            }
         }
         else if (k == CTRL('d')) { ttymode(0); write(STDOUT, "\n", 1); return -1; }
-        else if (k == KEY_LEFT)  { if (cur > 0) cur--; }
-        else if (k == KEY_RIGHT) { if (cur < len) cur++; }
+        else if (k == KEY_LEFT)  { if (cur > 0) { cur--; while (cur > 0 && ((unsigned char)buf[cur] & 0xC0) == 0x80) cur--; } }
+        else if (k == KEY_RIGHT) { if (cur < len) { cur++; while (cur < len && ((unsigned char)buf[cur] & 0xC0) == 0x80) cur++; } }
         else if (k == KEY_HOME || k == CTRL('a')) cur = 0;
         else if (k == KEY_END  || k == CTRL('e')) cur = len;
         else if (k == CTRL('u')) { for (int i = 0; i < len - cur; i++) buf[i] = buf[cur + i]; len -= cur; cur = 0; }
@@ -466,6 +495,8 @@ int main(int argc, char **argv) {
     }
     setfg(0);
     if (term_mode) { interactive = false; printf("MyOS sh (pid %d). Type 'help'.\n", getpid()); }
+    else if (interactive && ttyctl(STDIN, TTYCTL_GETSIZE, 0) >= 0)   /* в окне терминала (pty) */
+        printf("MyOS sh (pid %d). Type 'help'.\n", getpid());
     else if (interactive) printf("MyOS sh (pid %d). Type 'help'. 'desktop' starts the graphical desktop.\n", getpid());
 
     char line[MAX_LINE], cwd[128];

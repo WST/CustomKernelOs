@@ -2,8 +2,7 @@
  * Выдели процесс и нажми «End task» (или Delete), чтобы его завершить. */
 #include "win.h"
 
-#define W 520
-#define H 400
+static int W = 520, H = 400;
 #define ROW_H 20
 #define LIST_Y 82
 #define GRAPH_H 0
@@ -33,7 +32,7 @@ static void refresh(void) {
 static void draw(void) {
     gfx_clear(C_WHITE);
     /* график загрузки процессора за минуту */
-    int gx = 8, gy = 6, gw = 240, gh = 44;
+    int gx = 8, gy = 6, gw = W - 290 > 240 ? W - 290 : 240, gh = 44;
     gfx_round_frame(gx, gy, gw, gh, 6, RGB(230, 230, 230), RGB(252, 252, 252));
     if (n_hist > 1) {                                      /* залитая область под линией */
         gfx_path p;
@@ -55,9 +54,9 @@ static void draw(void) {
     for (int i = 0; i < n_procs; i++) mem += procs[i].mem_kb;
     char s[64];
     snprintf(s, sizeof(s), "CPU %d%%", n_hist ? cpu_hist[n_hist - 1] : 0);
-    ui_text(260, 10, s, UI_TEXT);
+    ui_text(gx + gw + 20, 10, s, UI_TEXT);
     snprintf(s, sizeof(s), "%d processes, %u KB", n_procs, mem);
-    ui_text(260, 30, s, UI_DARK);
+    ui_text(gx + gw + 20, 30, s, UI_DARK);
     /* таблица */
     gfx_fill_rect(0, LIST_Y - 22, W, 22, RGB(245, 245, 245));
     ui_text(10, LIST_Y - 19, "PID", UI_DARK);
@@ -100,6 +99,7 @@ static void end_task(void) {
 int main(void) {
     win = win_create("Task Manager", W, H);
     if (!win) { dprintf(STDERR, "taskmgr: the desktop is not running\n"); return 1; }
+    win_set_resizable(win, 520, 240);
     refresh();
     draw();
     struct event e;
@@ -114,6 +114,8 @@ int main(void) {
             }
         } else if (e.type == EV_MOUSE_UP) {
             btn_pressed = false;
+        } else if (e.type == EV_RESIZE) {
+            W = e.x; H = e.y;
         } else if (e.type == EV_KEY) {
             if (e.key == KEY_DEL) end_task();
             else if (e.key == KEY_PGDN && top + VIS < n_procs) top += VIS;

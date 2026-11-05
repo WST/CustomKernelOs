@@ -60,6 +60,9 @@ enum {
     SYS_GFX_INFO2   = 51,   /* gfx_info2(&gfx_info2): карта, режим, умения */
     SYS_GFX_ACCEL   = 52,   /* gfx_accel(GA_COPY|GA_FILL, &args): на GPU */
     SYS_GFX_CURSOR  = 53,   /* gfx_cursor(вкл, &gfx_cursor|0): аппаратный курсор */
+    SYS_PTY_OPEN    = 54,   /* pty_open(int fds[2]): [0] ведущий, [1] ведомый */
+    SYS_TTYCTL      = 55,   /* ttyctl(fd, op, arg): размер pty и т.п. (tty.h) */
+    SYS_KBLAYOUT    = 56,   /* kblayout(-1 узнать | 0 US | 1 RU) -> текущая */
     SYS_COUNT
 };
 

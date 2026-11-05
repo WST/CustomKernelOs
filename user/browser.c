@@ -29,8 +29,7 @@
 #include "tls.h"
 #include "dom.h"
 
-#define W 800
-#define H 576
+static int W = 800, H = 576;          /* окно можно растягивать */
 #define BAR_H 36
 #define STATUS_H 20
 #define VIEW_Y BAR_H
@@ -996,6 +995,9 @@ static void url_encode(const char *s, char *out, int max) {
 
 /* ------------------------------------------------------------ рисование */
 
+static bool u8cont(char c) { return ((unsigned char)c & 0xC0) == 0x80; }
+static int u8count(const char *s, int bytes) { int k = 0; for (int i = 0; i < bytes && s[i]; i++) if (!u8cont(s[i])) k++; return k; }
+
 static void draw_toolbar(void) {
     gfx_fill_rect(0, 0, W, BAR_H, RGB(242, 242, 242));
     gfx_fill_rect(0, BAR_H - 1, W, 1, RGB(200, 200, 200));
@@ -1004,18 +1006,22 @@ static void draw_toolbar(void) {
     ui_button(74, 6, 30, 24, "R", false);
     ui_button(108, 6, 30, 24, "H", false);
     ui_sunken(144, 6, W - 150, 24, C_WHITE);
-    char shown[96];
-    int maxc = (W - 162) / 8;
-    int start = 0, len = strlen(addr);
-    if (editing_addr && addr_cur > maxc - 1) start = addr_cur - maxc + 1;
-    snprintf(shown, sizeof(shown), "%.*s", maxc, addr + start);
-    (void)len;
+    static char shown[1100];
+    int maxc = (W - 162) / 8;                              /* столько букв влезает */
+    int ccur = u8count(addr, addr_cur), skip = 0, start = 0;
+    if (editing_addr && ccur > maxc - 1) skip = ccur - maxc + 1;
+    while (skip > 0 && addr[start]) { start++; while (u8cont(addr[start])) start++; skip--; }
+    int n = 0, k = 0;
+    for (int i = start; addr[i] && n < 1090; i++) {
+        if (!u8cont(addr[i]) && k++ == maxc) break;
+        shown[n++] = addr[i];
+    }
+    shown[n] = 0;
     if (editing_addr && addr_all && addr[0]) {
-        int l = strlen(shown);
-        gfx_fill_rect(149, 9, l * 8 + 2, 18, UI_ACCENT);
+        gfx_fill_rect(149, 9, u8count(shown, n) * 8 + 2, 18, UI_ACCENT);
         gfx_text(150, 10, shown, C_WHITE, TRANSPARENT);
     } else gfx_text(150, 10, shown, UI_TEXT, TRANSPARENT);
-    if (editing_addr && !addr_all) gfx_fill_rect(150 + (addr_cur - start) * 8, 10, 2, 16, UI_TEXT);
+    if (editing_addr && !addr_all) gfx_fill_rect(150 + (ccur - u8count(addr, start)) * 8, 10, 2, 16, UI_TEXT);
 }
 
 static void draw_status(void) {
@@ -1091,9 +1097,11 @@ static void draw_page(void) {
             struct input *in = &inputs[it->input];
             ui_sunken(it->x, y, it->w, it->h, C_WHITE);
             if (focus_input == it->input) gfx_rect(it->x, y, it->w, it->h, UI_ACCENT);
-            int maxc = (it->w - 8) / 8, l = strlen(in->value), st = l > maxc - 1 ? l - maxc + 1 : 0;
-            gfx_text(it->x + 4, y + 4, in->value + st, UI_TEXT, TRANSPARENT);
-            if (focus_input == it->input) gfx_fill_rect(it->x + 4 + (l - st) * 8, y + 4, 2, 16, UI_TEXT);
+            int maxc = (it->w - 8) / 8, l = u8count(in->value, strlen(in->value)), skip = l > maxc - 1 ? l - maxc + 1 : 0;
+            const char *v = in->value;                    /* в буквах UTF-8: видны последние maxc */
+            while (skip > 0 && *v) { v++; while (u8cont(*v)) v++; skip--; }
+            gfx_text(it->x + 4, y + 4, v, UI_TEXT, TRANSPARENT);
+            if (focus_input == it->input) gfx_fill_rect(it->x + 4 + u8count(v, strlen(v)) * 8, y + 4, 2, 16, UI_TEXT);
             break;
         }
         case IT_BUTTON:
@@ -1193,7 +1201,7 @@ static const char *home_page =
     "<li><a href=\"http://frogfind.com/\">FrogFind</a> - search engine for vintage computers</li>"
     "<li><a href=\"http://68k.news/\">68k.news</a> - news headlines, plain HTML</li>"
     "<li><a href=\"https://en.wikipedia.org/wiki/Operating_system\">Wikipedia: Operating system</a> (HTTPS)</li>"
-    "<li><a href=\"https://ru.wikipedia.org/wiki/MS-DOS\">Wikipedia (ru): MS-DOS</a> - Russian is shown in Latin letters</li>"
+    "<li><a href=\"https://ru.wikipedia.org/wiki/MS-DOS\">Wikipedia (ru): MS-DOS</a> - in Russian</li>"
     "<li><a href=\"" PROXY "https://en.wikipedia.org/wiki/Operating_system\">The same Wikipedia page via FrogFind</a> - simplified</li>"
     "<li><a href=\"https://example.com/\">https://example.com/</a> - a tiny page over HTTPS</li>"
     "<li><a href=\"https://lite.duckduckgo.com/lite/\">DuckDuckGo Lite</a> - search over HTTPS</li>"
@@ -1717,16 +1725,33 @@ static void on_click(int x, int y) {
     redraw();
 }
 
+/* строка в UTF-8: курсор — байтовое смещение, но ходит и стирает целыми буквами */
+
 static void edit_string(char *s, int max, int *cur, int k) {
     int l = strlen(s);
-    if (k == KEY_LEFT && *cur > 0) (*cur)--;
-    else if (k == KEY_RIGHT && *cur < l) (*cur)++;
+    if (k == KEY_LEFT && *cur > 0) { (*cur)--; while (*cur > 0 && u8cont(s[*cur])) (*cur)--; }
+    else if (k == KEY_RIGHT && *cur < l) { (*cur)++; while (*cur < l && u8cont(s[*cur])) (*cur)++; }
     else if (k == KEY_HOME) *cur = 0;
     else if (k == KEY_END) *cur = l;
-    else if ((k == 8 || k == 127) && *cur > 0) { memmove(s + *cur - 1, s + *cur, l - *cur + 1); (*cur)--; }
-    else if (k == KEY_DEL && *cur < l) memmove(s + *cur, s + *cur + 1, l - *cur);
-    else if (k >= 32 && k < 127 && l < max - 1) { memmove(s + *cur + 1, s + *cur, l - *cur + 1); s[(*cur)++] = k; }
+    else if ((k == 8 || k == 127) && *cur > 0) {
+        int st = *cur - 1;
+        while (st > 0 && u8cont(s[st])) st--;
+        memmove(s + st, s + *cur, l - *cur + 1);
+        *cur = st;
+    } else if (k == KEY_DEL && *cur < l) {
+        int e = *cur + 1;
+        while (e < l && u8cont(s[e])) e++;
+        memmove(s + *cur, s + e, l - e + 1);
+    } else if ((k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS))) {
+        char u[4];
+        int n = utf8_put(u, k);
+        if (l + n >= max) return;
+        memmove(s + *cur + n, s + *cur, l - *cur + 1);
+        memcpy(s + *cur, u, n);
+        *cur += n;
+    }
 }
+
 
 static void on_key(int k) {
     if (k == CTRL('l')) { editing_addr = true; addr_all = true; focus_input = -1; addr_cur = strlen(addr); redraw(); return; }
@@ -1748,7 +1773,8 @@ static void on_key(int k) {
         if (k == 27) { editing_addr = false; snprintf(addr, sizeof(addr), "%s", url); redraw(); return; }
         if (addr_all) {
             addr_all = false;
-            if ((k >= 32 && k < 127) || k == 8 || k == 127 || k == KEY_DEL) { addr[0] = 0; addr_cur = 0; if (k < 32 || k >= 127) k = 0; }
+            bool ch = (k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS));
+            if (ch || k == 8 || k == 127 || k == KEY_DEL) { addr[0] = 0; addr_cur = 0; if (!ch) k = 0; }
         }
         if (k) edit_string(addr, sizeof(addr), &addr_cur, k);
         draw_toolbar();
@@ -1815,6 +1841,7 @@ static void on_move(int x, int y) {
 int main(int argc, char **argv) {
     win = win_create("Browser", W, H);
     if (!win) { dprintf(STDERR, "browser: the desktop is not running\n"); return 1; }
+    win_set_resizable(win, 480, 300);
     items = malloc(sizeof(struct item) * MAX_ITEMS);
     boxes = malloc(sizeof(struct box) * MAX_BOXES);
     init_styles();
@@ -1842,6 +1869,14 @@ int main(int argc, char **argv) {
         if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) on_click(e.x, e.y);
         else if (e.type == EV_MOUSE_MOVE && !e.buttons) on_move(e.x, e.y);
         else if (e.type == EV_KEY) on_key(e.key);
+        else if (e.type == EV_RESIZE) {                    /* новая ширина — разложить страницу заново */
+            W = e.x; H = e.y;
+            if (page_is_dom) relayout(true);
+            else { arena_used = 0; layout_html(body, body_len, true); }
+            if (scroll > doc_h - VIEW_H) scroll = doc_h - VIEW_H;
+            if (scroll < 0) scroll = 0;
+            redraw();
+        }
     }
     win_destroy(win);
     return 0;

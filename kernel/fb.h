@@ -28,6 +28,7 @@
 #define FB_CAP_GPU     8           /* копирование/заливку делает сама карта, а не процессор */
 #define FB_CAP_GPU_ON  16          /* ...и в текущем режиме это проверено и работает */
 #define FB_CAP_CURSOR_ON 32        /* аппаратный курсор сейчас включён */
+#define FB_CAP_ALPHA_CURSOR 64     /* ...и он с прозрачностью (ARGB), а не только «есть/нет» */
 
 struct fb_info {
     u32 width, height, bpp, pitch;  /* pitch — байт в строке */

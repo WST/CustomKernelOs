@@ -257,7 +257,7 @@ int gfx_text(int x, int y, const char *s, color_t fg, color_t bg) {
 static const short arrow_out[] = { 14, 3, 14, 355, 93, 282, 135, 376, 215, 342, 176, 254, 283, 254 };
 static const short arrow_in[]  = { 35, 51, 35, 307, 101, 246, 146, 349, 187, 331, 144, 234, 230, 234 };
 static uint8_t cur_white[CURSOR_W * CURSOR_H], cur_black[CURSOR_W * CURSOR_H], cur_shadow[CURSOR_W * CURSOR_H];
-static int cur_ready;
+static int cur_ready, cur_shape = -1, cur_want, cur_hx, cur_hy;
 static color_t under[CURSOR_W * CURSOR_H];
 static int ux = -1000, uy;
 
@@ -273,11 +273,58 @@ static void poly_mask(const short *pt, int n, int dx, int dy, uint8_t *m) {
     path_free(&p);
 }
 
+/* двойная стрелка «тянуть» (в пикселях, центр 12,12), повёрнутая на угол: 0 — ↔, 1 — ↕, 2 — ↘↖, 3 — ↙↗ */
+static const short dbl_arrow[] = { 3, 12, 8, 7, 8, 11, 16, 11, 16, 7, 21, 12, 16, 17, 16, 13, 8, 13, 8, 17 };
+
+static void resize_mask(int kind, uint8_t *m) {
+    short pt[20];
+    for (int i = 0; i < 10; i++) {
+        int x = dbl_arrow[i * 2] * 16 - 192 + 8, y = dbl_arrow[i * 2 + 1] * 16 - 192 + 8;   /* от центра, в 1/16 */
+        int rx = x, ry = y;
+        if (kind == 1) { rx = -y; ry = x; }
+        else if (kind == 2) { rx = (x - y) * 181 / 256; ry = (x + y) * 181 / 256; }
+        else if (kind == 3) { rx = (x + y) * 181 / 256; ry = (y - x) * 181 / 256; }
+        pt[i * 2] = rx + 192; pt[i * 2 + 1] = ry + 192;
+    }
+    poly_mask(pt, 10, 0, 0, m);
+}
+
+/* белая обводка = чёрное тело, раздутое на ~1.5 пикселя */
+static void dilate(const uint8_t *src, uint8_t *dst) {
+    for (int y = 0; y < CURSOR_H; y++)
+        for (int x = 0; x < CURSOR_W; x++) {
+            int best = 0;
+            for (int j = -2; j <= 2; j++)
+                for (int i = -2; i <= 2; i++) {
+                    int xx = x + i, yy = y + j;
+                    if (xx < 0 || yy < 0 || xx >= CURSOR_W || yy >= CURSOR_H) continue;
+                    int v = src[yy * CURSOR_W + xx];
+                    if (i * i + j * j > 2) v = v * (i * i + j * j > 4 ? 0 : 1) / 2;   /* дальние соседи слабее */
+                    if (v > best) best = v;
+                }
+            dst[y * CURSOR_W + x] = (uint8_t)best;
+        }
+}
+
 static void make_cursor(void) {
     static uint8_t tmp[CURSOR_W * CURSOR_H];
-    poly_mask(arrow_out, 7, 0, 0, cur_white);
-    poly_mask(arrow_in, 7, 0, 0, cur_black);
-    poly_mask(arrow_out, 7, 12, 24, tmp);
+    cur_shape = cur_want;
+    memset(cur_white, 0, sizeof(cur_white));
+    memset(cur_black, 0, sizeof(cur_black));
+    memset(tmp, 0, sizeof(tmp));
+    if (cur_shape == GFX_CURSOR_ARROW) {
+        poly_mask(arrow_out, 7, 0, 0, cur_white);
+        poly_mask(arrow_in, 7, 0, 0, cur_black);
+        poly_mask(arrow_out, 7, 12, 24, tmp);
+        cur_hx = CURSOR_HOT_X; cur_hy = CURSOR_HOT_Y;
+    } else {
+        resize_mask(cur_shape - GFX_CURSOR_RESIZE_H, cur_black);
+        dilate(cur_black, cur_white);
+        for (int y = CURSOR_H - 1; y >= 0; y--)                  /* тень — обводка, сдвинутая на (1, 2) */
+            for (int x = CURSOR_W - 1; x >= 0; x--)
+                tmp[y * CURSOR_W + x] = (x >= 1 && y >= 2) ? cur_white[(y - 2) * CURSOR_W + x - 1] : 0;
+        cur_hx = 12; cur_hy = 12;
+    }
     for (int y = 0; y < CURSOR_H; y++)                  /* размываем тень 3x3 */
         for (int x = 0; x < CURSOR_W; x++) {
             int sum = 0;
@@ -291,9 +338,15 @@ static void make_cursor(void) {
     cur_ready = 1;
 }
 
+static void cursor_ready(void) { if (!cur_ready || cur_shape != cur_want) make_cursor(); }
+
+void gfx_cursor_shape(int shape) { cur_want = shape; }
+int  gfx_cursor_get_shape(void) { return cur_want; }
+void gfx_cursor_hot(int *hx, int *hy) { cursor_ready(); *hx = cur_hx; *hy = cur_hy; }
+
 void gfx_cursor_draw(int x, int y) {
-    if (!cur_ready) make_cursor();
-    x -= CURSOR_HOT_X; y -= CURSOR_HOT_Y;
+    cursor_ready();
+    x -= cur_hx; y -= cur_hy;
     ux = x; uy = y;
     for (int j = 0; j < CURSOR_H; j++)
         for (int i = 0; i < CURSOR_W; i++) under[j * CURSOR_W + i] = gfx_get(x + i, y + j);
@@ -302,17 +355,25 @@ void gfx_cursor_draw(int x, int y) {
     gfx_draw_mask(x, y, cur_black, CURSOR_W, CURSOR_H, RGB(20, 20, 20), 255);
 }
 
-/* аппаратный курсор: картинка 0xAARRGGBB (видеокарта может понять только «есть/нет») */
+/* Аппаратный курсор: картинка 0xAARRGGBB с настоящей прозрачностью (тень,
+ * сглаженный край). Карта с альфа-курсором так её и покажет; остальные понимают
+ * только «есть/нет» — ядро само отрежет по половине прозрачности. */
 int gfx_hw_cursor(int on) {
     static struct { int w, h, hot_x, hot_y; unsigned px[32 * 32]; } c;
     if (!on) return sc(SYS_GFX_CURSOR, 0, 0);
-    if (!cur_ready) make_cursor();
-    c.w = CURSOR_W; c.h = CURSOR_H; c.hot_x = CURSOR_HOT_X; c.hot_y = CURSOR_HOT_Y;
+    cursor_ready();
+    c.w = CURSOR_W; c.h = CURSOR_H; c.hot_x = cur_hx; c.hot_y = cur_hy;
     for (int j = 0; j < CURSOR_H; j++)
         for (int i = 0; i < CURSOR_W; i++) {
             int k = j * CURSOR_W + i;
-            /* край силуэта у карты только «есть/нет», а внутри — плавный переход белого в чёрный */
-            c.px[k] = cur_white[k] > 100 ? 0xFF000000u | gfx_mix(C_WHITE, RGB(20, 20, 20), cur_black[k]) : 0;
+            /* «над» друг другом: тень, белая обводка, чёрное тело (прозрачность без умножения) */
+            int sa = cur_shadow[k], wa = cur_white[k], ba = cur_black[k];
+            int a1 = wa + sa * (255 - wa) / 255;                       /* тень + белое */
+            int r1 = a1 ? 255 * wa / a1 : 0;                           /* цвет: белое на чёрной тени */
+            int a = ba + a1 * (255 - ba) / 255;
+            int r = a ? (20 * ba + r1 * a1 * (255 - ba) / 255) / a : 0;
+            if (r > 255) r = 255;
+            c.px[k] = (unsigned)a << 24 | (unsigned)r << 16 | (unsigned)r << 8 | (unsigned)r;
         }
     return sc(SYS_GFX_CURSOR, 1, (int)&c);
 }

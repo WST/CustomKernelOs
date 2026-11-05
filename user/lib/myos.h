@@ -39,7 +39,8 @@ enum {
     SYS_BIND, SYS_LISTEN, SYS_ACCEPT, SYS_SENDTO, SYS_RECVFROM,
     SYS_NETINFO, SYS_PING, SYS_NETCONFIG, SYS_SHM_ALLOC, SYS_SHM_MAP,
     SYS_SHM_UNMAP, SYS_MSG_SEND, SYS_MSG_RECV, SYS_SERVICE, SYS_TIME,
-    SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR
+    SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
+    SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
@@ -136,8 +137,20 @@ int  term_rows(void);
 #define TTY_NOSIG    4          /* Ctrl+C приходит как код 3, а не убивает */
 int  ttymode(int mode);         /* -> прежний режим */
 
+/* псевдотерминал: fds[0] — ведущая сторона (у окна терминала), fds[1] — ведомая
+ * (stdin/stdout/stderr оболочки). Размер задаёт окно: ttyctl(fd, TTYCTL_SETSIZE, cols << 16 | rows). */
+int  pty_open(int fds[2]);
+#define TTYCTL_SETSIZE 1
+#define TTYCTL_GETSIZE 2
+#define TTYCTL_GETFG   3
+#define TTYCTL_GETMODE 4
+int  ttyctl(int fd, int op, int arg);
+int  kblayout(int l);           /* раскладка: -1 узнать, 0 US, 1 русская -> текущая */
+int  utf8_put(char *out, int cp); /* кодовая точка -> UTF-8 (1..3 байта) -> сколько */
+
 /* readkey(): одна клавиша в сыром режиме. Обычные — свой код (Enter = '\r',
- * Ctrl+буква = 1..26, Esc = 27), особые — коды ниже. -1 = клавиш нет (NONBLOCK). */
+ * Ctrl+буква = 1..26, Esc = 27), особые — коды ниже. -1 = клавиш нет (NONBLOCK).
+ * Буквы не латиницей (русская раскладка) — кодовой точкой Unicode: 'й' = 0x439. */
 enum { KEY_UP = 1000, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
        KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS };
 int  readkey(void);

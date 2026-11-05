@@ -3,8 +3,7 @@
  * остальное — открыть в Блокноте. Backspace или «Up» — на уровень выше. */
 #include "win.h"
 
-#define W 560
-#define H 420
+static int W = 560, H = 420;
 #define BAR_H 34
 #define ROW_H 22
 #define LIST_Y (BAR_H + 22)
@@ -144,6 +143,7 @@ static void scroll_to_sel(void) {
 int main(int argc, char **argv) {
     win = win_create("Files", W, H);
     if (!win) { dprintf(STDERR, "files: the desktop is not running\n"); return 1; }
+    win_set_resizable(win, 360, 220);
     if (argc > 1) snprintf(cwd, sizeof(cwd), "%s", argv[1]);
     read_dir();
     draw();
@@ -165,6 +165,9 @@ int main(int argc, char **argv) {
                     }
                 }
             }
+        } else if (e.type == EV_RESIZE) {
+            W = e.x; H = e.y;
+            if (sel >= 0) scroll_to_sel();
         } else if (e.type == EV_KEY) {
             if (e.key == KEY_DOWN && sel < n_ents - 1) sel++;
             else if (e.key == KEY_UP && sel > 0) sel--;

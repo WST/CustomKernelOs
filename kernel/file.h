@@ -7,9 +7,10 @@
  * dup2() несколько дескрипторов (даже в разных процессах) указывают на ОДИН
  * объект: у них общее смещение, а закрыт он будет, когда уйдёт последняя ссылка. */
 
-enum file_type { FILE_CONSOLE, FILE_DISK, FILE_PIPE, FILE_SOCKET };
+enum file_type { FILE_CONSOLE, FILE_DISK, FILE_PIPE, FILE_SOCKET, FILE_PTY_MASTER, FILE_PTY_SLAVE };
 
 struct sock;
+struct tty;
 
 #define PIPE_SIZE 4096
 
@@ -26,6 +27,7 @@ struct file {
     u32  ino, off;                  /* FILE_DISK */
     struct pipe *pipe;              /* FILE_PIPE */
     struct sock *sock;              /* FILE_SOCKET */
+    struct tty *tty;                /* FILE_PTY_* */
 };
 
 extern struct file console_file;    /* клавиатура + экран: stdin/stdout/stderr */

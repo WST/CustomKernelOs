@@ -9,6 +9,8 @@
  * указатель проверяется — он должен лежать в памяти программы, а не ядра,
  * и эта память должна быть отображена (и доступна на запись, если пишем). */
 #include "syscall.h"
+#include "tty.h"
+#include "keyboard.h"
 #include "task.h"
 #include "paging.h"
 #include "pmm.h"
@@ -149,6 +151,23 @@ static int sys_pipe(u32 ufds) {
         if (a >= 0) task_current()->fds[a] = NULL;
         file_close(rd);
         file_close(wr);
+        return -EMFILE;
+    }
+    ((int *)ufds)[0] = a;
+    ((int *)ufds)[1] = b;
+    return 0;
+}
+
+static int sys_pty_open(u32 ufds) {
+    if (!user_buf_ok(ufds, 8, true)) return -EFAULT;
+    struct file *m, *sl;
+    int r = pty_create(&m, &sl);
+    if (r) return r;
+    int a = alloc_fd(m), b = a >= 0 ? alloc_fd(sl) : -1;
+    if (a < 0 || b < 0) {
+        if (a >= 0) task_current()->fds[a] = NULL;
+        file_close(m);
+        file_close(sl);
         return -EMFILE;
     }
     ((int *)ufds)[0] = a;
@@ -612,19 +631,32 @@ void syscall_dispatch(struct regs *r) {
     case SYS_READDIR: ret = sys_readdir(a, b, c); break;
     case SYS_KILL:    ret = sys_kill(a); break;
     case SYS_SETPGID: ret = sys_setpgid(a, b); break;
-    case SYS_SETFG:   proc_set_foreground(a); ret = 0; break;
+    case SYS_SETFG: {
+        struct tty *tt = tty_of(t);
+        if (tt) tt->fg = a; else proc_set_foreground(a);
+        ret = 0;
+        break;
+    }
     case SYS_MKDIR:   ret = sys_mkdir(a); break;
     case SYS_UNLINK:  ret = sys_unlink(a); break;
     case SYS_PS:      ret = sys_ps(a, b); break;
     case SYS_GETPPID: ret = t->parent; break;
-    case SYS_TTYMODE: ret = console_set_mode(a & 7); break;
+    case SYS_TTYMODE: {
+        struct tty *tt = tty_of(t);
+        ret = tt ? (int)tty_set_mode(tt, a & 7) : (int)console_set_mode(a & 7);
+        break;
+    }
     case SYS_STAT:    ret = sys_stat(a, b); break;
     case SYS_GFX_INFO:    ret = sys_gfx_info(a); break;
     case SYS_GFX_ACQUIRE: ret = sys_gfx_acquire(a); break;
     case SYS_GFX_BLIT:    ret = sys_gfx_blit(a, b); break;
     case SYS_MOUSE:       ret = sys_mouse(a); break;
     case SYS_GFX_FONT:    ret = sys_gfx_font(a); break;
-    case SYS_TERMSIZE:    ret = (vga_cols() << 16) | vga_rows(); break;
+    case SYS_TERMSIZE: {
+        struct tty *tt = tty_of(t);
+        ret = tt ? (int)(tt->cols << 16 | tt->rows) : (vga_cols() << 16) | vga_rows();
+        break;
+    }
     case SYS_SOCKET:      ret = sys_socket(a); break;
     case SYS_CONNECT:     ret = sys_connect(a, b, c); break;
     case SYS_BIND:        ret = sys_bind(a, b); break;
@@ -646,6 +678,9 @@ void syscall_dispatch(struct regs *r) {
     case SYS_GFX_INFO2:   ret = sys_gfx_info2(a); break;
     case SYS_GFX_ACCEL:   ret = sys_gfx_accel(a, b); break;
     case SYS_GFX_CURSOR:  ret = sys_gfx_cursor(a, b); break;
+    case SYS_PTY_OPEN:    ret = sys_pty_open(a); break;
+    case SYS_TTYCTL:      ret = tty_ctl(get_fd(a), b, c); break;
+    case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
     }
     r->eax = (u32)ret;
 

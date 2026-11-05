@@ -8,6 +8,7 @@
 #include "keyboard.h"
 #include "string.h"
 #include "syscall.h"
+#include "tty.h"
 
 struct file console_file = { .type = FILE_CONSOLE, .refs = 1, .mode = 2 };   /* не освобождается */
 
@@ -34,6 +35,7 @@ void file_close(struct file *f) {
             task_wakeup(p);                 /* разбудить ждущих: конец канала исчез */
             if (!p->readers && !p->writers) kfree(p);
         }
+        if (f->type == FILE_PTY_MASTER || f->type == FILE_PTY_SLAVE) pty_close(f);
         kfree(f);
     }
     irq_restore(fl);
@@ -115,9 +117,16 @@ void console_release(u32 pid) {
 static u8  pend[8];
 static u32 pend_n, pend_pos;
 
-static void translate(u8 c) {
+static void translate(int c) {
     const char *seq = NULL;
-    switch ((char)c) {
+    if (c >= KEY_UNI) {                                      /* буква не латиницей — в UTF-8 */
+        u32 u = c - KEY_UNI;
+        pend_pos = 0;
+        if (u < 0x800) { pend[0] = 0xC0 | u >> 6; pend[1] = 0x80 | (u & 0x3F); pend_n = 2; }
+        else { pend[0] = 0xE0 | u >> 12; pend[1] = 0x80 | (u >> 6 & 0x3F); pend[2] = 0x80 | (u & 0x3F); pend_n = 3; }
+        return;
+    }
+    switch (c) {
     case KEY_UP:    seq = "\x1b[A";  break;
     case KEY_DOWN:  seq = "\x1b[B";  break;
     case KEY_RIGHT: seq = "\x1b[C";  break;
@@ -141,10 +150,10 @@ static int console_read_raw(u8 *buf, u32 len) {
         int c = kb_poll();
         if (c < 0) {
             if (n || (tty_mode & TTY_NONBLOCK)) break;   /* что было — отдаём сразу */
-            c = (u8)kb_getchar();                        /* ждём хотя бы одну клавишу */
+            c = kb_getchar();                            /* ждём хотя бы одну клавишу */
             if (task_current()->kill_pending) return -EINTR;
         }
-        translate((u8)c);
+        translate(c);
     }
     return n;
 }
@@ -155,7 +164,7 @@ static int console_read(char *buf, u32 len) {
     if (tty_mode & TTY_RAW) return console_read_raw((u8 *)buf, len);
     u32 n = 0;
     while (n < len) {
-        char c = kb_getchar();
+        int c = kb_getchar();
         if (task_current()->kill_pending) return -EINTR;
         if (c == KEY_CTRL_D) { if (n == 0) return 0; break; }
         if (c == KEY_CTRL_C) {
@@ -163,8 +172,23 @@ static int console_read(char *buf, u32 len) {
             buf[0] = '\n';
             return 1;
         }
-        if (c == '\b') { if (n) { n--; vga_putc('\b'); } continue; }
-        if ((u8)c >= 0x80) continue;                  /* стрелки и т.п. в обычном режиме не нужны */
+        if (c == '\b') {
+            if (n) {
+                while (n > 1 && ((u8)buf[n - 1] & 0xC0) == 0x80) n--;   /* буква UTF-8 целиком */
+                n--;
+                vga_putc('\b');
+            }
+            continue;
+        }
+        if (c >= KEY_UNI) {                           /* в строку — UTF-8; шрифт консоли кириллицы не знает: эхо «?» */
+            u32 u = c - KEY_UNI;
+            if (n + 3 > len) continue;
+            if (u < 0x800) { buf[n++] = 0xC0 | u >> 6; buf[n++] = 0x80 | (u & 0x3F); }
+            else { buf[n++] = 0xE0 | u >> 12; buf[n++] = 0x80 | (u >> 6 & 0x3F); buf[n++] = 0x80 | (u & 0x3F); }
+            vga_putc('?');
+            continue;
+        }
+        if (c >= 0x80) continue;                      /* стрелки и т.п. в обычном режиме не нужны */
         if (c == '\n') { buf[n++] = '\n'; vga_putc('\n'); break; }
         if ((u8)c < 32 || (u8)c >= 127) continue;
         buf[n++] = c;
@@ -224,6 +248,7 @@ int file_read(struct file *f, void *buf, u32 len) {
     case FILE_CONSOLE: return console_read(buf, len);
     case FILE_PIPE:    return f->mode == 0 ? pipe_read(f->pipe, buf, len) : -EBADF;
     case FILE_SOCKET:  return sock_read(f->sock, buf, len);
+    case FILE_PTY_MASTER: case FILE_PTY_SLAVE: return pty_read(f, buf, len);
     case FILE_DISK: {
         if (f->mode != 0) return -EBADF;
         int r = fs_read(f->ino, f->off, buf, len);
@@ -239,6 +264,7 @@ int file_write(struct file *f, const void *buf, u32 len, bool is_stderr) {
     case FILE_CONSOLE: return console_write(buf, len, is_stderr);
     case FILE_PIPE:    return f->mode ? pipe_write(f->pipe, buf, len) : -EBADF;
     case FILE_SOCKET:  return sock_write(f->sock, buf, len);
+    case FILE_PTY_MASTER: case FILE_PTY_SLAVE: return pty_write(f, buf, len);
     case FILE_DISK: {
         if (f->mode == 0) return -EBADF;
         int r = fs_write(f->ino, f->off, buf, len);

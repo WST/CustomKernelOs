@@ -95,6 +95,45 @@ void win_set_title(window *w, const char *title) {
     msg_send(desktop, &m);
 }
 
+void win_set_resizable(window *w, int min_w, int min_h) {
+    struct msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = WM_RESIZABLE;
+    m.a = w->id; m.b = min_w; m.c = min_h;
+    msg_send(desktop, &m);
+}
+
+/* Новый буфер под новый размер: старое содержимое — в левый верхний угол, остальное
+ * цветом правого нижнего пикселя (обычно это фон окна), чтобы до перерисовки не мигало. */
+static bool resize_buffer(window *w, int nw, int nh) {
+    if (nw <= 0 || nh <= 0 || nw > 2560 || nh > 1600) return false;
+    if (nw == w->w && nh == w->h) return false;
+    int id = shm_alloc(nw * nh * 4);
+    if (id < 0) return false;
+    color_t *px = shm_map(id);
+    if (!px) return false;
+    color_t fill = w->pixels[w->w * w->h - 1];
+    int cw = nw < w->w ? nw : w->w, ch = nh < w->h ? nh : w->h;
+    for (int y = 0; y < nh; y++) {
+        color_t *d = px + y * nw;
+        int x = 0;
+        if (y < ch) { memcpy(d, w->pixels + y * w->w, cw * 4); x = cw; }
+        for (; x < nw; x++) d[x] = fill;
+    }
+    struct msg m;
+    memset(&m, 0, sizeof(m));
+    m.type = WM_SETBUF;
+    m.a = w->id; m.b = id; m.c = nw; m.d = nh;
+    msg_send(desktop, &m);
+    bool selected = gfx_buf == w->pixels;
+    shm_unmap(w->pixels);                       /* стол держит своё отображение, пока не возьмёт новое */
+    w->pixels = px;
+    w->shm = id;
+    w->w = nw; w->h = nh;
+    if (selected) win_select(w);
+    return true;
+}
+
 static window *find_win(int id) {
     for (int i = 0; i < MAX_WINDOWS; i++) if (wins[i] && wins[i]->id == id) return wins[i];
     return NULL;
@@ -134,6 +173,10 @@ int win_event(struct event *e, int timeout_ms) {
         case WM_CLOSE: e->type = EV_CLOSE; return 1;
         case WM_FOCUS: e->type = EV_FOCUS; e->key = m.b; return 1;
         case WM_QUIT: e->type = EV_QUIT; return 0;
+        case WM_RESIZE:
+            if (!e->win || !resize_buffer(e->win, m.b, m.c)) continue;
+            e->type = EV_RESIZE; e->x = e->win->w; e->y = e->win->h;
+            return 1;
         default: continue;
         }
     }

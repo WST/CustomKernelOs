@@ -90,8 +90,9 @@ enum {
 #define CAP_RECT_FILL 0x01
 #define CAP_RECT_COPY 0x02
 #define CAP_CURSOR    0x20
+#define CAP_ALPHA_CURSOR 0x200
 enum { F_MIN = 0, F_MAX = 1, F_NEXT_CMD = 2, F_STOP = 3, F_NUM_REGS = 293 };
-enum { CMD_UPDATE = 1, CMD_RECT_FILL = 2, CMD_RECT_COPY = 3, CMD_DEFINE_CURSOR = 19 };
+enum { CMD_UPDATE = 1, CMD_RECT_FILL = 2, CMD_RECT_COPY = 3, CMD_DEFINE_CURSOR = 19, CMD_DEFINE_ALPHA_CURSOR = 22 };
 
 static u16 svga_io;
 static volatile u32 *fifo;
@@ -180,6 +181,7 @@ static bool svga_init(void) {
     info.caps = FB_CAP_COPY | FB_CAP_FILL;                        /* без GPU — сделаем процессором */
     if (svga_caps & CAP_RECT_COPY) info.caps |= FB_CAP_GPU;     /* заливка — тоже через копирование */
     if (svga_caps & CAP_CURSOR) info.caps |= FB_CAP_CURSOR;
+    if ((svga_caps & CAP_CURSOR) && (svga_caps & CAP_ALPHA_CURSOR)) info.caps |= FB_CAP_ALPHA_CURSOR;
     info.driver = "VMware SVGA II";
     info.hwcaps = svga_caps;
     drv = DRV_SVGA;
@@ -471,6 +473,20 @@ void fb_blit(const u32 *src, u32 sstride, int x, int y, int w, int h) {
 int fb_cursor_define(const u32 *argb, int w, int h, int hot_x, int hot_y) {
     if (drv != DRV_SVGA || !(info.caps & FB_CAP_CURSOR)) return -1;
     if (w <= 0 || h <= 0 || w > 32 || h > 32) return -1;
+    if (info.caps & FB_CAP_ALPHA_CURSOR) {
+        /* настоящая прозрачность: 32 бита BGRA на пиксель, цвет уже умножен на альфу
+         * (так курсор с мягкой тенью и сглаженным краем рисует сама карта) */
+        static u32 a[6 + 32 * 32];
+        a[0] = CMD_DEFINE_ALPHA_CURSOR; a[1] = 0; a[2] = hot_x; a[3] = hot_y; a[4] = w; a[5] = h;
+        for (int i = 0; i < w * h; i++) {
+            u32 p = argb[i], al = p >> 24;
+            u32 r = (p >> 16 & 255) * al / 255, g = (p >> 8 & 255) * al / 255, b = (p & 255) * al / 255;
+            a[6 + i] = al << 24 | r << 16 | g << 8 | b;
+        }
+        fifo_cmd(a, 6 + w * h);
+        cursor_defined = true;
+        return 0;
+    }
     /* всегда 32x32: строка маски — ровно одно слово, как ни считай выравнивание */
     static u32 c[8 + 32 + 32 * 32];
     c[0] = CMD_DEFINE_CURSOR; c[1] = 0; c[2] = hot_x; c[3] = hot_y;
@@ -482,8 +498,9 @@ int fb_cursor_define(const u32 *argb, int w, int h, int hot_x, int hot_y) {
         u8 bytes[4] = { 0xFF, 0xFF, 0xFF, 0xFF };                /* 1 = прозрачно */
         for (int x = 0; x < 32; x++) {
             u32 p = (x < w && y < h) ? argb[y * w + x] : 0;
-            if (p >> 24) bytes[x / 8] &= ~(0x80 >> (x % 8));
-            img[y * 32 + x] = (p >> 24) ? (p & 0xFFFFFF) : 0;
+            bool on = (p >> 24) >= 128;                           /* у карты прозрачность только «да/нет» */
+            if (on) bytes[x / 8] &= ~(0x80 >> (x % 8));
+            img[y * 32 + x] = on ? (p & 0xFFFFFF) : 0;
         }
         mask[y] = bytes[0] | bytes[1] << 8 | bytes[2] << 16 | (u32)bytes[3] << 24;
     }

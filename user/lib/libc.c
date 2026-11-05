@@ -95,10 +95,19 @@ int   unlink(const char *path)                   { return syscall3(SYS_UNLINK, (
 int   ps(struct proc_info *buf, int max)         { return syscall3(SYS_PS, (int)buf, max, 0); }
 int   stat(const char *p, struct dirent_info *o) { return syscall3(SYS_STAT, (int)p, (int)o, 0); }
 
-static int term_size;
-static void get_term_size(void) { if (!term_size) term_size = syscall3(SYS_TERMSIZE, 0, 0, 0); }
-int term_cols(void) { get_term_size(); return term_size >> 16; }
-int term_rows(void) { get_term_size(); return term_size & 0xFFFF; }
+/* размер не запоминаем: окно терминала могут растянуть в любой момент */
+int term_cols(void) { return syscall3(SYS_TERMSIZE, 0, 0, 0) >> 16; }
+int term_rows(void) { return syscall3(SYS_TERMSIZE, 0, 0, 0) & 0xFFFF; }
+
+int pty_open(int fds[2]) { return syscall3(SYS_PTY_OPEN, (int)fds, 0, 0); }
+int ttyctl(int fd, int op, int arg) { return syscall3(SYS_TTYCTL, fd, op, arg); }
+int kblayout(int l) { return syscall3(SYS_KBLAYOUT, l, 0, 0); }
+
+int utf8_put(char *o, int cp) {
+    if (cp < 0x80) { o[0] = cp; return 1; }
+    if (cp < 0x800) { o[0] = 0xC0 | cp >> 6; o[1] = 0x80 | (cp & 0x3F); return 2; }
+    o[0] = 0xE0 | cp >> 12; o[1] = 0x80 | (cp >> 6 & 0x3F); o[2] = 0x80 | (cp & 0x3F); return 3;
+}
 
 static int cur_tty;
 int ttymode(int mode) { cur_tty = mode; return syscall3(SYS_TTYMODE, mode, 0, 0); }
@@ -109,6 +118,15 @@ void gotoxy(int x, int y) { printf("\x1b[%d;%dH", y + 1, x + 1); }
 int readkey(void) {
     unsigned char c;
     if (read(STDIN, &c, 1) <= 0) return -1;
+    if (c >= 0xC0) {                                /* UTF-8: остальные байты буквы уже в буфере */
+        int n = c >= 0xE0 ? 2 : 1, cp = c & (c >= 0xE0 ? 0x0F : 0x1F);
+        for (int i = 0; i < n; i++) {
+            unsigned char d;
+            if (read(STDIN, &d, 1) <= 0) break;
+            cp = cp << 6 | (d & 0x3F);
+        }
+        return cp;
+    }
     if (c != 27) return c;
     /* одиночный Esc от начала последовательности отличаем так: остальные байты
      * последовательности ядро кладёт сразу, а после голого Esc — ничего нет */

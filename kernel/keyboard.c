@@ -1,4 +1,8 @@
-/* Драйвер PS/2 клавиатуры: IRQ1, scancode set 1, раскладка US. */
+/* Драйвер PS/2 клавиатуры: IRQ1, scancode set 1, раскладки US и русская (ЙЦУКЕН).
+ *
+ * В буфере — коды клавиш (u16): ASCII, особые клавиши KEY_* (0x80..0x89) и
+ * буквы других алфавитов как KEY_UNI + кодовая точка Unicode. Раскладку
+ * переключают Alt+Shift (как в Windows) или Win+Space (как в GNOME). */
 #include "keyboard.h"
 #include "idt.h"
 #include "task.h"
@@ -19,12 +23,40 @@ static const char map_shift[128] = {
     '*', 0, ' '
 };
 
-#define BUF_SIZE 128
-static volatile char buf[BUF_SIZE];
-static volatile u8 head, tail;
-static bool shift, caps, extended, ctrl;
+/* русская раскладка: те же клавиши (по map_normal / map_shift), UTF-8 строками */
+static const char *ru_from = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`"  "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~" "@#$^&|";
+static const char *ru_to   = "йцукенгшщзхъфывапролджэячсмитьбю.ё" "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё" "\"№;:?/";
+static u16 ru_map[128];             /* ASCII латинской раскладки -> кодовая точка */
 
-static void push(char c) {
+static u16 utf8_dec(const char **p) {
+    const u8 *s = (const u8 *)*p;
+    u16 c = *s++;
+    if (c >= 0xE0) { c = (c & 0x0F) << 12 | (s[0] & 0x3F) << 6 | (s[1] & 0x3F); s += 2; }
+    else if (c >= 0xC0) { c = (c & 0x1F) << 6 | (s[0] & 0x3F); s++; }
+    *p = (const char *)s;
+    return c;
+}
+
+static bool is_ru_letter_key(char c) {
+    for (const char *p = "[];',.`"; *p; p++) if (*p == c) return true;
+    return false;
+}
+
+static void ru_init(void) {
+    const char *t = ru_to;
+    for (const char *f = ru_from; *f && *t; f++) ru_map[(u8)*f] = utf8_dec(&t);
+}
+
+#define BUF_SIZE 128
+static volatile u16 buf[BUF_SIZE];
+static volatile u8 head, tail;
+static bool shift, caps, extended, ctrl, alt, win, combo_used;
+static int layout;                  /* 0 — US, 1 — русская */
+
+int  kb_layout(void) { return layout; }
+void kb_set_layout(int l) { layout = l ? 1 : 0; }
+
+static void push(u16 c) {
     u8 next = (head + 1) % BUF_SIZE;
     if (next != tail) { buf[head] = c; head = next; }
     task_wakeup((void *)buf);           /* разбудить того, кто ждёт клавишу */
@@ -39,6 +71,8 @@ static void keyboard_irq(struct regs *r) {
     if (extended) {
         extended = false;
         if ((sc & 0x7F) == 0x1D) { ctrl = !(sc & 0x80); return; }   /* правый Ctrl */
+        if ((sc & 0x7F) == 0x38) { alt = !(sc & 0x80); return; }    /* AltGr */
+        if ((sc & 0x7F) == 0x5B || (sc & 0x7F) == 0x5C) { win = !(sc & 0x80); return; }   /* Win */
         switch (sc) {
         case 0x48: push(KEY_UP);    break;
         case 0x50: push(KEY_DOWN);  break;
@@ -56,13 +90,27 @@ static void keyboard_irq(struct regs *r) {
 
     bool released = sc & 0x80;
     sc &= 0x7F;
-    if (sc == 0x2A || sc == 0x36) { shift = !released; return; }   /* Shift */
+    /* Alt+Shift: переключаем, когда нажата вторая из двух клавиш */
+    if (sc == 0x2A || sc == 0x36) {                                 /* Shift */
+        if (!released && !shift && alt) layout ^= 1;
+        shift = !released;
+        return;
+    }
+    if (sc == 0x38) {                                               /* левый Alt */
+        if (!released && !alt && shift) layout ^= 1;
+        alt = !released;
+        return;
+    }
     if (sc == 0x1D) { ctrl = !released; return; }                  /* Ctrl */
     if (released) return;
+    if (win && sc == 0x39) { layout ^= 1; return; }                 /* Win+Space */
+    (void)combo_used;
     if (sc == 0x3A) { caps = !caps; return; }                       /* CapsLock */
 
     if (ctrl && sc == 0x2E) { if (!proc_ctrl_c()) push(KEY_CTRL_C); return; }   /* Ctrl+C */
-    char c = shift ? map_shift[sc] : map_normal[sc];
+    bool sh = shift;
+    if (layout && caps && map_normal[sc] && is_ru_letter_key(map_normal[sc])) sh = !sh;   /* это тоже буквы */
+    char c = sh ? map_shift[sc] : map_normal[sc];
     if (ctrl) {                                     /* Ctrl+буква = код 1..26, как в терминалах */
         char l = map_normal[sc];
         if (l >= 'a' && l <= 'z') push(l - 'a' + 1);
@@ -70,10 +118,16 @@ static void keyboard_irq(struct regs *r) {
     }
     if (caps && c >= 'a' && c <= 'z') c -= 32;
     else if (caps && c >= 'A' && c <= 'Z') c += 32;
-    if (c) push(c);
+    if (layout && c > 0 && ru_map[(u8)c]) {
+        u16 u = ru_map[(u8)c];
+        if (u >= 0x80) { push(KEY_UNI + u); return; }
+        c = (char)u;
+    }
+    if (c) push((u8)c);
 }
 
 void keyboard_init(void) {
+    ru_init();
     while (inb(0x64) & 1) inb(0x60);   /* сбрасываем то, что накопилось */
     irq_install(1, keyboard_irq);
 }
@@ -85,19 +139,19 @@ void keyboard_init(void) {
 int kb_poll(void) {
     u32 f = irq_save();
     int c = -1;
-    if (head != tail) { c = (u8)buf[tail]; tail = (tail + 1) % BUF_SIZE; }
+    if (head != tail) { c = buf[tail]; tail = (tail + 1) % BUF_SIZE; }
     irq_restore(f);
     return c;
 }
 
-char kb_getchar(void) {
+int kb_getchar(void) {
     u32 f = irq_save();
     while (head == tail) {
         if (tasking_ready() && task_current()->kill_pending) { irq_restore(f); return 0; }
         if (tasking_ready()) task_wait((void *)buf);
         else __asm__ volatile ("sti; hlt; cli");
     }
-    char c = buf[tail];
+    int c = buf[tail];
     tail = (tail + 1) % BUF_SIZE;
     irq_restore(f);
     return c;

@@ -68,14 +68,25 @@ int shm_map(int id, u32 *addr) {
         if (!t->shm[i].id && slot < 0) slot = i;
     }
     if (slot < 0) return -EMFILE;
-    /* место в окне SHM_BASE..SHM_END: просто дальше всех предыдущих */
-    u32 va = SHM_BASE;
-    for (int i = 0; i < SHM_PER_TASK; i++)
-        if (t->shm[i].id) {
-            u32 end = t->shm[i].addr + shms[t->shm[i].id - 1].npages * PAGE_SIZE;
-            if (end > va) va = end;
+    /* место в окне SHM_BASE..SHM_END: первая подходящая дырка (окна меняют размер —
+     * старые буферы уходят, новые приходят, и адреса не должны кончаться) */
+    u32 size = s->npages * PAGE_SIZE, va = 0;
+    for (int c = -1; c < SHM_PER_TASK && !va; c++) {
+        u32 cand = SHM_BASE;
+        if (c >= 0) {
+            if (!t->shm[c].id) continue;
+            cand = t->shm[c].addr + shms[t->shm[c].id - 1].npages * PAGE_SIZE;
         }
-    if (va + s->npages * PAGE_SIZE > SHM_END || va + s->npages * PAGE_SIZE < va) return -ENOMEM;
+        if (cand + size > SHM_END || cand + size < cand) continue;
+        bool ok = true;
+        for (int i = 0; i < SHM_PER_TASK && ok; i++) {
+            if (!t->shm[i].id) continue;
+            u32 a = t->shm[i].addr, e = a + shms[t->shm[i].id - 1].npages * PAGE_SIZE;
+            if (cand < e && a < cand + size) ok = false;
+        }
+        if (ok) va = cand;
+    }
+    if (!va) return -ENOMEM;
     for (u32 i = 0; i < s->npages; i++)
         if (vmm_map_in(t->page_dir, va + i * PAGE_SIZE, s->frames[i], PG_USER | PG_WRITE)) {
             for (u32 j = 0; j < i; j++) vmm_unmap_in(t->page_dir, va + j * PAGE_SIZE);

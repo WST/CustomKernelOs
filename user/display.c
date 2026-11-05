@@ -70,8 +70,9 @@ static void draw(void) {
     }
     int cy = cursor_y();
     checkbox(GX, cy, gi.hw_cursor, (gi.caps & GFX_CAP_CURSOR) != 0,
-             (gi.caps & GFX_CAP_CURSOR) ? "Hardware mouse cursor (drawn by the card)"
-                                        : "Hardware mouse cursor (not supported)");
+             !(gi.caps & GFX_CAP_CURSOR) ? "Hardware mouse cursor (not supported)"
+             : (gi.caps & GFX_CAP_ALPHA_CURSOR) ? "Hardware mouse cursor (card, with alpha)"
+                                                : "Hardware mouse cursor (card, no alpha)");
     gfx_text(GX, H - 26, status, UI_DARK, TRANSPARENT);
     win_update(win);
 }

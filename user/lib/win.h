@@ -33,6 +33,8 @@ enum {
     EV_QUIT,                        /* рабочий стол завершается */
     EV_TIMEOUT,                     /* ничего не случилось за timeout_ms */
     EV_MESSAGE,                     /* сообщение от другой программы: e.msg */
+    EV_RESIZE,                      /* окно растянули: e.x, e.y — новый размер; буфер уже новый,
+                                       старое содержимое скопировано — перерисуй и win_update */
 };
 
 struct event {
@@ -50,6 +52,9 @@ void    win_select(window *w);      /* дальше gfx_* рисуют в это
 void    win_update(window *w);      /* показать всё окно */
 void    win_update_rect(window *w, int x, int y, int rw, int rh);
 void    win_set_title(window *w, const char *title);
+/* окно можно растягивать мышью и разворачивать (кнопка «развернуть» в заголовке);
+ * не меньше min_w x min_h. Программа должна уметь EV_RESIZE. */
+void    win_set_resizable(window *w, int min_w, int min_h);
 int     win_event(struct event *e, int timeout_ms);  /* 0 — рабочий стол пропал */
 int     win_desktop_pid(void);
 
@@ -77,7 +82,10 @@ bool ui_inside(int px, int py, int x, int y, int w, int h);
 enum {
     WM_CREATE = 100, WM_CREATED, WM_UPDATE, WM_TITLE, WM_DESTROY,
     WM_DISPLAY = 110,               /* программа -> стол: a = аппаратный курсор вкл/выкл */
+    WM_RESIZABLE = 111,             /* a = окно, b, c = наименьший размер */
+    WM_SETBUF = 112,                /* a = окно, b = shm нового буфера, c = ширина, d = высота */
     WM_KEY = 200, WM_MOUSE, WM_CLOSE, WM_FOCUS, WM_QUIT,
+    WM_RESIZE = 210,                /* стол -> программа: a = окно, b, c = новый размер */
 };
 
 #endif

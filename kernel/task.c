@@ -12,6 +12,7 @@
  * мы загружаем его CR3 и пишем вершину его стека ядра в TSS (esp0): когда в
  * программе случится прерывание, процессор перейдёт именно на этот стек. */
 #include "task.h"
+#include "tty.h"
 #include "ipc.h"
 #include "heap.h"
 #include "string.h"
@@ -91,6 +92,7 @@ static void make_zombie(struct task *t, int code) {
     release_mutex(t);
     close_all_files(t);
     console_release(t->id);         /* если программа перевела терминал в сырой режим */
+    tty_release(t->id);
     fb_release(t->id);              /* если программа захватила экран — вернуть консоль */
     t->exit_code = code;
     t->state = TASK_ZOMBIE;
