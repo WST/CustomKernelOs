@@ -1,0 +1,10 @@
+[console] step 1 undefined
+[console] gen 1 2
+[console] step 2 undefined
+[console] step 3 undefined
+[fetch GET http://test.local/dir/data.json -> ok]
+[console] fetched {"x":[1,2]}
+[console] run -> ok
+--- JS: 1 script; last error: 
+<meta charset="utf-8"><title></title><div data-n="5">step 3</div>
+

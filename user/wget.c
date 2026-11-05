@@ -106,7 +106,7 @@ int main(int argc, char **argv) {
 
     char req[512];
     int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-wget/0.13\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-wget/0.14\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host);
     if (net_write(fd, req, rl) != rl) { dprintf(STDERR, "wget: send failed\n"); close(fd); return 1; }
 

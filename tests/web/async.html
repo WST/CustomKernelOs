@@ -1,0 +1,12 @@
+<html><body><div id="o">wait</div><script>
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function run() {
+  for (let i = 1; i <= 3; i++) { await sleep(20); document.getElementById('o').textContent = 'step ' + i; console.log('step', i, typeof gcGarbage); }
+  const r = await fetch('data.json'); const d = await r.json(); console.log('fetched', JSON.stringify(d));
+  return 'ok';
+}
+run().then(v => console.log('run ->', v));
+function* ids() { let i = 0; while (true) yield ++i; }
+var gen = ids(); setTimeout(() => console.log('gen', gen.next().value, gen.next().value), 30);
+var garbage = []; for (var i = 0; i < 20000; i++) garbage.push({ i: i, s: 'x' + i }); garbage = null;
+</script></body></html>

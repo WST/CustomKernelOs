@@ -1,0 +1,33 @@
+[fetch GET http://test.local/dir/lib.js -> ok]
+[console] lib loaded function
+[console] lib says 42 3 JS test
+[console] <div id="later" class="b c" style="color: red;" data-foo-bar="x">dynamic</div> true BODY
+[console] http://test.local/dir/page.html /dir/page.html http://test.local/a?b=1#c true
+[console] cookie a=1; b=2
+[console] ls v 1
+[console] DOMContentLoaded complete
+[console] window load
+[console] body onload
+[click #btn] prevented=1
+[console] link click prevented
+[click #lnk] prevented=1
+[console] input value a
+[console] input value ab
+[fetch GET http://test.local/dir/data.json -> ok]
+[console] fetched [1, 2]
+[fetch GET http://test.local/dir/data.json -> ok]
+[console] xhr 200 13
+--- JS: 4 scripts; last error: 
+<meta charset="utf-8"><title>JS test</title>
+
+
+<div data-n="16"><ul data-n="28"><li data-n="29">item 1</li><li data-n="31">item 2</li><li data-n="33">item 3</li></ul></div>
+<p data-n="21">wide shown</p><p data-n="23">screen shown</p>
+<p data-n="35">written <b data-n="37">bold</b></p>
+<button value="clicked 1" data-n="40"></button>
+<a href="/next" data-n="43">next</a>
+<span data-n="46">3</span>
+<input name="q" value="ab" data-n="49">
+<div data-n="53">dynamic</div>
+
+

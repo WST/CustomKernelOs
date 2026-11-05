@@ -323,7 +323,7 @@ static void draw_menu(void) {
     for (int i = 0; i < MENU_HEAD; i++)                           /* шапка с градиентом */
         gfx_fill_rect(r.x + 1, r.y + 1 + i, r.w - 2, 1, RGB(20 + i, 80 + i * 2, 160 + i));
     gfx_text_scaled(r.x + 14, r.y + 6, "MyOS", C_WHITE, 2);
-    gfx_text(r.x + 92, r.y + 22, "v0.13", RGB(200, 220, 255), TRANSPARENT);
+    gfx_text(r.x + 92, r.y + 22, "v0.14", RGB(200, 220, 255), TRANSPARENT);
     for (int i = 0; i < menu_items(); i++) {
         int iy = r.y + MENU_HEAD + 6 + i * MENU_ITEM_H;
         if (i == menu_hover) gfx_fill_rect(r.x + 4, iy, r.w - 8, MENU_ITEM_H, RGB(65, 75, 100));

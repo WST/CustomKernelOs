@@ -3,6 +3,7 @@
 #   make           — собрать ядро (build/os.img), программы и установить их в /bin на disk.img
 #   make run       — всё собрать и запустить в QEMU
 #   make test      — юнит-тесты файловой системы и кучи (на хосте)
+#   make jstest    — тесты JavaScript и DOM браузера (на хосте)
 #   make clean     — удалить build/ (диск с файлами disk.img НЕ трогается)
 #   make cleandisk — удалить disk.img (при следующем запуске ФС создастся заново)
 #
@@ -85,15 +86,39 @@ $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
 
 # HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
 # Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
-TLS_PROGS := $(BUILD)/user/browser $(BUILD)/user/wget
+TLS_PROGS := $(BUILD)/user/wget
 
 $(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-$(patsubst %,%.o,$(TLS_PROGS)): user/lib/tls.h
+$(patsubst %,%.o,$(TLS_PROGS)) $(BUILD)/user/browser.o: user/lib/tls.h
 
 $(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) $(BUILD)/user/tls.o user/user.ld
 	$(LD) $(ULDFLAGS) $(ULIB) $(BUILD)/user/tls.o $< -o $@
+
+# JavaScript — движок user/lib/js*.c (программа js и браузер) и DOM user/lib/dom*.c (браузер).
+# Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
+JSLIB    := js jsparse jsrun jsnum jslib jslib2 jsre
+JS_OBJS  := $(patsubst %,$(BUILD)/user/l_%.o,$(JSLIB))
+DOM_OBJS := $(BUILD)/user/l_dom.o $(BUILD)/user/l_domjs.o
+
+$(BUILD)/user/l_%.o: user/lib/%.c user/lib/js.h user/lib/jsint.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(DOM_OBJS) $(BUILD)/user/browser.o: user/lib/dom.h user/lib/domint.h user/lib/js.h
+$(BUILD)/user/l_domjs.o: user/lib/dom_prelude.h
+
+# прелюдия (часть окружения браузера на JS) -> строка Си
+user/lib/dom_prelude.h: user/lib/dom_prelude.js
+	sed -e '/^ *\/\//d' -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+
+$(BUILD)/user/js.o: user/lib/js.h
+
+$(BUILD)/user/js: $(BUILD)/user/js.o $(ULIB) $(JS_OBJS) user/user.ld
+	$(LD) $(ULDFLAGS) $(ULIB) $(JS_OBJS) $< -o $@
+
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(BUILD)/user/tls.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
+	$(LD) $(ULDFLAGS) $(ULIB) $(BUILD)/user/tls.o $(JS_OBJS) $(DOM_OBJS) $< -o $@
 
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
@@ -164,6 +189,21 @@ test: | $(BUILD)
 	    tests/heap_test.c kernel/heap.c kernel/string.c -o $(BUILD)/heap_test
 	./$(BUILD)/heap_test
 
+# Тесты JavaScript на Linux: язык и встроенные объекты, потом DOM браузера на тестовой странице
+JS_SRC := $(patsubst %,user/lib/%.c,$(JSLIB))
+jstest: user/lib/dom_prelude.h | $(BUILD)
+	gcc -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/js_host.c $(JS_SRC) -o $(BUILD)/js-host
+	gcc -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/dom_host.c $(JS_SRC) \
+	    user/lib/dom.c user/lib/domjs.c -o $(BUILD)/dom-host
+	./$(BUILD)/js-host tests/js/lang.js | tee $(BUILD)/jstest.out
+	@grep -q " 0 failed" $(BUILD)/jstest.out
+	./$(BUILD)/js-host tests/js/gen.js > $(BUILD)/gentest.out
+	@diff -u tests/js/gen.expected $(BUILD)/gentest.out && echo "generators/async: OK"
+	./$(BUILD)/dom-host tests/web/t1.html click:btn click:lnk key:q:ab wait:200 > $(BUILD)/domtest.out
+	@diff -u tests/web/t1.expected $(BUILD)/domtest.out && echo "DOM test: OK"
+	./$(BUILD)/dom-host tests/web/async.html wait:300 > $(BUILD)/asynctest.out
+	@diff -u tests/web/async.expected $(BUILD)/asynctest.out && echo "DOM async test: OK"
+
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
 CCROOT := $(BUILD)/ccroot
 cctest: $(BUILD)/cc-host
@@ -187,5 +227,5 @@ cctest: $(BUILD)/cc-host
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)"
 
-.PHONY: all run debug clean cleandisk test programs install cctest
+.PHONY: all run debug clean cleandisk test programs install cctest jstest
 .SECONDARY:

@@ -12,10 +12,17 @@
  * для старых компьютеров: он сам скачивает страницу и отдаёт её по HTTP.
  * Поиск — тоже через FrogFind.
  *
+ * JavaScript — свой движок (user/lib/js*.c) и DOM (user/lib/dom*.c): страница
+ * сначала разбирается в дерево, скрипты выполняются по ходу разбора и меняют
+ * дерево, потом дерево превращается обратно в простой HTML для раскладки ниже.
+ * После щелчков, набора текста и таймеров раскладка обновляется, если скрипты
+ * что-то поменяли. Ctrl+J — включить/выключить JavaScript, Ctrl+K — консоль JS.
+ *
  * Шрифт без кириллицы, поэтому русский текст показывается латиницей (транслит).
  * Адрес file:/путь открывает HTML-файл с диска MyOS. */
 #include "win.h"
 #include "tls.h"
+#include "dom.h"
 
 #define W 800
 #define H 576
@@ -25,7 +32,7 @@
 #define VIEW_H (H - BAR_H - STATUS_H)
 #define MARGIN 12
 #define SB_W 12
-#define MAX_PAGE (768 * 1024)
+#define MAX_PAGE (2048 * 1024)
 #define HOME "about:home"
 #define PROXY "http://frogfind.com/read.php?a="
 
@@ -64,6 +71,7 @@ struct item {
     color_t color;
     int  link;                     /* номер ссылки или -1 */
     int  input;                    /* IT_INPUT / IT_BUTTON: номер поля */
+    int  node;                     /* элемент DOM, которому принадлежит (для щелчков в JS) */
     char *text;
 };
 
@@ -75,13 +83,15 @@ struct item {
 static struct item *items;
 static int n_items;
 static char *links[MAX_LINKS];
+static int link_node[MAX_LINKS];           /* узел DOM ссылки (для событий JS) или -1 */
 static int n_links;
 static int doc_h, scroll;
 
-struct input { int form; char name[40]; char value[128]; char type; int item; };   /* type: t текст, s кнопка, h скрытое */
+struct input { int form; char name[40]; char value[128]; char type; int item; int node; };   /* type: t текст, s кнопка, h скрытое */
 static struct input inputs[MAX_INPUTS];
 static int n_inputs, focus_input = -1;
 static char form_action[MAX_FORMS][256];
+static int form_node[MAX_FORMS];
 static int n_forms, cur_form = -1;
 
 static char page_title[80];
@@ -226,6 +236,7 @@ static bool space_pending;
 static int gap_pending;                  /* отступ перед следующим блоком */
 static int bold, italic, underline_n, pre, heading, center_n;
 static int cur_link = -1;
+static int node_stack[256], node_sp;     /* открытые элементы DOM (номера из data-n) */
 static color_t text_color;
 static int list_depth;
 static int list_counter[8];
@@ -243,6 +254,7 @@ static struct item *add_item(int kind, int w, int h) {
     it->h = h;
     it->link = -1;
     it->input = -1;
+    it->node = node_sp ? node_stack[node_sp - 1] : -1;
     if (h > line_h) line_h = h;
     return it;
 }
@@ -382,6 +394,11 @@ static bool get_attr(const char *tag, int n, const char *name, char *out, int ma
 
 static void resolve_url(const char *base, const char *rel, char *out, int max);
 
+static int node_attr(const char *t, int n) {          /* data-n="номер узла DOM" */
+    char v[16];
+    return get_attr(t, n, "data-n", v, sizeof(v)) ? atoi(v) : -1;
+}
+
 static void tag_input(const char *t, int n, bool button_tag) {
     char type[16], name[40], value[128];
     get_attr(t, n, "type", type, sizeof(type));
@@ -396,6 +413,7 @@ static void tag_input(const char *t, int n, bool button_tag) {
     snprintf(in->name, sizeof(in->name), "%s", name);
     snprintf(in->value, sizeof(in->value), "%s", value);
     in->item = -1;
+    in->node = node_attr(t, n);
     if (!strcmp(type, "hidden")) { in->type = 'h'; n_inputs++; return; }
     if (!strcmp(type, "submit") || !strcmp(type, "button") || !strcmp(type, "image")) {
         in->type = 's';
@@ -454,6 +472,7 @@ static void handle_tag(const char *t, int n) {
                 char action[256];
                 get_attr(t, n, "action", action, sizeof(action));
                 resolve_url(url, action[0] ? action : url, form_action[n_forms], 256);
+                form_node[n_forms] = node_attr(t, n);
                 cur_form = n_forms++;
             } else if (close) cur_form = -1;
         }
@@ -538,6 +557,7 @@ static void handle_tag(const char *t, int n) {
             char full[512];
             resolve_url(url, href, full, sizeof(full));
             links[n_links] = astrdup(full, strlen(full));
+            link_node[n_links] = node_attr(t, n);
             cur_link = n_links++;
         }
         return;
@@ -584,6 +604,7 @@ static void layout_html(const char *s, int n, bool plain) {
     pre = plain ? 1 : 0;
     cur_link = -1; list_depth = 0;
     in_title = in_skip = false;
+    node_sp = 0;
     text_color = RGB(20, 20, 20);
     page_title[0] = 0;
     if (plain) { add_text(s, n); finish_line(); doc_h = ly + 16; return; }
@@ -602,6 +623,22 @@ static void layout_html(const char *s, int n, bool plain) {
                 if (!q && (s[j] == '"' || s[j] == '\'')) q = s[j];
                 else if (q && s[j] == q) q = 0;
                 j++;
+            }
+            if (s[i + 1] != '!' && s[i + 1] != '?') {        /* стек элементов DOM: кто владелец текста */
+                bool closing = s[i + 1] == '/';
+                char nm[16];
+                int k = 0, st = i + 1 + closing;
+                while (st + k < j && k < 15 && isalnum(s[st + k])) { nm[k] = tolower(s[st + k]); k++; }
+                nm[k] = 0;
+                static const char *voids = " area base br col embed hr img input link meta param source track wbr keygen ";
+                char key[20];
+                snprintf(key, sizeof(key), " %s ", nm);
+                if (closing) { if (node_sp > 0) node_sp--; }
+                else if (nm[0] && !strstr(voids, key) && node_sp < 256) {
+                    int id = node_attr(s + i + 1, j - i - 1);
+                    node_stack[node_sp] = id >= 0 ? id : node_sp ? node_stack[node_sp - 1] : -1;
+                    node_sp++;
+                }
             }
             if (in_skip) {                                  /* внутри <script>: ищем только закрывающий тег */
                 if (s[i + 1] == '/') handle_tag(s + i + 1, j - i - 1);
@@ -652,7 +689,8 @@ static bool parse_url(const char *u, struct url_parts *p) {
 /* относительный адрес (как в href) -> полный */
 static void resolve_url(const char *base, const char *rel, char *out, int max) {
     while (*rel == ' ') rel++;
-    if (strstr(rel, "://") || !strncmp(rel, "about:", 6) || !strncmp(rel, "file:", 5) || !strncmp(rel, "mailto:", 7)) {
+    if (strstr(rel, "://") || !strncmp(rel, "about:", 6) || !strncmp(rel, "file:", 5) || !strncmp(rel, "mailto:", 7) ||
+        !strncmp(rel, "myosjs:", 7)) {
         snprintf(out, max, "%s", rel);
         return;
     }
@@ -818,6 +856,45 @@ static tls *conn;                  /* открытое HTTPS-соединени�
 static char tls_err[96];           /* почему не вышло HTTPS */
 static char secure[48];            /* "TLS 1.3, ChaCha20-Poly1305" для статуса */
 
+static const char *req_method = "GET";   /* метод и тело следующего запроса (XMLHttpRequest/fetch из JS) */
+static const char *req_body;
+static int req_body_len;
+static char resp_ctype[96];        /* Content-Type последнего ответа */
+
+#define USER_AGENT "Mozilla/5.0 (MyOS; i386) MyOS-Browser/0.14"
+
+/* консоль JavaScript: последние строки console.log и ошибок (about:console, Ctrl+K) */
+static char console_buf[12288];
+static int console_len;
+
+static void console_add(const char *s, int n) {
+    if (n > (int)sizeof(console_buf) / 2) { s += n - (int)sizeof(console_buf) / 2; n = sizeof(console_buf) / 2; }
+    if (console_len + n > (int)sizeof(console_buf)) {         /* выбросить старое */
+        int drop = console_len + n - sizeof(console_buf);
+        while (drop < console_len && console_buf[drop] != '\n') drop++;
+        if (drop < console_len) drop++;
+        memmove(console_buf, console_buf + drop, console_len - drop);
+        console_len -= drop;
+    }
+    memcpy(console_buf + console_len, s, n);
+    console_len += n;
+}
+
+static int console_page(char *out, int max) {
+    int o = snprintf(out, max, "<title>JavaScript console</title><h1>JavaScript console</h1>"
+                     "<p>Output of console.log() and script errors of the last page "
+                     "(<a href=\"about:js\">try JavaScript</a>, <a href=\"about:home\">home</a>).</p><hr><pre>");
+    for (int i = 0; i < console_len && o < max - 16; i++) {
+        char c = console_buf[i];
+        if (c == '<') o += snprintf(out + o, max - o, "&lt;");
+        else if (c == '&') o += snprintf(out + o, max - o, "&amp;");
+        else out[o++] = c;
+    }
+    if (!console_len) o += snprintf(out + o, max - o, "(empty)");
+    o += snprintf(out + o, max - o, "</pre>");
+    return o;
+}
+
 static int net_read(int fd, void *b, int n) { return conn ? tls_read(conn, b, n) : read(fd, b, n); }
 static int net_write(int fd, const void *b, int n) { return conn ? tls_write(conn, b, n) : write(fd, b, n); }
 
@@ -831,6 +908,10 @@ static const char *home_page =
     "<p><i>(search goes through FrogFind, a free service that simplifies modern sites for old "
     "computers. https:// sites are opened directly with our own TLS 1.3; sites that only know "
     "older TLS are opened through FrogFind)</i></p>"
+    "<p><b>JavaScript</b> works: the browser has its own JS engine and DOM. "
+    "<a href=\"about:js\">JavaScript demo</a> | <a href=\"about:console\">JS console</a> "
+    "<span id=\"jsinfo\">(JavaScript is off - press Ctrl+J)</span></p>"
+    "<script>document.getElementById('jsinfo').textContent = '- enabled, ' + new Date().toLocaleString();</script>"
     "<h2>Try these</h2><ul>"
     "<li><a href=\"http://info.cern.ch/hypertext/WWW/TheProject.html\">The first web site</a> - CERN, 1991</li>"
     "<li><a href=\"http://frogfind.com/\">FrogFind</a> - search engine for vintage computers</li>"
@@ -843,7 +924,46 @@ static const char *home_page =
     "<li><a href=\"http://neverssl.com/\">neverssl.com</a></li>"
     "<li><a href=\"http://localhost/\">http://localhost/</a> - this computer (start <b>httpd &amp;</b> in Terminal first)</li>"
     "<li><a href=\"file:/\">file:/</a> - files on the MyOS disk</li>"
-    "</ul><hr><p>Keys: Ctrl+L - address, Backspace - back, PgUp/PgDn, arrows, Home/End - scroll.</p>";
+    "</ul><hr><p>Keys: Ctrl+L - address, Backspace - back, PgUp/PgDn, arrows, Home/End - scroll, "
+    "Ctrl+J - JavaScript on/off, Ctrl+K - JavaScript console.</p>";
+
+static const char *js_page =
+    "<title>JavaScript in MyOS</title><h1>JavaScript in MyOS</h1>"
+    "<p>Everything below is made by scripts running in the MyOS JavaScript engine.</p>"
+    "<h2>Counter</h2><p><button id=\"minus\">-</button> <b id=\"count\">0</b> <button id=\"plus\">+</button></p>"
+    "<h2>Clock</h2><p id=\"clock\">...</p>"
+    "<h2>Calculator</h2><form id=\"calc\"><input id=\"expr\" size=\"30\" value=\"2 ** 10 + Math.sqrt(16)\"> "
+    "<input type=\"submit\" value=\"=\"></form><p id=\"result\"></p>"
+    "<h2>Type here</h2><p><input id=\"typing\" size=\"30\"></p><p>Reversed: <span id=\"rev\"></span></p>"
+    "<h2>Primes</h2><p id=\"primes\"></p>"
+    "<h2>Lists</h2><ul id=\"list\"></ul><p><a href=\"#\" id=\"add\">add an item</a> | <a href=\"#\" id=\"sort\">sort</a></p>"
+    "<p><a href=\"about:console\">JavaScript console</a> - <a href=\"about:home\">home</a></p>"
+    "<script>\n"
+    "var n = 0, count = document.getElementById('count');\n"
+    "document.getElementById('plus').onclick = function () { count.textContent = ++n; };\n"
+    "document.getElementById('minus').addEventListener('click', () => { count.textContent = --n; });\n"
+    "function tick() { document.getElementById('clock').textContent = new Date().toLocaleTimeString(); }\n"
+    "tick(); setInterval(tick, 1000);\n"
+    "document.getElementById('calc').addEventListener('submit', function (e) {\n"
+    "  e.preventDefault();\n"
+    "  var out = document.getElementById('result');\n"
+    "  try { out.textContent = '= ' + eval(document.getElementById('expr').value); }\n"
+    "  catch (err) { out.textContent = err.name + ': ' + err.message; }\n"
+    "});\n"
+    "document.getElementById('typing').addEventListener('input', function () {\n"
+    "  document.getElementById('rev').textContent = this.value.split('').reverse().join('');\n"
+    "});\n"
+    "var primes = [];\n"
+    "for (var i = 2; primes.length < 25; i++) if (primes.every(p => i % p)) primes.push(i);\n"
+    "document.getElementById('primes').textContent = primes.join(', ');\n"
+    "var fruits = ['pear', 'apple', 'plum'];\n"
+    "function draw() { document.getElementById('list').innerHTML = fruits.map(f => `<li>${f}</li>`).join(''); }\n"
+    "draw();\n"
+    "var more = ['kiwi', 'banana', 'cherry', 'orange', 'lime'];\n"
+    "document.getElementById('add').onclick = function (e) { e.preventDefault(); fruits.push(more[fruits.length % more.length]); draw(); };\n"
+    "document.getElementById('sort').onclick = function (e) { e.preventDefault(); fruits.sort(); draw(); };\n"
+    "console.log('about:js is ready');\n"
+    "</script>";
 
 static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     struct url_parts p;
@@ -851,9 +971,12 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     *is_html = true;
     location[0] = 0;
     body_len = 0;
+    resp_ctype[0] = 0;
     if (p.about) {
-        int n = strlen(home_page);
-        memcpy(body, home_page, n);
+        if (!strcmp(p.path, "console")) { body_len = console_page(body, MAX_PAGE); return 200; }
+        const char *pg = !strcmp(p.path, "js") ? js_page : home_page;
+        int n = strlen(pg);
+        memcpy(body, pg, n);
         body_len = n;
         return 200;
     }
@@ -901,12 +1024,17 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
         if (!conn) { close(fd); return -2; }
         snprintf(secure, sizeof(secure), "%s", tls_info(conn));
     }
-    char req[1024];
+    char cookies[2048], req[4096];
+    cookie_get(p.host, cookies, sizeof(cookies));
     int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-Browser/0.13 (Lynx-like)\r\n"
-        "Accept: text/html, text/plain, */*\r\nAccept-Language: ru, en\r\nConnection: close\r\n\r\n",
-        p.path, p.host);
+        "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: " USER_AGENT "\r\n"
+        "Accept: text/html, text/plain, */*\r\nAccept-Language: ru, en\r\nConnection: close\r\n",
+        req_method, p.path, p.host);
+    if (cookies[0]) rl += snprintf(req + rl, sizeof(req) - rl, "Cookie: %s\r\n", cookies);
+    if (req_body) rl += snprintf(req + rl, sizeof(req) - rl, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n", req_body_len);
+    rl += snprintf(req + rl, sizeof(req) - rl, "\r\n");
     net_write(fd, req, rl);
+    if (req_body && req_body_len) net_write(fd, req_body, req_body_len);
     int n, total = 0, expect = -1;                       /* expect: где кончится ответ по Content-Length */
     unsigned last = ticks();
     while (total < MAX_PAGE && (n = net_read(fd, body + total, MAX_PAGE - total)) > 0) {
@@ -954,7 +1082,9 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
         char *val = line[k] == ':' ? line + k + 1 : NULL;
         while (val && *val == ' ') val++;
         if (val && !strcmp(low, "location")) snprintf(location, loc_max, "%s", val);
+        if (val && !strcmp(low, "set-cookie")) cookie_set(p.host, val);
         if (val && !strcmp(low, "content-type")) {
+            snprintf(resp_ctype, sizeof(resp_ctype), "%s", val);
             *is_html = strstr(val, "html") != NULL;
             if (strstr(val, "1251")) cp1251 = true;
             if (strstr(val, "image/")) { *is_html = true; }
@@ -983,6 +1113,129 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
         body_len = w;
     }
     return code;
+}
+
+static void navigate(const char *target, bool add_history);
+static int nav_depth;
+static char page_status[160];
+
+/* windows-1251 -> UTF-8 (DOM и скрипты работают с UTF-8) */
+static void cp1251_to_utf8(void) {
+    static const unsigned short hi[64] = {   /* 0x80..0xBF */
+        0x402, 0x403, 0x201A, 0x453, 0x201E, 0x2026, 0x2020, 0x2021, 0x20AC, 0x2030, 0x409, 0x2039, 0x40A, 0x40C, 0x40B, 0x40F,
+        0x452, 0x2018, 0x2019, 0x201C, 0x201D, 0x2022, 0x2013, 0x2014, '?', 0x2122, 0x459, 0x203A, 0x45A, 0x45C, 0x45B, 0x45F,
+        0xA0, 0x40E, 0x45E, 0x408, 0xA4, 0x490, 0xA6, 0xA7, 0x401, 0xA9, 0x404, 0xAB, 0xAC, 0xAD, 0xAE, 0x407,
+        0xB0, 0xB1, 0x406, 0x456, 0x491, 0xB5, 0xB6, 0xB7, 0x451, 0x2116, 0x454, 0xBB, 0x458, 0x405, 0x455, 0x457 };
+    char *out = malloc(body_len * 2 + 1);
+    if (!out) return;
+    int o = 0;
+    for (int i = 0; i < body_len; i++) {
+        unsigned char c = body[i];
+        unsigned cp = c < 0x80 ? c : c >= 0xC0 ? 0x410 + (c - 0xC0) : hi[c - 0x80];
+        if (cp < 0x80) out[o++] = cp;
+        else if (cp < 0x800) { out[o++] = 0xC0 | (cp >> 6); out[o++] = 0x80 | (cp & 63); }
+        else { out[o++] = 0xE0 | (cp >> 12); out[o++] = 0x80 | ((cp >> 6) & 63); out[o++] = 0x80 | (cp & 63); }
+    }
+    if (o > MAX_PAGE) o = MAX_PAGE;
+    memcpy(body, out, o);
+    body_len = o;
+    free(out);
+}
+
+/* скачать адрес для скрипта (внешний <script>, XMLHttpRequest, fetch) */
+static int js_fetch(const char *u, const char *method, const char *data, int dlen,
+                    char **out, int *len, int *status, char *ctype, int cmax) {
+    char cur[1024], loc[512];
+    bool html;
+    *out = NULL;
+    *len = 0;
+    if (strncmp(u, "http://", 7) && strncmp(u, "https://", 8) && strncmp(u, "file:", 5)) return -1;
+    snprintf(cur, sizeof(cur), "%s", u);
+    req_method = method && *method ? method : "GET";
+    req_body = data;
+    req_body_len = dlen;
+    int code = -1;
+    for (int hop = 0; hop < 5; hop++) {
+        code = http_get(cur, loc, sizeof(loc), &html);
+        if (code >= 300 && code < 400 && loc[0]) {
+            char next[1024];
+            resolve_url(cur, loc, next, sizeof(next));
+            snprintf(cur, sizeof(cur), "%s", next);
+            req_method = "GET";
+            req_body = NULL;
+            continue;
+        }
+        break;
+    }
+    req_method = "GET";
+    req_body = NULL;
+    req_body_len = 0;
+    if (!nav_depth) set_status(page_status);              /* запрос из скрипта после загрузки — вернуть «Done» */
+    if (code < 0) return -1;
+    *out = malloc(body_len + 1);
+    if (!*out) return -1;
+    memcpy(*out, body, body_len);
+    (*out)[body_len] = 0;
+    *len = body_len;
+    *status = code;
+    snprintf(ctype, cmax, "%s", resp_ctype);
+    return 0;
+}
+
+static void js_status(const char *m) { set_status(m); }
+
+static struct dom_host dom_host = { js_fetch, js_status, console_add };
+
+static bool page_is_dom;            /* страница построена через DOM (а не простой текст) */
+static unsigned last_layout;
+
+/* дерево DOM -> раскладка; keep — сохранить прокрутку и поле ввода */
+static void relayout(bool keep) {
+    int len;
+    char *h = dom_serialize(&len);
+    if (!h) return;
+    int save_scroll = scroll, fnode = focus_input >= 0 ? inputs[focus_input].node : -1;
+    arena_used = 0;
+    cp1251 = false;
+    layout_html(h, len, false);
+    free(h);
+    scroll = keep ? save_scroll : 0;
+    if (scroll > doc_h - VIEW_H) scroll = doc_h - VIEW_H;
+    if (scroll < 0) scroll = 0;
+    if (fnode >= 0) for (int i = 0; i < n_inputs; i++) if (inputs[i].node == fnode) focus_input = i;
+    char t[96];
+    snprintf(t, sizeof(t), "%.60s - Browser", page_title[0] ? page_title : url);
+    win_set_title(win, t);
+    last_layout = ticks();
+}
+
+static void go_history(int d);
+
+/* после работы скриптов: переход по location.href, новый адрес, перерисовка.
+ * lazy — от таймеров: перерисовывать не чаще 10 раз в секунду */
+static void after_js_ex(bool lazy) {
+    char nav[1024];
+    if (dom_pending_nav(nav, sizeof(nav))) {
+        if (!strcmp(nav, "myos:back")) { go_history(-1); return; }
+        if (!strcmp(nav, "myos:forward")) { go_history(1); return; }
+        if (nav_depth < 5) { navigate(nav, true); return; }
+    }
+    if (page_is_dom && dom_url_changed()) {
+        dom_get_url(url, sizeof(url));
+        if (!editing_addr) snprintf(addr, sizeof(addr), "%s", url);
+        if (hist_pos >= 0 && hist_pos < n_hist) { free(history[hist_pos]); history[hist_pos] = malloc(strlen(url) + 1); strcpy(history[hist_pos], url); }
+        draw_toolbar();
+        win_update_rect(win, 0, 0, W, BAR_H);
+    }
+    if (page_is_dom && dom_dirty && !(lazy && ticks() - last_layout < 100)) { relayout(true); redraw(); }
+}
+
+static void after_js(void) { after_js_ex(false); }
+
+/* тот же документ, только другой #якорь? */
+static bool same_page(const char *a, const char *b) {
+    int la = strchr(a, '#') ? strchr(a, '#') - a : (int)strlen(a), lb = strchr(b, '#') ? strchr(b, '#') - b : (int)strlen(b);
+    return la == lb && !strncmp(a, b, la) && strchr(b, '#');
 }
 
 static void navigate(const char *target, bool add_history) {
@@ -1027,19 +1280,38 @@ static void navigate(const char *target, bool add_history) {
                             fallback[0] ? "<p><b>HTTPS:</b> " : "", fallback, fallback[0] ? "</p>" : "");
         html = true;
     }
-    layout_html(body, body_len, !html);
+    if (strncmp(url, "about:console", 13)) console_len = 0;
+    focus_input = -1;
+    page_is_dom = html;
+    int body_kb = body_len / 1024;
+    if (html) {                                            /* HTML: дерево DOM + скрипты */
+        if (!cp1251) {                                     /* <meta charset=windows-1251> */
+            int lim = body_len < 4096 ? body_len : 4096;
+            for (int i = 0; i + 4 <= lim; i++) if (!memcmp(body + i, "1251", 4)) { cp1251 = true; break; }
+        }
+        if (cp1251) cp1251_to_utf8();
+        cp1251 = false;
+        set_status(dom_scripting ? "Running scripts..." : "Building page...");
+        nav_depth++;
+        dom_load(body, body_len, url);
+        relayout(false);
+        nav_depth--;
+    } else layout_html(body, body_len, true);
     scroll = 0;
-    char t[96];
-    snprintf(t, sizeof(t), "%.60s - Browser", page_title[0] ? page_title : url);
-    win_set_title(win, t);
     if (code >= 0) {
-        snprintf(status, sizeof(status), code == 200 ? "Done: %d KB, %d links" : "HTTP %d", code == 200 ? body_len / 1024 : code, n_links);
-        if (code == 200) snprintf(status, sizeof(status), "Done: %d KB, %d links", body_len / 1024, n_links);
+        if (code == 200) snprintf(status, sizeof(status), "Done: %d KB, %d links", body_kb, n_links);
+        else snprintf(status, sizeof(status), "HTTP %d", code);
         int sl = strlen(status);
+        if (html) {
+            char js[64];
+            dom_stats(js, sizeof(js));
+            sl += snprintf(status + sl, sizeof(status) - sl, " - %s%s", js, strstr(js, "error") ? " (Ctrl+K)" : "");
+        }
         if (secure[0]) snprintf(status + sl, sizeof(status) - sl, " - %s (certificate not checked)", secure);
         else if (fallback[0]) snprintf(status + sl, sizeof(status) - sl, " - %s", fallback);
     }
     hover_link[0] = 0;
+    snprintf(page_status, sizeof(page_status), "%s", status);
     if (add_history) {
         if (hist_pos < n_hist - 1) {                      /* после «Назад» новая ветка */
             for (int i = hist_pos + 1; i < n_hist; i++) free(history[i]);
@@ -1051,6 +1323,11 @@ static void navigate(const char *target, bool add_history) {
         hist_pos = n_hist++;
     }
     redraw();
+    if (html && nav_depth == 0) {                          /* скрипт сразу попросил другой адрес */
+        nav_depth++;
+        after_js();
+        nav_depth--;
+    }
 }
 
 static void go_history(int d) {
@@ -1120,12 +1397,41 @@ static void on_click(int x, int y) {
     if (i >= 0) {
         struct item *it = &items[i];
         if (it->kind == IT_INPUT) { focus_input = it->input; redraw(); return; }
-        if (it->kind == IT_BUTTON) { submit_form(inputs[it->input].form); return; }
+        if (it->kind == IT_BUTTON) {
+            struct input *in = &inputs[it->input];
+            if (page_is_dom && dom_scripting && in->node >= 0) { dom_click(in->node); after_js(); return; }
+            submit_form(in->form);
+            return;
+        }
         if (it->link >= 0) {
             char target[512];
             snprintf(target, sizeof(target), "%s", links[it->link]);
+            int node = link_node[it->link];
+            if (!strncmp(target, "myosjs:", 7)) {             /* элемент с обработчиком onclick */
+                if (page_is_dom) { dom_click(atoi(target + 7)); after_js(); }
+                return;
+            }
+            if (page_is_dom && dom_scripting && node >= 0) {
+                if (dom_click(node)) { after_js(); return; }   /* скрипт отменил переход */
+                char nav[1024];
+                if (dom_pending_nav(nav, sizeof(nav))) { navigate(nav, true); return; }
+            }
+            if (page_is_dom && same_page(url, target)) {          /* #якорь: страницу не перезагружаем */
+                dom_set_url(target);
+                snprintf(url, sizeof(url), "%s", target);
+                snprintf(addr, sizeof(addr), "%s", target);
+                after_js();
+                redraw();
+                return;
+            }
             if (!strncmp(target, "mailto:", 7)) { set_status("mail links are not supported"); return; }
+            if (!strncmp(target, "javascript:", 11)) return;
             navigate(target, true);
+            return;
+        }
+        if (page_is_dom && dom_scripting && it->node >= 0) {    /* щелчок по тексту: событие элементу (и выше) */
+            dom_click(it->node);
+            after_js();
             return;
         }
     }
@@ -1145,6 +1451,13 @@ static void edit_string(char *s, int max, int *cur, int k) {
 
 static void on_key(int k) {
     if (k == CTRL('l')) { editing_addr = true; addr_all = true; focus_input = -1; addr_cur = strlen(addr); redraw(); return; }
+    if (k == CTRL('j')) {                                  /* JavaScript вкл/выкл — и перезагрузить */
+        dom_scripting = !dom_scripting;
+        navigate(url, false);
+        set_status(dom_scripting ? "JavaScript is ON" : "JavaScript is OFF (Ctrl+J to turn on)");
+        return;
+    }
+    if (k == CTRL('k')) { navigate("about:console", true); return; }
     if (editing_addr) {
         if (k == '\n' || k == '\r') { editing_addr = false; navigate(addr, true); return; }
         if (k == 27) { editing_addr = false; snprintf(addr, sizeof(addr), "%s", url); redraw(); return; }
@@ -1159,10 +1472,29 @@ static void on_key(int k) {
     }
     if (focus_input >= 0) {
         struct input *in = &inputs[focus_input];
-        if (k == '\n' || k == '\r') { submit_form(in->form); return; }
+        bool js = page_is_dom && dom_scripting && in->node >= 0;
+        if (k == '\n' || k == '\r') {
+            if (js) {
+                int f = in->form;
+                dom_key(in->node, '\r', NULL);
+                if (f >= 0 && form_node[f] >= 0) {
+                    if (!dom_submit(form_node[f])) { submit_form(f); return; }
+                }
+                after_js();
+                return;
+            }
+            submit_form(in->form);
+            return;
+        }
         if (k == 27) { focus_input = -1; redraw(); return; }
+        char before[128];
+        snprintf(before, sizeof(before), "%s", in->value);
         int cur = strlen(in->value);
         edit_string(in->value, sizeof(in->value), &cur, k);
+        if (page_is_dom && in->node >= 0) {
+            dom_key(in->node, k < 256 ? k : 0, strcmp(before, in->value) ? in->value : NULL);
+            after_js();
+        }
         redraw();
         return;
     }
@@ -1203,9 +1535,22 @@ int main(int argc, char **argv) {
     arena_cap = 1024 * 1024;
     arena = malloc(arena_cap);
     if (!items || !body || !arena) { dprintf(STDERR, "browser: out of memory\n"); return 1; }
+    dom_init(&dom_host);
     navigate(argc > 1 ? argv[1] : HOME, true);
     struct event e;
-    while (win_event(&e, -1)) {
+    for (;;) {
+        int wait = page_is_dom ? dom_next_timer() : -1;
+        if (page_is_dom && dom_dirty) {                    /* отложенная перерисовка */
+            int left = 100 - (int)(ticks() - last_layout);
+            if (left < 0) left = 0;
+            if (wait < 0 || left < wait) wait = left;
+        }
+        if (!win_event(&e, wait)) break;
+        if (e.type == EV_TIMEOUT) {                        /* setTimeout / setInterval */
+            dom_run_timers();
+            after_js_ex(true);
+            continue;
+        }
         if (e.type == EV_CLOSE) break;
         if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) on_click(e.x, e.y);
         else if (e.type == EV_MOUSE_MOVE && !e.buttons) on_move(e.x, e.y);

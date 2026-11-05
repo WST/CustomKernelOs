@@ -1,0 +1,15 @@
+got hello
+{"value":0,"done":false} {"value":10,"done":false} {"value":20,"done":false} {"value":"end","done":true} {"done":true}
+[0, 10, 20, 30] [0, 10]
+1,a,b,8,9,2
+obj 1
+obj 2
+[3, 4]
+finally ran
+{"value":42,"done":true} {"done":true}
+caught boom
+{"value":"recovered","done":false}
+0 1 1 2 3 5 8 13 21 34
+300 asyncs ok
+arrow 7
+start | sync after main() | a=2 | b=4,6 | caught x | done
