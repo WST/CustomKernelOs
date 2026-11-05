@@ -98,18 +98,20 @@ static void press(const char *k) {
 }
 
 static void draw(void) {
-    gfx_clear(RGB(230, 230, 230));
-    gfx_fill_rect(0, 0, W, DISP_H, RGB(250, 250, 250));
-    if (op) { char o[2] = { op, 0 }; gfx_text(10, 8, o, UI_SHADOW, TRANSPARENT); }
-    int scale = strlen(disp) > 13 ? 1 : 2;
-    int tw = strlen(disp) * 8 * scale;
-    gfx_text_scaled(W - 12 - tw, scale == 2 ? 24 : 32, disp, UI_TEXT, scale);
+    gfx_clear(UI_FACE);
+    if (op) { char o[2] = { op, 0 }; text_draw(FONT_UI, 16, 12, 8, o, UI_DARK); }
+    int size = 40, tw;
+    while ((tw = text_width(FONT_UI, size, disp)) > W - 24 && size > 14) size -= 2;
+    text_draw(FONT_UI, size, W - 12 - tw, DISP_H - 6 - text_line_h(FONT_UI, size), disp, UI_TEXT);
     for (int i = 0; i < 20; i++) {
         int x = GAP + (i % 4) * (BW + GAP), y = DISP_H + GAP + (i / 4) * (BH + GAP);
-        color_t bg = i == 19 ? RGB(0, 103, 192) : (keys[i][0] >= '0' && keys[i][0] <= '9') ? RGB(252, 252, 252) : RGB(240, 240, 240);
-        if (i == pressed) bg = i == 19 ? RGB(0, 80, 160) : RGB(205, 205, 205);
-        gfx_fill_rect(x, y, BW, BH, bg);
-        ui_text_center(x, y, BW, BH, keys[i], i == 19 ? C_WHITE : UI_TEXT);
+        bool digit = keys[i][0] >= '0' && keys[i][0] <= '9';
+        if (i == 19) { ui_button_accent(x + 2, y + 2, BW - 4, BH - 4, keys[i], i == pressed); continue; }
+        color_t bg = digit ? RGB(255, 255, 255) : RGB(236, 236, 236);
+        if (i == pressed) bg = RGB(214, 214, 214);
+        gfx_round_rect(x + 2, y + 2, BW - 4, BH - 4, 8, bg);
+        int th = text_line_h(FONT_UI, 18), kw = text_width(FONT_UI, 18, keys[i]);
+        text_draw(FONT_UI, 18, x + (BW - kw) / 2, y + (BH - th) / 2, keys[i], UI_TEXT);
     }
     win_update(win);
 }

@@ -34,45 +34,55 @@ static void draw(void) {
     gfx_clear(C_WHITE);
     /* график загрузки процессора за минуту */
     int gx = 8, gy = 6, gw = 240, gh = 44;
-    gfx_fill_rect(gx, gy, gw, gh, RGB(240, 248, 255));
-    gfx_rect(gx, gy, gw, gh, RGB(17, 125, 187));
+    gfx_round_frame(gx, gy, gw, gh, 6, RGB(230, 230, 230), RGB(252, 252, 252));
+    if (n_hist > 1) {                                      /* залитая область под линией */
+        gfx_path p;
+        path_begin(&p, 0, 0, 1, 16);
+        path_move(&p, (gx + 1) * 16, (gy + gh - 1) * 16);
+        for (int i = 0; i < n_hist; i++)
+            path_line(&p, (gx + 1 + i * (gw - 2) / 60) * 16, (gy + gh - 2) * 16 - cpu_hist[i] * (gh - 4) * 16 / 100);
+        path_line(&p, (gx + 1 + (n_hist - 1) * (gw - 2) / 60) * 16, (gy + gh - 1) * 16);
+        path_close(&p);
+        path_fill(&p, UI_ACCENT, 50);
+        path_free(&p);
+    }
     for (int i = 1; i < n_hist; i++) {
-        int x0 = gx + (i - 1) * gw / 60, x1 = gx + i * gw / 60;
-        int y0 = gy + gh - 1 - cpu_hist[i - 1] * (gh - 2) / 100, y1 = gy + gh - 1 - cpu_hist[i] * (gh - 2) / 100;
-        gfx_line(x0, y0, x1, y1, RGB(17, 125, 187));
+        int x0 = gx + 1 + (i - 1) * (gw - 2) / 60, x1 = gx + 1 + i * (gw - 2) / 60;
+        int y0 = (gy + gh - 2) * 16 - cpu_hist[i - 1] * (gh - 4) * 16 / 100, y1 = (gy + gh - 2) * 16 - cpu_hist[i] * (gh - 4) * 16 / 100;
+        gfx_line16(x0 * 16, y0, x1 * 16, y1, 24, UI_ACCENT, 255);
     }
     unsigned mem = 0;
     for (int i = 0; i < n_procs; i++) mem += procs[i].mem_kb;
     char s[64];
     snprintf(s, sizeof(s), "CPU %d%%", n_hist ? cpu_hist[n_hist - 1] : 0);
-    gfx_text(260, 10, s, UI_TEXT, TRANSPARENT);
+    ui_text(260, 10, s, UI_TEXT);
     snprintf(s, sizeof(s), "%d processes, %u KB", n_procs, mem);
-    gfx_text(260, 30, s, UI_DARK, TRANSPARENT);
+    ui_text(260, 30, s, UI_DARK);
     /* таблица */
     gfx_fill_rect(0, LIST_Y - 22, W, 22, RGB(245, 245, 245));
-    gfx_text(10, LIST_Y - 19, "PID", UI_DARK, TRANSPARENT);
-    gfx_text(60, LIST_Y - 19, "Name", UI_DARK, TRANSPARENT);
-    gfx_text(200, LIST_Y - 19, "State", UI_DARK, TRANSPARENT);
-    gfx_text(300, LIST_Y - 19, "CPU", UI_DARK, TRANSPARENT);
-    gfx_text(360, LIST_Y - 19, "Memory", UI_DARK, TRANSPARENT);
-    gfx_text(450, LIST_Y - 19, "Ring", UI_DARK, TRANSPARENT);
+    ui_text(10, LIST_Y - 19, "PID", UI_DARK);
+    ui_text(60, LIST_Y - 19, "Name", UI_DARK);
+    ui_text(200, LIST_Y - 19, "State", UI_DARK);
+    ui_text(300, LIST_Y - 19, "CPU", UI_DARK);
+    ui_text(360, LIST_Y - 19, "Memory", UI_DARK);
+    ui_text(450, LIST_Y - 19, "Ring", UI_DARK);
     for (int i = 0; i < VIS && top + i < n_procs; i++) {
         struct proc_info *p = &procs[top + i];
         int y = LIST_Y + i * ROW_H;
-        if ((int)p->pid == sel_pid) gfx_fill_rect(0, y, W, ROW_H, UI_SELECT);
+        if ((int)p->pid == sel_pid) gfx_round_rect(4, y, W - 8, ROW_H, 5, UI_SELECT);
         snprintf(s, sizeof(s), "%u", p->pid);
-        gfx_text(10, y + 2, s, UI_TEXT, TRANSPARENT);
-        gfx_text(60, y + 2, p->name, UI_TEXT, TRANSPARENT);
-        gfx_text(200, y + 2, p->state < 5 ? states[p->state] : "?", UI_TEXT, TRANSPARENT);
+        ui_text(10, y + 2, s, UI_TEXT);
+        ui_text(60, y + 2, p->name, UI_TEXT);
+        ui_text(200, y + 2, p->state < 5 ? states[p->state] : "?", UI_TEXT);
         snprintf(s, sizeof(s), "%u%%", p->cpu_percent);
-        gfx_text(300, y + 2, s, UI_TEXT, TRANSPARENT);
+        ui_text(300, y + 2, s, UI_TEXT);
         snprintf(s, sizeof(s), "%u KB", p->mem_kb);
-        gfx_text(360, y + 2, s, UI_TEXT, TRANSPARENT);
-        gfx_text(450, y + 2, p->ring ? "user" : "kernel", p->ring ? UI_TEXT : UI_SHADOW, TRANSPARENT);
+        ui_text(360, y + 2, s, UI_TEXT);
+        ui_text(450, y + 2, p->ring ? "user" : "kernel", p->ring ? UI_TEXT : UI_SHADOW);
     }
     gfx_fill_rect(0, H - BOTTOM_H, W, BOTTOM_H, UI_FACE);
     ui_button(W - 118, H - BOTTOM_H + 9, 108, 26, "End task", btn_pressed);
-    gfx_text(10, H - BOTTOM_H + 14, status, UI_DARK, TRANSPARENT);
+    ui_text(10, H - BOTTOM_H + 14, status, UI_DARK);
     win_update(win);
 }
 

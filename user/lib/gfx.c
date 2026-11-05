@@ -4,7 +4,8 @@
 
 int gfx_w, gfx_h;
 color_t *gfx_buf;
-static uint8_t font[256 * 16];
+uint8_t gfx_font[256 * 16];
+static int clip_on, clip_x0, clip_y0, clip_x1, clip_y1;
 
 struct gfx_info { unsigned width, height, bpp, pitch; };
 struct gfx_rect { int x, y, w, h; };
@@ -19,7 +20,7 @@ static inline int sc(int n, int a, int b) {
 }
 #endif
 
-int gfx_load_font(void) { return sc(SYS_GFX_FONT, (int)font, 0); }
+int gfx_load_font(void) { return sc(SYS_GFX_FONT, (int)gfx_font, 0); }
 
 int gfx_open(void) {
     struct gfx_info gi;
@@ -125,14 +126,39 @@ int gfx_load_config(int *w, int *h, int *hw_cursor) {
 
 /* ---------------------------------------------------------------- фигуры */
 
+/* ---------------------------------------------------------------- обрезка */
+
+void gfx_set_clip(int x, int y, int w, int h) {
+    clip_on = 1;
+    clip_x0 = x; clip_y0 = y; clip_x1 = x + w; clip_y1 = y + h;
+}
+
+void gfx_no_clip(void) { clip_on = 0; }
+
+int gfx_clip_get(int *x, int *y, int *w, int *h) {
+    *x = clip_x0; *y = clip_y0; *w = clip_x1 - clip_x0; *h = clip_y1 - clip_y0;
+    return clip_on;
+}
+
+void gfx_bounds(int *x0, int *y0, int *x1, int *y1) {
+    *x0 = 0; *y0 = 0; *x1 = gfx_w; *y1 = gfx_h;
+    if (!clip_on) return;
+    if (clip_x0 > *x0) *x0 = clip_x0;
+    if (clip_y0 > *y0) *y0 = clip_y0;
+    if (clip_x1 < *x1) *x1 = clip_x1;
+    if (clip_y1 < *y1) *y1 = clip_y1;
+}
+
 void gfx_fill_rect(int x, int y, int w, int h, color_t c) {
-    if (x < 0) { w += x; x = 0; }
-    if (y < 0) { h += y; y = 0; }
-    if (x + w > gfx_w) w = gfx_w - x;
-    if (y + h > gfx_h) h = gfx_h - y;
-    for (int j = 0; j < h; j++) {
-        color_t *p = gfx_buf + (y + j) * gfx_w + x;
-        for (int i = 0; i < w; i++) p[i] = c;
+    int x0, y0, x1, y1;
+    gfx_bounds(&x0, &y0, &x1, &y1);
+    if (x > x0) x0 = x;
+    if (y > y0) y0 = y;
+    if (x + w < x1) x1 = x + w;
+    if (y + h < y1) y1 = y + h;
+    for (int j = y0; j < y1; j++) {
+        color_t *p = gfx_buf + j * gfx_w;
+        for (int i = x0; i < x1; i++) p[i] = c;
     }
 }
 
@@ -196,71 +222,104 @@ void gfx_circle(int cx, int cy, int r, color_t c) {
 
 /* ---------------------------------------------------------------- текст */
 
-int gfx_text_scaled(int x, int y, const char *s, color_t fg, int scale) {
-    int x0 = x;
+/* растровый шрифт видеокарты 8x16 (с обрезкой) */
+int gfx_text_bitmap(int x, int y, const char *s, color_t fg, color_t bg, int scale) {
+    int x0 = x, bx0, by0, bx1, by1;
+    gfx_bounds(&bx0, &by0, &bx1, &by1);
     for (; *s; s++, x += 8 * scale) {
-        const uint8_t *g = font + (uint8_t)*s * 16;
-        for (int r = 0; r < 16; r++)
-            for (int b = 0; b < 8; b++)
-                if (g[r] & (0x80 >> b)) gfx_fill_rect(x + b * scale, y + r * scale, scale, scale, fg);
-    }
-    return x - x0;
-}
-
-int gfx_text(int x, int y, const char *s, color_t fg, color_t bg) {
-    int x0 = x;
-    for (; *s; s++, x += 8) {
-        const uint8_t *g = font + (uint8_t)*s * 16;
+        const uint8_t *g = gfx_font + (uint8_t)*s * 16;
+        if (bg != TRANSPARENT) gfx_fill_rect(x, y, 8 * scale, 16 * scale, bg);
         for (int r = 0; r < 16; r++)
             for (int b = 0; b < 8; b++) {
-                bool on = g[r] & (0x80 >> b);
-                if (on) gfx_pixel(x + b, y + r, fg);
-                else if (bg != TRANSPARENT) gfx_pixel(x + b, y + r, bg);
+                if (!(g[r] & (0x80 >> b))) continue;
+                if (scale > 1) { gfx_fill_rect(x + b * scale, y + r * scale, scale, scale, fg); continue; }
+                int px = x + b, py = y + r;
+                if (px >= bx0 && py >= by0 && px < bx1 && py < by1) gfx_buf[py * gfx_w + px] = fg;
             }
     }
     return x - x0;
 }
 
-/* ---------------------------------------------------------------- курсор */
-
-static const char *arrow[CURSOR_H] = {
-    "X           ", "XX          ", "X.X         ", "X..X        ",
-    "X...X       ", "X....X      ", "X.....X     ", "X......X    ",
-    "X.......X   ", "X........X  ", "X.........X ", "X..........X",
-    "X......XXXXX", "X...X..X    ", "X..XX..X    ", "X.X  X..X   ",
-    "XX   X..X   ", "X     X..X  ", "      XXX   ",
-};
-static color_t under[CURSOR_W * CURSOR_H];
-static int ux = -1, uy;
-
-void gfx_cursor_draw(int x, int y) {
-    ux = x; uy = y;
-    for (int j = 0; j < CURSOR_H; j++)
-        for (int i = 0; i < CURSOR_W; i++) {
-            under[j * CURSOR_W + i] = gfx_get(x + i, y + j);
-            char c = arrow[j][i];
-            if (c == 'X') gfx_pixel(x + i, y + j, C_BLACK);
-            else if (c == '.') gfx_pixel(x + i, y + j, C_WHITE);
-        }
+int gfx_text_scaled(int x, int y, const char *s, color_t fg, int scale) {
+    int w = font_mono_draw(x, y, s, fg, TRANSPARENT, scale);
+    return w >= 0 ? w : gfx_text_bitmap(x, y, s, fg, TRANSPARENT, scale);
 }
 
-/* аппаратный курсор: та же стрелка, картинкой для видеокарты */
+int gfx_text(int x, int y, const char *s, color_t fg, color_t bg) {
+    int w = font_mono_draw(x, y, s, fg, bg, 1);
+    return w >= 0 ? w : gfx_text_bitmap(x, y, s, fg, bg, 1);
+}
+
+/* ---------------------------------------------------------------- курсор */
+
+/* Стрелка: чёрное тело в белой обводке и мягкая тень — маски, нарисованные
+ * сглаженными контурами (координаты в 1/16 пикселя). */
+static const short arrow_out[] = { 14, 3, 14, 355, 93, 282, 135, 376, 215, 342, 176, 254, 283, 254 };
+static const short arrow_in[]  = { 35, 51, 35, 307, 101, 246, 146, 349, 187, 331, 144, 234, 230, 234 };
+static uint8_t cur_white[CURSOR_W * CURSOR_H], cur_black[CURSOR_W * CURSOR_H], cur_shadow[CURSOR_W * CURSOR_H];
+static int cur_ready;
+static color_t under[CURSOR_W * CURSOR_H];
+static int ux = -1000, uy;
+
+static void poly_mask(const short *pt, int n, int dx, int dy, uint8_t *m) {
+    gfx_path p;
+    path_begin(&p, 0, 0, 1, 16);
+    for (int i = 0; i < n; i++) {
+        if (i == 0) path_move(&p, pt[0] + dx, pt[1] + dy);
+        else path_line(&p, pt[i * 2] + dx, pt[i * 2 + 1] + dy);
+    }
+    path_close(&p);
+    path_mask(&p, m, 0, 0, CURSOR_W, CURSOR_H);
+    path_free(&p);
+}
+
+static void make_cursor(void) {
+    static uint8_t tmp[CURSOR_W * CURSOR_H];
+    poly_mask(arrow_out, 7, 0, 0, cur_white);
+    poly_mask(arrow_in, 7, 0, 0, cur_black);
+    poly_mask(arrow_out, 7, 12, 24, tmp);
+    for (int y = 0; y < CURSOR_H; y++)                  /* размываем тень 3x3 */
+        for (int x = 0; x < CURSOR_W; x++) {
+            int sum = 0;
+            for (int j = -1; j <= 1; j++)
+                for (int i = -1; i <= 1; i++) {
+                    int xx = x + i, yy = y + j;
+                    if (xx >= 0 && yy >= 0 && xx < CURSOR_W && yy < CURSOR_H) sum += tmp[yy * CURSOR_W + xx];
+                }
+            cur_shadow[y * CURSOR_W + x] = (uint8_t)(sum / 9 * 90 / 255);
+        }
+    cur_ready = 1;
+}
+
+void gfx_cursor_draw(int x, int y) {
+    if (!cur_ready) make_cursor();
+    x -= CURSOR_HOT_X; y -= CURSOR_HOT_Y;
+    ux = x; uy = y;
+    for (int j = 0; j < CURSOR_H; j++)
+        for (int i = 0; i < CURSOR_W; i++) under[j * CURSOR_W + i] = gfx_get(x + i, y + j);
+    gfx_draw_mask(x, y, cur_shadow, CURSOR_W, CURSOR_H, C_BLACK, 255);
+    gfx_draw_mask(x, y, cur_white, CURSOR_W, CURSOR_H, C_WHITE, 255);
+    gfx_draw_mask(x, y, cur_black, CURSOR_W, CURSOR_H, RGB(20, 20, 20), 255);
+}
+
+/* аппаратный курсор: картинка 0xAARRGGBB (видеокарта может понять только «есть/нет») */
 int gfx_hw_cursor(int on) {
     static struct { int w, h, hot_x, hot_y; unsigned px[32 * 32]; } c;
     if (!on) return sc(SYS_GFX_CURSOR, 0, 0);
-    c.w = CURSOR_W; c.h = CURSOR_H; c.hot_x = 0; c.hot_y = 0;
+    if (!cur_ready) make_cursor();
+    c.w = CURSOR_W; c.h = CURSOR_H; c.hot_x = CURSOR_HOT_X; c.hot_y = CURSOR_HOT_Y;
     for (int j = 0; j < CURSOR_H; j++)
         for (int i = 0; i < CURSOR_W; i++) {
-            char ch = arrow[j][i];
-            c.px[j * CURSOR_W + i] = ch == 'X' ? 0xFF000000u : ch == '.' ? 0xFFFFFFFFu : 0;
+            int k = j * CURSOR_W + i;
+            /* край силуэта у карты только «есть/нет», а внутри — плавный переход белого в чёрный */
+            c.px[k] = cur_white[k] > 100 ? 0xFF000000u | gfx_mix(C_WHITE, RGB(20, 20, 20), cur_black[k]) : 0;
         }
     return sc(SYS_GFX_CURSOR, 1, (int)&c);
 }
 
 void gfx_cursor_erase(void) {
-    if (ux < 0) return;
+    if (ux == -1000) return;
     for (int j = 0; j < CURSOR_H; j++)
-        for (int i = 0; i < CURSOR_W; i++)
-            if (arrow[j][i] != ' ') gfx_pixel(ux + i, uy + j, under[j * CURSOR_W + i]);
-    ux = -1;
+        for (int i = 0; i < CURSOR_W; i++) gfx_pixel(ux + i, uy + j, under[j * CURSOR_W + i]);
+    ux = -1000;
 }

@@ -145,18 +145,25 @@ bool ui_inside(int px, int py, int x, int y, int w, int h) {
     return px >= x && py >= y && px < x + w && py < y + h;
 }
 
+int ui_text(int x, int y, const char *s, color_t c) { return text_draw(FONT_UI, UI_FONT_SIZE, x, y, s, c); }
+int ui_text_width(const char *s) { return text_width(FONT_UI, UI_FONT_SIZE, s); }
+
 void ui_text_center(int x, int y, int w, int h, const char *s, color_t c) {
-    int tw = strlen(s) * 8;
-    gfx_text(x + (w - tw) / 2, y + (h - 16) / 2, s, c, TRANSPARENT);
+    int tw = ui_text_width(s), th = text_line_h(FONT_UI, UI_FONT_SIZE);
+    ui_text(x + (w - tw) / 2, y + (h - th) / 2, s, c);
 }
 
 void ui_button(int x, int y, int w, int h, const char *label, bool pressed) {
-    gfx_fill_rect(x, y, w, h, pressed ? RGB(204, 228, 247) : RGB(225, 225, 225));
-    gfx_rect(x, y, w, h, pressed ? UI_ACCENT : RGB(173, 173, 173));
-    ui_text_center(x + (pressed ? 1 : 0), y + (pressed ? 1 : 0), w, h, label, UI_TEXT);
+    gfx_round_frame(x, y, w, h, 6, pressed ? RGB(190, 184, 178) : UI_SHADOW, pressed ? RGB(222, 221, 218) : RGB(246, 245, 244));
+    ui_text_center(x, y, w, h, label, UI_TEXT);
+}
+
+void ui_button_accent(int x, int y, int w, int h, const char *label, bool pressed) {
+    gfx_round_rect(x, y, w, h, 6, pressed ? RGB(200, 66, 20) : UI_ACCENT);
+    int tw = text_width(FONT_UI_MEDIUM, UI_FONT_SIZE, label), th = text_line_h(FONT_UI_MEDIUM, UI_FONT_SIZE);
+    text_draw(FONT_UI_MEDIUM, UI_FONT_SIZE, x + (w - tw) / 2, y + (h - th) / 2, label, C_WHITE);
 }
 
 void ui_sunken(int x, int y, int w, int h, color_t bg) {
-    gfx_fill_rect(x, y, w, h, bg);
-    gfx_rect(x, y, w, h, RGB(122, 122, 122));
+    gfx_round_frame(x, y, w, h, 5, UI_SHADOW, bg);
 }

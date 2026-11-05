@@ -73,6 +73,7 @@ enum { IT_TEXT, IT_HR, IT_BOX, IT_INPUT, IT_BUTTON, IT_BULLET, IT_FILL };
 struct item {
     int  x, y, w, h;
     unsigned char kind, scale, bold, underline, strike;
+    unsigned char font, fsize;     /* IT_TEXT шрифтом TrueType: какой и какого размера (0 — моноширинный) */
     short below;                   /* IT_FILL: сколько уходит ниже строки (padding-bottom) */
     color_t color, bg;             /* bg — фон под текстом (TRANSPARENT — нет); у IT_FILL color — рамка */
     int  link;                     /* номер ссылки или -1 */
@@ -114,55 +115,21 @@ static int n_hist, hist_pos = -1;
 
 /* ------------------------------------------------------------ текст: UTF-8 -> наш шрифт */
 
-static const char *translit_upper[32] = {
-    "A", "B", "V", "G", "D", "E", "Zh", "Z", "I", "Y", "K", "L", "M", "N", "O", "P",
-    "R", "S", "T", "U", "F", "Kh", "Ts", "Ch", "Sh", "Sch", "\"", "Y", "'", "E", "Yu", "Ya",
-};
-static const char *translit_lower[32] = {
-    "a", "b", "v", "g", "d", "e", "zh", "z", "i", "y", "k", "l", "m", "n", "o", "p",
-    "r", "s", "t", "u", "f", "kh", "ts", "ch", "sh", "sch", "\"", "y", "'", "e", "yu", "ya",
-};
-
 static bool cp1251;                /* страница в кодировке windows-1251 */
 
-/* символ Юникода -> строка для нашего шрифта (CP437) */
+/* символ Юникода -> UTF-8 (шрифты Ubuntu знают латиницу, кириллицу и знаки) */
 static const char *map_cp(unsigned cp, char *tmp) {
-    if (cp < 128) { tmp[0] = (char)cp; tmp[1] = 0; return tmp; }
-    if (cp >= 0x410 && cp <= 0x42F) return translit_upper[cp - 0x410];
-    if (cp >= 0x430 && cp <= 0x44F) return translit_lower[cp - 0x430];
-    if (cp == 0x401) return "Yo";
-    if (cp == 0x451) return "yo";
     switch (cp) {
     case 0xA0: return " ";
-    case 0xAB: return "\xAE";      /* « */
-    case 0xBB: return "\xAF";      /* » */
-    case 0xA9: return "(c)";
-    case 0xAE: return "(R)";
-    case 0xB0: return "\xF8";      /* ° */
-    case 0xB7: case 0x2022: case 0x25CF: return "\x07";
-    case 0xE9: return "\x82";
-    case 0xE8: return "\x8A";
-    case 0xE0: return "\x85";
-    case 0xE4: return "\x84";
-    case 0xF6: return "\x94";
-    case 0xFC: return "\x81";
-    case 0xC4: return "\x8E";
-    case 0xD6: return "\x99";
-    case 0xDC: return "\x9A";
-    case 0xDF: return "\xE1";
-    case 0xE7: return "\x87";
-    case 0xF1: return "\xA4";
-    case 0x2013: case 0x2014: case 0x2212: return "-";
-    case 0x2018: case 0x2019: case 0x201A: return "'";
-    case 0x201C: case 0x201D: case 0x201E: return "\"";
-    case 0x2026: return "...";
-    case 0x2192: return "->";
-    case 0x2190: return "<-";
-    case 0x20AC: return "EUR";
-    case 0x2116: return "No";
-    case 0x200B: case 0xFEFF: return "";
-    default: return "?";
+    case 0x200B: case 0x200C: case 0x200D: case 0xFEFF: case 0xAD: return "";
     }
+    if (cp < 0x80) { tmp[0] = (char)cp; tmp[1] = 0; }
+    else if (cp < 0x800) { tmp[0] = (char)(0xC0 | cp >> 6); tmp[1] = (char)(0x80 | (cp & 63)); tmp[2] = 0; }
+    else if (cp < 0x10000) {
+        tmp[0] = (char)(0xE0 | cp >> 12); tmp[1] = (char)(0x80 | ((cp >> 6) & 63));
+        tmp[2] = (char)(0x80 | (cp & 63)); tmp[3] = 0;
+    } else return "?";
+    return tmp;
 }
 
 /* &amp; &lt; &#1234; ... -> код символа (или -1) */
@@ -195,7 +162,7 @@ static int entity(const char *s, int n) {
 /* перекодировать кусок текста страницы в «наши» байты; -> длина */
 static int decode_text(const char *s, int n, char *out, int max) {
     int o = 0;
-    char tmp[4];
+    char tmp[8];
     for (int i = 0; i < n && o < max - 4;) {
         unsigned char c = s[i];
         unsigned cp;
@@ -221,7 +188,7 @@ static int decode_text(const char *s, int n, char *out, int max) {
         } else if ((c & 0xF0) == 0xE0 && i + 2 < n) {
             cp = ((c & 0x0F) << 12) | ((s[i + 1] & 0x3F) << 6) | (s[i + 2] & 0x3F); i += 3;
         } else if ((c & 0xF8) == 0xF0 && i + 3 < n) {
-            cp = '?'; i += 4;
+            cp = 0xFFFD; i += 4;
         } else {
             cp = '?'; i++;
         }
@@ -337,15 +304,35 @@ static color_t text_color(void) {
     return (color_t)c;
 }
 
+/* шрифт и размер текущего текста (из CSS) */
+static int cur_font(void) { return cs->bold ? FONT_UI_BOLD : FONT_UI; }
+static int cur_size(void) {
+    int px = cs->font_px;
+    if (px < 9) px = 9;
+    if (px > 72) px = 72;
+    return px;
+}
+
+/* сколько байт занимает первый символ UTF-8 */
+static int utf8_len1(const char *w) {
+    const char *p = w;
+    utf8_next(&p);
+    return (int)(p - w);
+}
+
 static void place_word(const char *w, int n) {
     if (n <= 0) return;
     apply_gap();
-    int sc = cur_scale(), cw = 8 * sc;
-    int width = n * cw, space = space_pending && lx > left ? cw : 0;
+    int font = cur_font(), size = cur_size();
+    int width = text_width_n(font, size, w, n);
+    int sw = text_width(font, size, " ");
+    int space = space_pending && lx > left ? sw : 0;
+    int h = size * 5 / 4 + 1;                              /* межстрочный интервал ~1.25 */
     if (lx + space + width > right && lx > left) { finish_line(); space = 0; }
     if (width > right - left) {                            /* слово длиннее строки — рубим */
-        int fit = (right - lx) / cw;
-        if (fit < 1) fit = 1;
+        int fit = text_fit(font, size, w, right - lx);
+        if (fit < 1) fit = utf8_len1(w);
+        if (fit > n) fit = n;
         place_word(w, fit);
         space_pending = false;
         place_word(w + fit, n - fit);
@@ -354,7 +341,7 @@ static void place_word(const char *w, int n) {
     if (space && inline_bg >= 0 && n_items > line_start && items[n_items - 1].bg == (color_t)inline_bg)
         items[n_items - 1].w += space;                     /* фон <mark> — и под пробелом */
     lx += space;
-    struct item *it = add_item(IT_TEXT, width, 16 * sc);
+    struct item *it = add_item(IT_TEXT, width, h);
     if (!it) return;
     it->text = astrdup(w, n);
     if (cs->transform) {                                   /* text-transform */
@@ -363,8 +350,12 @@ static void place_word(const char *w, int n) {
             if (cs->transform == 1 || (cs->transform == 3 && i == 0)) it->text[i] = toupper(c);
             else if (cs->transform == 2) it->text[i] = tolower(c);
         }
+        width = text_width(font, size, it->text);
+        it->w = width;
     }
-    it->scale = sc;
+    it->scale = 1;
+    it->font = font;
+    it->fsize = size;
     it->bold = cs->bold;
     it->link = cur_link;
     it->underline = cs->underline;
@@ -633,13 +624,18 @@ static void list_marker(const struct dom_style *s) {
         int v = ++list_counter[d];
         if (s->list == LS_ALPHA) snprintf(num, sizeof(num), "%c.", 'a' + (v - 1) % 26);
         else snprintf(num, sizeof(num), "%d.", v);
-        int w = strlen(num) * 8;
+        int size = s->font_px < 9 ? 9 : s->font_px > 72 ? 72 : s->font_px;
+        int w = text_width(FONT_UI, size, num);
         lx = left - w - 6;
-        struct item *it = add_item(IT_TEXT, w, 16);
-        if (it) { it->text = astrdup(num, strlen(num)); it->scale = 1; it->color = s->color; }
+        struct item *it = add_item(IT_TEXT, w, size * 5 / 4 + 1);
+        if (it) {
+            it->text = astrdup(num, strlen(num)); it->scale = 1; it->color = s->color;
+            it->font = FONT_UI; it->fsize = size;
+        }
     } else {
+        int size = s->font_px < 9 ? 9 : s->font_px > 72 ? 72 : s->font_px;
         lx = left - 14;
-        struct item *it = add_item(IT_BULLET, 6, 16);
+        struct item *it = add_item(IT_BULLET, 6, size * 5 / 4 + 1);
         if (it) { it->scale = s->list; it->color = s->color; }
     }
     lx = left;
@@ -1057,6 +1053,15 @@ static void draw_page(void) {
         switch (it->kind) {
         case IT_TEXT:
             if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, it->h, it->bg);
+            if (it->fsize) {                                 /* шрифт Ubuntu нужного размера */
+                int lh = text_line_h(it->font, it->fsize), ty = y + (it->h - lh) / 2;
+                int base = ty + text_ascent(it->font, it->fsize);
+                int th = it->fsize >= 24 ? 2 : 1;
+                text_draw(it->font, it->fsize, it->x, ty, it->text, it->color);
+                if (it->underline) gfx_fill_rect(it->x, base + 1 + it->fsize / 10, it->w, th, it->color);
+                if (it->strike) gfx_fill_rect(it->x, base - it->fsize * 3 / 10, it->w, th, it->color);
+                break;
+            }
             if (it->scale > 1) {
                 gfx_text_scaled(it->x, y, it->text, it->color, it->scale);
                 if (it->bold) gfx_text_scaled(it->x + 1, y, it->text, it->color, it->scale);
@@ -1068,8 +1073,10 @@ static void draw_page(void) {
             if (it->strike) gfx_fill_rect(it->x, y + it->h / 2, it->w, it->scale, it->color);
             break;
         case IT_BULLET:
-            if (it->scale == LS_CIRCLE) gfx_rect(it->x, y + 6, 5, 5, it->color);
-            else gfx_fill_rect(it->x, y + 6, 5, 5, it->color);
+            if (it->scale == LS_CIRCLE) {
+                gfx_ellipse(it->x, y + it->h / 2 - 3, 6, 6, it->color, 255);
+                gfx_ellipse(it->x + 1, y + it->h / 2 - 2, 4, 4, page_bg >= 0 ? (color_t)page_bg : C_WHITE, 255);
+            } else gfx_ellipse(it->x, y + it->h / 2 - 3, 6, 6, it->color, 255);
             break;
         case IT_HR:
             gfx_fill_rect(it->x, y + 4, it->w, 1, RGB(170, 170, 170));

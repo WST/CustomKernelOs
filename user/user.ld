@@ -9,7 +9,7 @@ PHDRS {
 
 SECTIONS {
     . = 0x40000000;
-    .text   : { *(.text.start) *(.text*) } :text
+    .text   : { KEEP(*(.text.start)) *(.text*) } :text
     .rodata : { *(.rodata*) }              :text
 
     . = ALIGN(4096);

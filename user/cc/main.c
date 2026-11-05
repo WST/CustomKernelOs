@@ -131,7 +131,7 @@ static void usage(void) {
         "  -o out      name of the program (default: first file without .c)\n"
         "  -E          only preprocess, print the result\n"
         "  -I dir      also look for #include files in dir\n"
-        "  -nostdlib   do not add /lib/libc.c, /lib/gfx.c, /lib/win.c\n");
+        "  -nostdlib   do not add /lib/libc.c, gfx.c, vec.c, font.c, win.c\n");
     exit(2);
 }
 
@@ -177,8 +177,8 @@ int main(int argc, char **argv) {
 
     if (!nostdlib && !opt_E) {
         inputs[n_inputs++] = format("%s/lib/libc.c", base_dir);
-        static const char *extra[] = { "gfx.c", "win.c" };      /* есть на диске — добавляем */
-        for (int k = 0; k < 2; k++) {
+        static const char *extra[] = { "gfx.c", "vec.c", "font.c", "win.c" };      /* есть на диске — добавляем */
+        for (int k = 0; k < 4; k++) {
             char *g = format("%s/lib/%s", base_dir, extra[k]);
             int len;
             char *s = read_file(g, &len);

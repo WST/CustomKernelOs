@@ -7,33 +7,33 @@
 int main(void) {
     window *win = win_create("About MyOS", W, H);
     if (!win) { dprintf(STDERR, "about: the desktop is not running\n"); return 1; }
-    for (int y = 0; y < 90; y++) gfx_fill_rect(0, y, W, 1, RGB(10 + y / 3, 60 + y, 140 + y));
-    gfx_text_scaled(24, 18, "MyOS", C_WHITE, 4);
-    gfx_text(170, 40, "version 0.15", RGB(220, 235, 255), TRANSPARENT);
-    gfx_fill_rect(0, 90, W, H - 90, C_WHITE);
+    gfx_gradient(0, 0, W, 96, RGB(119, 33, 111), RGB(233, 84, 32));    /* цвета Ubuntu */
+    text_draw(FONT_UI_BOLD, 44, 24, 18, "MyOS", C_WHITE);
+    text_draw(FONT_UI, 15, 160, 44, "version 0.17", RGB(255, 228, 214));
+    gfx_fill_rect(0, 96, W, H - 96, UI_FACE);
     static const char *lines[] = {
         "An operating system written from scratch",
-        "in C and x86 assembly - by Daniil.",
+        "in C and x86 assembly \xE2\x80\x94 by Daniil.",
         "",
-        "* own boot loader, protected mode, paging",
-        "* preemptive multitasking, user mode, fork/exec",
-        "* MyFS file system, ATA disk driver",
-        "* graphics, mouse, windows, this desktop",
-        "* TCP/IP network stack, web server and browser",
-        "* a C compiler that compiles itself",
+        "\xE2\x80\xA2 own boot loader, protected mode, paging",
+        "\xE2\x80\xA2 preemptive multitasking, user mode, fork/exec",
+        "\xE2\x80\xA2 MyFS file system, ATA disk driver",
+        "\xE2\x80\xA2 GPU, windows, smooth vector graphics and fonts",
+        "\xE2\x80\xA2 TCP/IP, HTTPS, a browser with JavaScript and CSS",
+        "\xE2\x80\xA2 a C compiler that compiles itself",
     };
-    for (int i = 0; i < 9; i++) gfx_text(20, 102 + i * 18, lines[i], UI_TEXT, TRANSPARENT);
+    for (int i = 0; i < 9; i++) ui_text(20, 106 + i * 18, lines[i], UI_TEXT);
     unsigned s = ticks() / 1000;
     char up[48];
     snprintf(up, sizeof(up), "uptime %u:%02u:%02u", s / 3600, s / 60 % 60, s % 60);
-    gfx_text(20, H - 32, up, UI_DARK, TRANSPARENT);
-    ui_button(W - 100, H - 38, 86, 28, "OK", false);
+    ui_text(20, H - 32, up, UI_DARK);
+    ui_button_accent(W - 100, H - 40, 86, 30, "OK", false);
     win_update(win);
     struct event e;
     while (win_event(&e, -1)) {
         if (e.type == EV_CLOSE) break;
         if (e.type == EV_KEY && (e.key == '\n' || e.key == 27)) break;
-        if (e.type == EV_MOUSE_UP && ui_inside(e.x, e.y, W - 100, H - 38, 86, 28)) break;
+        if (e.type == EV_MOUSE_UP && ui_inside(e.x, e.y, W - 100, H - 40, 86, 30)) break;
     }
     win_destroy(win);
     return 0;

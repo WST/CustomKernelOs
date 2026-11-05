@@ -53,18 +53,24 @@ void    win_set_title(window *w, const char *title);
 int     win_event(struct event *e, int timeout_ms);  /* 0 — рабочий стол пропал */
 int     win_desktop_pid(void);
 
-/* ---- простые элементы интерфейса (рисуют в выбранное окно) ---- */
-#define UI_FACE    RGB(240, 240, 240)
+/* ---- простые элементы интерфейса (рисуют в выбранное окно) ----
+ * Цвета и вид — как у темы Yaru в Ubuntu: светлый фон, скруглённые кнопки,
+ * оранжевый акцент. Подписи — шрифтом Ubuntu (сглаженным). */
+#define UI_FACE    RGB(250, 250, 250)       /* фон окна */
 #define UI_LIGHT   RGB(255, 255, 255)
-#define UI_SHADOW  RGB(160, 160, 160)
-#define UI_DARK    RGB(100, 100, 100)
-#define UI_TEXT    RGB(20, 20, 20)
-#define UI_ACCENT  RGB(0, 120, 215)
-#define UI_SELECT  RGB(204, 228, 247)
+#define UI_SHADOW  RGB(205, 199, 194)       /* рамки */
+#define UI_DARK    RGB(130, 130, 130)
+#define UI_TEXT    RGB(61, 61, 61)
+#define UI_ACCENT  RGB(233, 84, 32)         /* оранжевый Ubuntu */
+#define UI_SELECT  RGB(252, 221, 208)
+#define UI_FONT_SIZE 14
 
 void ui_button(int x, int y, int w, int h, const char *label, bool pressed);
+void ui_button_accent(int x, int y, int w, int h, const char *label, bool pressed);   /* оранжевая */
 void ui_sunken(int x, int y, int w, int h, color_t bg);       /* поле ввода / список */
 void ui_text_center(int x, int y, int w, int h, const char *s, color_t c);
+int  ui_text(int x, int y, const char *s, color_t c);         /* шрифт интерфейса, -> ширина */
+int  ui_text_width(const char *s);
 bool ui_inside(int px, int py, int x, int y, int w, int h);
 
 /* ---- протокол с рабочим столом (для любопытных: см. desktop.c) ---- */

@@ -423,7 +423,9 @@ int getline(char *buf, int max) {
 }
 
 /* ================================================================ malloc
- * Размеры округляем до «классов» (16, 32, ... 256, затем 512, 1024, 2048 ...).
+ * Размеры округляем до «классов» (16, 32, ... 256, затем 512, 1024, ... 64 КБ;
+ * крупнее — шагами в четверть: 80, 96, 112, 128 КБ, 160, 192 ... — иначе буфер
+ * экрана 1920x1200 в 9 МБ занимал бы 16 МБ).
  * У каждого класса свой список освободившихся блоков: malloc берёт первый из
  * списка, free кладёт блок обратно — оба за постоянное время, сколько бы блоков
  * ни было. Новую память берём у ядра через sbrk() кусками по 64 КБ. */
@@ -436,7 +438,7 @@ struct hdr {
 };
 
 #define HEAP_MAGIC 0x4D594F53u                      /* "MYOS" */
-#define N_CLASSES 48
+#define N_CLASSES 96
 static struct hdr *free_list[N_CLASSES];
 static char *wild, *wild_end;                       /* ещё не нарезанный кусок от sbrk */
 
@@ -444,9 +446,20 @@ static int size_class(size_t n, size_t *rounded) {
     if (n <= 256) { n = (n + 15) & ~15u; *rounded = n; return n / 16 - 1; }    /* 0..15 */
     size_t c = 512;
     int k = 16;
-    while (c < n) { c <<= 1; k++; }
-    *rounded = c;
-    return k;
+    if (n <= 65536) {
+        while (c < n) { c <<= 1; k++; }
+        *rounded = c;
+        return k;                                   /* 16..23 */
+    }
+    size_t base = 65536;
+    k = 24;
+    for (;;) {
+        for (int q = 5; q <= 8; q++, k++) {
+            c = base / 4 * q;
+            if (c >= n) { *rounded = c; return k; }
+        }
+        base <<= 1;
+    }
 }
 
 void *malloc(size_t n) {

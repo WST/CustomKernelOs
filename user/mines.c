@@ -18,8 +18,8 @@ static unsigned start_tick, elapsed;
 static int  boom_r = -1, boom_c = -1;
 
 static const color_t num_col[9] = {
-    0, RGB(0, 0, 255), RGB(0, 128, 0), RGB(255, 0, 0), RGB(0, 0, 128),
-    RGB(128, 0, 0), RGB(0, 128, 128), RGB(0, 0, 0), RGB(128, 128, 128),
+    0, RGB(52, 101, 164), RGB(78, 154, 6), RGB(204, 0, 0), RGB(117, 80, 123),
+    RGB(206, 92, 0), RGB(6, 152, 154), RGB(46, 52, 54), RGB(136, 138, 133),
 };
 
 static void new_game(void) {
@@ -68,66 +68,77 @@ static void check_win(void) {
     for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) if (mine[r][c]) flag[r][c] = true;
 }
 
-static void raised(int x, int y, int w, int h) {
-    gfx_fill_rect(x, y, w, h, RGB(192, 192, 192));
-    gfx_fill_rect(x, y, w, 2, C_WHITE);
-    gfx_fill_rect(x, y, 2, h, C_WHITE);
-    gfx_fill_rect(x, y + h - 2, w, 2, RGB(128, 128, 128));
-    gfx_fill_rect(x + w - 2, y, 2, h, RGB(128, 128, 128));
+static void draw_mine(int x, int y) {
+    int cx = (x + CELL / 2) * 16, cy = (y + CELL / 2) * 16;
+    gfx_line16(cx - 136, cy, cx + 136, cy, 28, RGB(46, 52, 54), 255);
+    gfx_line16(cx, cy - 136, cx, cy + 136, 28, RGB(46, 52, 54), 255);
+    gfx_line16(cx - 96, cy - 96, cx + 96, cy + 96, 28, RGB(46, 52, 54), 255);
+    gfx_line16(cx + 96, cy - 96, cx - 96, cy + 96, 28, RGB(46, 52, 54), 255);
+    gfx_disc16(cx, cy, 96, RGB(46, 52, 54), 255);
+    gfx_disc16(cx - 32, cy - 32, 28, C_WHITE, 220);
 }
 
-static void draw_mine(int x, int y) {
-    gfx_fill_circle(x + CELL / 2, y + CELL / 2, 6, C_BLACK);
-    gfx_fill_rect(x + 4, y + CELL / 2, CELL - 8, 1, C_BLACK);
-    gfx_fill_rect(x + CELL / 2, y + 4, 1, CELL - 8, C_BLACK);
-    gfx_fill_rect(x + CELL / 2 - 3, y + CELL / 2 - 3, 2, 2, C_WHITE);
+static void draw_flag(int x, int y) {
+    gfx_round_rect(x + 12, y + 6, 2, 15, 1, RGB(46, 52, 54));
+    gfx_path p;
+    path_begin(&p, x, y, 1, 1);
+    path_move(&p, 14, 6); path_line(&p, 21, 9); path_line(&p, 14, 13); path_close(&p);
+    path_fill(&p, UI_ACCENT, 255);
+    path_free(&p);
+    gfx_round_rect(x + 8, y + 20, 10, 2, 1, RGB(46, 52, 54));
+}
+
+/* табло: число на тёмной плашке */
+static void counter(int x, const char *s) {
+    gfx_round_rect(x, 8, 48, 28, 6, RGB(46, 52, 54));
+    int tw = text_width(FONT_UI_BOLD, 16, s);
+    text_draw(FONT_UI_BOLD, 16, x + (48 - tw) / 2, 8 + (28 - text_line_h(FONT_UI_BOLD, 16)) / 2, s, RGB(252, 233, 79));
 }
 
 static void draw(void) {
-    gfx_clear(RGB(192, 192, 192));
+    gfx_clear(UI_FACE);
     /* шапка: мины, смайлик, время */
     int left = MINES;
     for (int r = 0; r < N; r++) for (int c = 0; c < N; c++) if (flag[r][c]) left--;
     char s[8];
-    gfx_fill_rect(8, 8, 40, 28, C_BLACK);
     snprintf(s, sizeof(s), "%03d", left < 0 ? 0 : left);
-    gfx_text(12, 14, s, RGB(255, 40, 40), TRANSPARENT);
-    gfx_fill_rect(W - 48, 8, 40, 28, C_BLACK);
+    counter(8, s);
     snprintf(s, sizeof(s), "%03u", elapsed > 999 ? 999 : elapsed);
-    gfx_text(W - 44, 14, s, RGB(255, 40, 40), TRANSPARENT);
+    counter(W - 56, s);
     int sx = W / 2 - 14;
-    raised(sx, 6, 30, 30);
-    gfx_fill_circle(sx + 15, 21, 10, C_YELLOW);
-    gfx_circle(sx + 15, 21, 10, C_BLACK);
+    gfx_round_frame(sx - 1, 6, 32, 32, 8, UI_SHADOW, RGB(246, 245, 244));
+    int fx = (sx + 15) * 16, fy = 22 * 16;
+    gfx_disc16(fx, fy, 160, RGB(250, 205, 40), 255);
     if (state == 1) {                                          /* :( */
-        gfx_line(sx + 10, 16, sx + 13, 19, C_BLACK); gfx_line(sx + 13, 16, sx + 10, 19, C_BLACK);
-        gfx_line(sx + 17, 16, sx + 20, 19, C_BLACK); gfx_line(sx + 20, 16, sx + 17, 19, C_BLACK);
-        gfx_line(sx + 10, 27, sx + 20, 27, C_BLACK);
+        gfx_line16(fx - 80, fy - 64, fx - 32, fy - 16, 20, RGB(46, 52, 54), 255);
+        gfx_line16(fx - 32, fy - 64, fx - 80, fy - 16, 20, RGB(46, 52, 54), 255);
+        gfx_line16(fx + 32, fy - 64, fx + 80, fy - 16, 20, RGB(46, 52, 54), 255);
+        gfx_line16(fx + 80, fy - 64, fx + 32, fy - 16, 20, RGB(46, 52, 54), 255);
+        gfx_line16(fx - 64, fy + 80, fx + 64, fy + 80, 22, RGB(46, 52, 54), 255);
     } else {
-        if (state == 2) gfx_fill_rect(sx + 8, 16, 14, 3, C_BLACK);   /* очки победителя */
-        else { gfx_fill_rect(sx + 10, 17, 2, 2, C_BLACK); gfx_fill_rect(sx + 18, 17, 2, 2, C_BLACK); }
-        gfx_line(sx + 10, 25, sx + 15, 28, C_BLACK); gfx_line(sx + 15, 28, sx + 20, 25, C_BLACK);
+        if (state == 2) gfx_round_rect(sx + 7, 17, 17, 4, 2, RGB(46, 52, 54));    /* очки победителя */
+        else { gfx_disc16(fx - 56, fy - 40, 22, RGB(46, 52, 54), 255); gfx_disc16(fx + 56, fy - 40, 22, RGB(46, 52, 54), 255); }
+        gfx_line16(fx - 72, fy + 48, fx, fy + 88, 22, RGB(46, 52, 54), 255);
+        gfx_line16(fx, fy + 88, fx + 72, fy + 48, 22, RGB(46, 52, 54), 255);
     }
-    /* поле */
+    /* поле: закрытые клетки — выпуклые плитки, открытые — плоские */
     for (int r = 0; r < N; r++)
         for (int c = 0; c < N; c++) {
             int x = 8 + c * CELL, y = TOP + r * CELL;
             if (open_[r][c] || (state == 1 && mine[r][c])) {
-                gfx_fill_rect(x, y, CELL, CELL, (r == boom_r && c == boom_c) ? RGB(255, 0, 0) : RGB(192, 192, 192));
-                gfx_rect(x, y, CELL + 1, CELL + 1, RGB(128, 128, 128));
+                bool boom = r == boom_r && c == boom_c;
+                gfx_round_rect(x + 1, y + 1, CELL - 2, CELL - 2, 4, boom ? RGB(239, 41, 41) : RGB(236, 236, 234));
                 if (mine[r][c]) draw_mine(x, y);
                 else if (around[r][c]) {
                     char d[2] = { (char)('0' + around[r][c]), 0 };
-                    gfx_text(x + 9, y + 5, d, num_col[around[r][c]], TRANSPARENT);
-                    gfx_text(x + 10, y + 5, d, num_col[around[r][c]], TRANSPARENT);
+                    int tw = text_width(FONT_UI_BOLD, 16, d);
+                    text_draw(FONT_UI_BOLD, 16, x + (CELL - tw) / 2, y + (CELL - text_line_h(FONT_UI_BOLD, 16)) / 2,
+                              d, num_col[around[r][c]]);
                 }
             } else {
-                raised(x, y, CELL, CELL);
-                if (flag[r][c]) {
-                    gfx_fill_rect(x + 12, y + 6, 2, 14, C_BLACK);
-                    gfx_fill_rect(x + 7, y + 6, 6, 6, RGB(255, 0, 0));
-                    gfx_fill_rect(x + 8, y + 19, 10, 2, C_BLACK);
-                }
+                gfx_round_rect(x + 1, y + 1, CELL - 2, CELL - 2, 4, RGB(186, 189, 182));
+                gfx_round_rect(x + 1, y + 1, CELL - 2, CELL - 4, 4, RGB(211, 215, 207));
+                if (flag[r][c]) draw_flag(x, y);
             }
         }
     win_update(win);

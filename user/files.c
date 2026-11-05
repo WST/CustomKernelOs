@@ -52,21 +52,21 @@ static void go_up(void) {
     read_dir();
 }
 
-/* маленькие значки 16x16 */
+/* маленькие значки 16x16 — сглаженные, как в Yaru */
 static void icon_folder(int x, int y) {
-    gfx_fill_rect(x + 1, y + 3, 6, 2, RGB(220, 160, 30));
-    gfx_fill_rect(x + 1, y + 5, 14, 9, RGB(255, 210, 80));
-    gfx_rect(x + 1, y + 5, 14, 9, RGB(220, 160, 30));
+    gfx_round_rect(x + 1, y + 2, 7, 4, 1, RGB(196, 80, 38));
+    gfx_round_rect(x + 1, y + 3, 14, 11, 2, RGB(196, 80, 38));
+    gfx_round_rect(x + 1, y + 5, 14, 9, 2, RGB(240, 120, 64));
 }
 static void icon_file(int x, int y, bool program) {
     if (program) {
-        gfx_fill_rect(x + 1, y + 2, 14, 12, RGB(25, 25, 30));
-        gfx_fill_rect(x + 1, y + 2, 14, 3, RGB(110, 110, 120));
-        gfx_text(x + 3, y + 1, ">", RGB(80, 220, 100), TRANSPARENT);
+        gfx_round_rect(x + 1, y + 2, 14, 12, 2, RGB(60, 60, 60));
+        gfx_round_rect(x + 2, y + 4, 12, 9, 1, RGB(48, 10, 36));
+        gfx_line16((x + 4) * 16, (y + 6) * 16, (x + 6) * 16 + 8, (y + 8) * 16 + 8, 20, C_WHITE, 255);
+        gfx_line16((x + 6) * 16 + 8, (y + 8) * 16 + 8, (x + 4) * 16, (y + 11) * 16, 20, C_WHITE, 255);
     } else {
-        gfx_fill_rect(x + 3, y + 1, 10, 14, C_WHITE);
-        gfx_rect(x + 3, y + 1, 10, 14, RGB(120, 120, 130));
-        for (int i = 0; i < 4; i++) gfx_fill_rect(x + 5, y + 4 + i * 3, 6, 1, RGB(70, 150, 240));
+        gfx_round_frame(x + 2, y + 1, 12, 15, 2, RGB(170, 170, 170), C_WHITE);
+        for (int i = 0; i < 4; i++) gfx_fill_rect(x + 5, y + 5 + i * 2 + i, 6, 1, RGB(150, 150, 150));
     }
 }
 
@@ -77,34 +77,36 @@ static bool is_program(const char *name) {
 
 static void draw(void) {
     gfx_fill_rect(0, 0, W, BAR_H, UI_FACE);
-    ui_button(6, 5, 50, 24, "Up", false);
-    ui_sunken(62, 5, W - 68, 24, C_WHITE);
-    gfx_text(70, 9, cwd, UI_TEXT, TRANSPARENT);
+    ui_button(6, 4, 50, 26, "Up", false);
+    ui_sunken(62, 4, W - 68, 26, C_WHITE);
+    ui_text(72, 4 + (26 - text_line_h(FONT_UI, UI_FONT_SIZE)) / 2, cwd, UI_TEXT);
     gfx_fill_rect(0, BAR_H, W, H - BAR_H, C_WHITE);
-    gfx_fill_rect(0, BAR_H, W, 22, RGB(245, 245, 245));
-    gfx_text(34, BAR_H + 3, "Name", UI_DARK, TRANSPARENT);
-    gfx_text(W - 120, BAR_H + 3, "Size", UI_DARK, TRANSPARENT);
-    gfx_fill_rect(0, LIST_Y - 1, W, 1, RGB(220, 220, 220));
+    gfx_fill_rect(0, BAR_H, W, 22, RGB(250, 250, 250));
+    text_draw(FONT_UI_MEDIUM, 13, 34, BAR_H + 3, "Name", UI_DARK);
+    text_draw(FONT_UI_MEDIUM, 13, W - 120, BAR_H + 3, "Size", UI_DARK);
+    gfx_fill_rect(0, LIST_Y - 1, W, 1, RGB(230, 230, 230));
     for (int i = 0; i < VIS && top + i < n_ents; i++) {
         struct dirent_info *e = &ents[top + i];
         int y = LIST_Y + i * ROW_H;
-        if (top + i == sel) gfx_fill_rect(2, y, W - 16, ROW_H, UI_SELECT);
+        bool s_ = top + i == sel;
+        if (s_) gfx_round_rect(4, y + 1, W - 20, ROW_H - 2, 5, UI_ACCENT);
         if (e->type == 2) icon_folder(10, y + 3); else icon_file(10, y + 3, is_program(e->name));
-        gfx_text(34, y + 3, e->name, UI_TEXT, TRANSPARENT);
+        int ty = y + (ROW_H - text_line_h(FONT_UI, UI_FONT_SIZE)) / 2;
+        ui_text(34, ty, e->name, s_ ? C_WHITE : UI_TEXT);
         char sz[24];
         if (e->type == 2) strcpy(sz, "folder");
         else if (e->size < 10240) snprintf(sz, sizeof(sz), "%u B", e->size);
         else snprintf(sz, sizeof(sz), "%u KB", e->size / 1024);
-        gfx_text(W - 120, y + 3, sz, UI_DARK, TRANSPARENT);
+        ui_text(W - 120, ty, sz, s_ ? C_WHITE : UI_DARK);
     }
     if (n_ents > VIS) {                                       /* полоса прокрутки */
         int th = H - LIST_Y - STATUS_H, kh = th * VIS / n_ents;
         int ky = LIST_Y + (th - kh) * top / (n_ents - VIS);
-        gfx_fill_rect(W - 12, LIST_Y, 12, th, RGB(235, 235, 235));
-        gfx_fill_rect(W - 10, ky, 8, kh, RGB(190, 190, 190));
+        gfx_round_rect(W - 10, ky + 2, 6, kh - 4, 3, RGB(170, 170, 170));
     }
     gfx_fill_rect(0, H - STATUS_H, W, STATUS_H, UI_FACE);
-    gfx_text(8, H - STATUS_H + 3, status, UI_DARK, TRANSPARENT);
+    gfx_fill_rect(0, H - STATUS_H, W, 1, RGB(230, 230, 230));
+    text_draw(FONT_UI, 13, 8, H - STATUS_H + (STATUS_H - text_line_h(FONT_UI, 13)) / 2, status, UI_DARK);
     win_update(win);
 }
 
@@ -149,7 +151,7 @@ int main(int argc, char **argv) {
     while (win_event(&e, -1)) {
         if (e.type == EV_CLOSE) break;
         if (e.type == EV_MOUSE_DOWN) {
-            if (ui_inside(e.x, e.y, 6, 5, 50, 24)) go_up();
+            if (ui_inside(e.x, e.y, 6, 4, 50, 26)) go_up();
             else if (e.y >= LIST_Y && e.y < H - STATUS_H) {
                 if (e.x >= W - 12 && n_ents > VIS) {           /* клик по полосе — страница вверх/вниз */
                     top += e.y < (LIST_Y + H - STATUS_H) / 2 ? -VIS : VIS;

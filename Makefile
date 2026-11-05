@@ -4,11 +4,13 @@
 #   make run       — всё собрать и запустить в QEMU
 #   make test      — юнит-тесты файловой системы и кучи (на хосте)
 #   make jstest    — тесты JavaScript, DOM и CSS браузера (на хосте)
+#   make gfxtest   — пробная картинка сглаженной графики и шрифтов (build/gfxtest.ppm)
 #   make clean     — удалить build/ (диск с файлами disk.img НЕ трогается)
 #   make cleandisk — удалить disk.img (при следующем запуске ФС создастся заново)
 #
 #   build/myfs disk.img ls /bin            — посмотреть диск с компьютера
 #   build/myfs disk.img put file.txt /f    — положить свой файл на диск
+#   build/myfs disk.img cat /etc/display   — вывести файл с диска
 
 CC      := gcc
 LD      := ld
@@ -62,17 +64,28 @@ $(BUILD)/os.img: $(BUILD)/boot.bin $(BUILD)/kernel.bin
 # программам FPU можно (ядро сохраняет его регистры при переключении), SSE — нет
 UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx \
-            -O2 -Wall -std=gnu11 -Iuser/lib
-ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s
+            -O2 -Wall -std=gnu11 -Iuser/lib -ffunction-sections -fdata-sections
+# --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
+ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(basename $(notdir $(wildcard user/*.c))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
-ULIB := $(BUILD)/user/libc.o $(BUILD)/user/gfx.o $(BUILD)/user/win.o
+ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
+ULIB := $(BUILD)/user/libmyos.a
+
+$(ULIB): $(ULIB_OBJS)
+	rm -f $@ && ar rcs $@ $^
 
 $(BUILD)/user/libc.o: user/lib/libc.c user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/vec.o: user/lib/vec.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/font.o: user/lib/font.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
@@ -82,7 +95,7 @@ $(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/gfx.h user/lib/win.h | $(BU
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
-	$(LD) $(ULDFLAGS) $(ULIB) $< -o $@
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
 
 # HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
 # Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
@@ -94,7 +107,7 @@ $(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/myos.h | $(BUILD)/us
 $(patsubst %,%.o,$(TLS_PROGS)) $(BUILD)/user/browser.o: user/lib/tls.h
 
 $(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) $(BUILD)/user/tls.o user/user.ld
-	$(LD) $(ULDFLAGS) $(ULIB) $(BUILD)/user/tls.o $< -o $@
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/tls.o $(ULIB) -o $@
 
 # JavaScript — движок user/lib/js*.c (программа js и браузер) и DOM user/lib/dom*.c (браузер).
 # Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
@@ -115,10 +128,10 @@ user/lib/dom_prelude.h: user/lib/dom_prelude.js
 $(BUILD)/user/js.o: user/lib/js.h
 
 $(BUILD)/user/js: $(BUILD)/user/js.o $(ULIB) $(JS_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $(ULIB) $(JS_OBJS) $< -o $@
+	$(LD) $(ULDFLAGS) $< $(JS_OBJS) $(ULIB) -o $@
 
 $(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(BUILD)/user/tls.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $(ULIB) $(BUILD)/user/tls.o $(JS_OBJS) $(DOM_OBJS) $< -o $@
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/tls.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
 
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
@@ -128,7 +141,7 @@ $(BUILD)/user/cc_%.o: user/cc/%.c user/cc/cc.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/cc: $(CC_OBJS) $(ULIB) user/user.ld
-	$(LD) $(ULDFLAGS) $(ULIB) $(CC_OBJS) -o $@
+	$(LD) $(ULDFLAGS) $(CC_OBJS) $(ULIB) -o $@
 
 # cc для Linux — чтобы быстро гонять тесты компилятора (make cctest)
 $(BUILD)/cc-host: $(CC_SRC) user/cc/cc.h | $(BUILD)
@@ -152,11 +165,13 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
-	@for d in /include /lib /src /src/cc; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
+	@for d in /include /lib /lib/fonts /src /src/cc; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
-	@for f in libc.c gfx.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in libc.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
+	@echo "==> шрифты Ubuntu в /lib/fonts"
+	@for f in fonts/*.ttf; do $(BUILD)/myfs $(DISK) put $$f /lib/fonts/$$(basename $$f) >/dev/null || exit 1; done
 
 # ------------------------------------------------------------------ запуск
 
@@ -209,12 +224,18 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 	./$(BUILD)/dom-host tests/web/css.html styles > $(BUILD)/csstest.out
 	@diff -u tests/web/css.expected $(BUILD)/csstest.out && echo "CSS test: OK"
 
+# Сглаженная графика и шрифты на Linux: пробная картинка build/gfxtest.ppm
+gfxtest: | $(BUILD)
+	gcc -m32 -O1 -g -fno-builtin -nostdinc -w -Iuser/lib tests/gfx_host.c user/lib/gfx.c user/lib/vec.c \
+	    user/lib/font.c -o $(BUILD)/gfx-host
+	./$(BUILD)/gfx-host fonts > $(BUILD)/gfxtest.ppm && echo "==> $(BUILD)/gfxtest.ppm"
+
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
 CCROOT := $(BUILD)/ccroot
 cctest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h $(CCROOT)/include/
-	@cp user/lib/libc.c user/lib/gfx.c user/lib/win.c $(CCROOT)/lib/
+	@cp user/lib/libc.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
@@ -232,5 +253,5 @@ cctest: $(BUILD)/cc-host
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)"
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest
 .SECONDARY:
