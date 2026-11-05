@@ -1,6 +1,6 @@
 /* dom.c — дерево документа: узлы, разбор HTML (с выполнением скриптов по ходу
  * разбора и document.write), обратное превращение в HTML, селекторы CSS
- * (для querySelector) и чуть-чуть CSS: правила display:none из <style>.
+ * (для querySelector). Стили — в css.c.
  * Объекты для JavaScript — в domjs.c. */
 #include "domint.h"
 
@@ -10,6 +10,7 @@ struct dom_host *d_host;
 char d_url[1024];
 int d_parsing;
 int dom_dirty;
+int dom_mut;                       /* счётчик изменений дерева (для кэша стилей) */
 int dom_scripting = 1;
 
 /* ------------------------------------------------------------------ узлы */
@@ -57,7 +58,7 @@ void dn_remove(dnode *c) {
     if (c->prev) c->prev->next = c->next; else p->first = c->next;
     if (c->next) c->next->prev = c->prev; else p->last = c->prev;
     c->parent = c->prev = c->next = NULL;
-    dom_dirty = 1;
+    dom_dirty = 1; dom_mut++;
 }
 
 void dn_insert_before(dnode *p, dnode *c, dnode *ref) {
@@ -80,7 +81,7 @@ void dn_insert_before(dnode *p, dnode *c, dnode *ref) {
         if (ref->prev) ref->prev->next = c; else p->first = c;
         ref->prev = c;
     }
-    dom_dirty = 1;
+    dom_dirty = 1; dom_mut++;
 }
 
 void dn_append(dnode *p, dnode *c) { dn_insert_before(p, c, NULL); }
@@ -96,7 +97,7 @@ const char *dn_get_attr(dnode *n, const char *name) {
 }
 
 void dn_set_attr(dnode *n, const char *name, const char *value) {
-    dom_dirty = 1;
+    dom_dirty = 1; dom_mut++;
     for (int i = 0; i < n->nattr; i++)
         if (!strcmp(n->attr[2 * i], name)) {
             free(n->attr[2 * i + 1]);
@@ -124,12 +125,12 @@ void dn_del_attr(dnode *n, const char *name) {
             free(n->attr[2 * i + 1]);
             memmove(&n->attr[2 * i], &n->attr[2 * i + 2], sizeof(char *) * 2 * (n->nattr - i - 1));
             n->nattr--;
-            dom_dirty = 1;
+            dom_dirty = 1; dom_mut++;
             return;
         }
 }
 
-static dnode *walk_next(dnode *n, dnode *root) {      /* обход в глубину */
+dnode *walk_next(dnode *n, dnode *root) {      /* обход в глубину */
     if (n->first) return n->first;
     while (n && n != root) {
         if (n->next) return n->next;
@@ -172,12 +173,12 @@ void dn_set_text(dnode *n, const char *s, int len) {
         free(n->text);
         n->text = xstrdup(s, len);
         n->tlen = len;
-        dom_dirty = 1;
+        dom_dirty = 1; dom_mut++;
         return;
     }
     while (n->first) dn_remove(n->first);
     if (len) dn_append(n, dn_text(s, len));
-    dom_dirty = 1;
+    dom_dirty = 1; dom_mut++;
 }
 
 int dn_has_class(dnode *n, const char *cls, int len) {
@@ -442,7 +443,6 @@ static void start_tag(const char *t, int n) {
                 jb_free(&b);
             } else dn_append(e, dn_text(hp->s + cs, ce - cs));
         }
-        if (!strcmp(name, "style")) css_add_sheet(e->first ? e->first->text : "", e->first ? e->first->tlen : 0);
         if (!strcmp(name, "script")) run_parser_script(e);
         return;
     }
@@ -546,7 +546,7 @@ void html_parse_into(dnode *parent, const char *s, int n) {
     parse_loop();
     hp = save;
     free(p.s);
-    dom_dirty = 1;
+    dom_dirty = 1; dom_mut++;
 }
 
 /* ------------------------------------------------------------------ обратно в HTML */
@@ -594,37 +594,7 @@ void html_serialize(jsbuf *b, dnode *n, int outer) {
 
 /* --- для раскладки браузера: без скриптов и скрытого, с номерами узлов */
 
-int style_hidden(const char *st) {
-    if (!st) return 0;
-    for (const char *p = st; *p; p++) {
-        if (strncmp(p, "display", 7) && strncmp(p, "visibility", 10)) continue;
-        if (p > st && (isalnum((ju8)p[-1]) || p[-1] == '-')) continue;
-        int vis = *p == 'v';
-        const char *q = p + (vis ? 10 : 7);
-        while (*q == ' ') q++;
-        if (*q != ':') continue;
-        q++;
-        while (*q == ' ') q++;
-        if (!vis && !strncmp(q, "none", 4)) return 1;
-        if (vis && !strncmp(q, "hidden", 6)) return 1;
-        if (!vis) return -1;                                   /* display: block — показать, даже если CSS прячет */
-    }
-    return 0;
-}
-
 extern int domjs_has_click(dnode *n);
-
-/* элемент виден (не спрятан ни им самим, ни предками)? */
-int dn_visible(dnode *n) {
-    for (; n && n->type == DN_ELEMENT; n = n->parent) {
-        if (dn_get_attr(n, "hidden")) return 0;
-        int sh = style_hidden(dn_get_attr(n, "style"));
-        if (sh > 0) return 0;
-        if (sh == 0 && css_hidden(n)) return 0;
-        if (!strcmp(n->tag, "script") || !strcmp(n->tag, "style") || !strcmp(n->tag, "head") || !strcmp(n->tag, "template")) return 0;
-    }
-    return n != NULL;
-}
 
 static const char *keep_attrs[] = { "href", "type", "name", "value", "size", "alt", "action", "method", "src", "checked",
                                      "selected", "charset", "content", "http-equiv", "colspan", "start", NULL };
@@ -635,11 +605,7 @@ static void layout_ser(jsbuf *b, dnode *n) {
     const char *t = n->tag;
     if (!strcmp(t, "script") || !strcmp(t, "style") || !strcmp(t, "template") || !strcmp(t, "head")) return;
     if (!strcmp(t, "noscript") && dom_scripting) return;
-    if (dn_get_attr(n, "hidden")) return;
-    int sh = style_hidden(dn_get_attr(n, "style"));
-    if (sh > 0) return;
-    if (sh == 0 && css_hidden(n)) return;
-    if (!strcmp(t, "html") || !strcmp(t, "body")) { for (dnode *k = n->first; k; k = k->next) layout_ser(b, k); return; }
+    if (css_hidden(n)) return;                                 /* display:none, [hidden], спрятан стилями */
     char num[40];
     jb_addc(b, '<');
     jb_adds(b, t);
@@ -686,9 +652,9 @@ char *dom_serialize(int *len) {
     jb_adds(&b, "<meta charset=\"utf-8\"><title>");
     esc(&b, title, strlen(title), 0);
     jb_adds(&b, "</title>");
-    dnode *body = dn_find_tag(d_document, "body");
-    if (body) layout_ser(&b, body);
-    else layout_ser(&b, d_document);
+    dnode *root = dn_find_tag(d_document, "html");          /* <html> и <body> тоже: у них бывает фон */
+    if (!root) root = dn_find_tag(d_document, "body");
+    layout_ser(&b, root ? root : d_document);
     jb_addc(&b, 0);
     *len = b.n - 1;
     dom_dirty = 0;
@@ -714,25 +680,6 @@ void dom_title(char *out, int max) {
 }
 
 /* ------------------------------------------------------------------ селекторы */
-
-/* простая часть: тег, #id, .классы, [атрибуты], :псевдоклассы */
-struct attrsel { char *name, *val; char op; };
-struct simple {
-    char *tag, *id;
-    char **cls;
-    int ncls;
-    struct attrsel *at;
-    int nat;
-    int pseudo;                     /* 1 first-child 2 last-child 3 only-child 4 nth-child 5 checked 6 disabled 7 empty 8 root 9 нельзя (никогда) */
-    int nth_a, nth_b;
-    struct simple *not_;
-    char comb;                      /* как связана с предыдущей: ' ' '>' '+' '~' (0 — первая) */
-};
-struct selector {
-    struct simple **parts;          /* для каждого варианта через запятую — цепочка */
-    int *nparts;
-    int nalt;
-};
 
 static const char *sp_;
 
@@ -853,6 +800,8 @@ static int parse_simple(struct simple *s) {
                 }
             } else if (!strcmp(p, "enabled")) {
                 s->pseudo = 10;
+            } else if (!strcmp(p, "link") || !strcmp(p, "any-link")) {
+                s->pseudo = 11;
             } else if (known_pseudo(p)) {                      /* известный, но не поддерживаем — не совпадает */
                 if (*sp_ == '(') { int d = 0; while (*sp_) { if (*sp_ == '(') d++; if (*sp_ == ')' && --d == 0) { sp_++; break; } sp_++; } }
                 s->pseudo = 9;
@@ -981,6 +930,7 @@ static int match_simple(struct simple *s, dnode *n) {
     case 8: if (!n->parent || n->parent->type != DN_DOCUMENT) return 0; break;
     case 9: return 0;
     case 10: if (dn_get_attr(n, "disabled")) return 0; break;
+    case 11: if ((strcmp(n->tag, "a") && strcmp(n->tag, "area")) || !dn_get_attr(n, "href")) return 0; break;
     }
     if (s->not_ && match_simple(s->not_, n)) return 0;
     return 1;
@@ -1018,157 +968,6 @@ void sel_query(dnode *root, struct selector *s, int first_only, dnode ***out, in
         (*out)[(*count)++] = n;
         if (first_only) return;
     }
-}
-
-/* ------------------------------------------------------------------ CSS: только display:none */
-
-#define CSS_BUCKETS 256
-struct hrule { struct selector *sel; char key[48]; struct hrule *next; };
-static struct hrule *buckets[CSS_BUCKETS], *universal;
-static int n_rules;
-
-static unsigned khash(const char *s, int n) { unsigned h = 5381; for (int i = 0; i < n; i++) h = h * 33 + (ju8)s[i]; return h; }
-
-void css_reset(void) {
-    for (int i = 0; i < CSS_BUCKETS; i++)
-        while (buckets[i]) { struct hrule *r = buckets[i]; buckets[i] = r->next; sel_free(r->sel); free(r); }
-    while (universal) { struct hrule *r = universal; universal = r->next; sel_free(r->sel); free(r); }
-    n_rules = 0;
-}
-
-static void add_hidden_rule(const char *sel, int n) {
-    if (n_rules > 3000) return;
-    char *s = xstrdup(sel, n);
-    /* каждый вариант через запятую — отдельно, чтобы положить в свою корзину */
-    char *p = s;
-    while (*p) {
-        char *e = p;
-        int depth = 0;
-        while (*e && (*e != ',' || depth)) { if (*e == '(') depth++; if (*e == ')') depth--; e++; }
-        char save = *e;
-        *e = 0;
-        struct selector *ss = sel_parse(p);
-        if (ss) {
-            struct hrule *r = malloc(sizeof(struct hrule));
-            r->sel = ss;
-            r->key[0] = 0;
-            struct simple *last = &ss->parts[0][ss->nparts[0] - 1];
-            if (last->id) snprintf(r->key, sizeof(r->key), "#%s", last->id);
-            else if (last->ncls) snprintf(r->key, sizeof(r->key), ".%s", last->cls[0]);
-            else if (last->tag) snprintf(r->key, sizeof(r->key), "%s", last->tag);
-            if (r->key[0]) {
-                unsigned h = khash(r->key, strlen(r->key)) % CSS_BUCKETS;
-                r->next = buckets[h];
-                buckets[h] = r;
-            } else { r->next = universal; universal = r; }
-            n_rules++;
-        }
-        if (!save) break;
-        p = e + 1;
-    }
-    free(s);
-}
-
-static int check_bucket(const char *key, int n, dnode *node) {
-    unsigned h = khash(key, n) % CSS_BUCKETS;
-    for (struct hrule *r = buckets[h]; r; r = r->next)
-        if ((int)strlen(r->key) == n && !strncmp(r->key, key, n) && sel_match(r->sel, node)) return 1;
-    return 0;
-}
-
-int css_hidden(dnode *n) {
-    if (!n_rules) return 0;
-    for (struct hrule *r = universal; r; r = r->next) if (sel_match(r->sel, n)) return 1;
-    if (check_bucket(n->tag, strlen(n->tag), n)) return 1;
-    char key[64];
-    const char *id = dn_get_attr(n, "id");
-    if (id) { int l = snprintf(key, sizeof(key), "#%s", id); if (check_bucket(key, l, n)) return 1; }
-    const char *c = dn_get_attr(n, "class");
-    while (c && *c) {
-        while (*c && isspace((ju8)*c)) c++;
-        const char *st = c;
-        while (*c && !isspace((ju8)*c)) c++;
-        if (c > st && c - st < 60) {
-            key[0] = '.';
-            memcpy(key + 1, st, c - st);
-            if (check_bucket(key, c - st + 1, n)) return 1;
-        }
-    }
-    return 0;
-}
-
-/* условие @media для окна шириной ~790 точек */
-static int media_ok(const char *s, int n) {
-    char q[256];
-    int l = n < 255 ? n : 255;
-    for (int i = 0; i < l; i++) q[i] = tolower((ju8)s[i]);
-    q[l] = 0;
-    if (strstr(q, "print") && !strstr(q, "not print")) return 0;
-    if (strstr(q, "speech") || strstr(q, "prefers-") || strstr(q, "hover") || strstr(q, "pointer") || strstr(q, "orientation: portrait")) return 0;
-    for (char *p = q; (p = strstr(p, "width")); p += 5) {
-        char *v = p + 5;
-        while (*v == ' ' || *v == ':') v++;
-        int num = atoi(v);
-        if (p >= q + 4 && !strncmp(p - 4, "max-", 4) && 790 > num) return 0;
-        if (p >= q + 4 && !strncmp(p - 4, "min-", 4) && 790 < num) return 0;
-    }
-    return 1;
-}
-
-static void css_block(const char *s, int n) {
-    int i = 0;
-    while (i < n) {
-        while (i < n && isspace((ju8)s[i])) i++;
-        if (i >= n) break;
-        if (s[i] == '@') {                                    /* @media (...) { правила } */
-            int j = i;
-            while (j < n && s[j] != '{' && s[j] != ';') j++;
-            if (j >= n || s[j] == ';') { i = j + 1; continue; }
-            int depth = 1, k = j + 1;
-            while (k < n && depth) { if (s[k] == '{') depth++; else if (s[k] == '}') depth--; k++; }
-            if (!strncmp(s + i, "@media", 6) && media_ok(s + i + 6, j - i - 6)) css_block(s + j + 1, k - j - 2);
-            else if (!strncmp(s + i, "@supports", 9)) css_block(s + j + 1, k - j - 2);
-            i = k;
-            continue;
-        }
-        int j = i;
-        while (j < n && s[j] != '{') j++;
-        if (j >= n) break;
-        int k = j + 1;
-        while (k < n && s[k] != '}') k++;
-        /* объявления: есть ли display:none или visibility:hidden? */
-        int hide = 0;
-        for (int p = j + 1; p < k; p++) {
-            if (!strncmp(s + p, "display", 7) && (p == j + 1 || !isalnum((ju8)s[p - 1])) && s[p - 1] != '-') {
-                int q = p + 7;
-                while (q < k && (s[q] == ' ' || s[q] == ':')) q++;
-                if (q + 4 <= k && !strncmp(s + q, "none", 4)) hide = 1;
-            }
-            if (!strncmp(s + p, "visibility", 10) && (p == j + 1 || !isalnum((ju8)s[p - 1]))) {
-                int q = p + 10;
-                while (q < k && (s[q] == ' ' || s[q] == ':')) q++;
-                if (q + 6 <= k && !strncmp(s + q, "hidden", 6)) hide = 1;
-            }
-        }
-        if (hide) add_hidden_rule(s + i, j - i);
-        i = k + 1;
-    }
-}
-
-void css_add_sheet(const char *s, int n) {
-    char *t = malloc(n + 1);                                  /* без комментариев */
-    int o = 0;
-    for (int i = 0; i < n; i++) {
-        if (s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
-            i += 2;
-            while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
-            i++;
-            continue;
-        }
-        t[o++] = s[i];
-    }
-    css_block(t, o);
-    free(t);
 }
 
 /* ------------------------------------------------------------------ cookie */

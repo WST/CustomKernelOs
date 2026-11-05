@@ -85,6 +85,26 @@ int main(int argc, char **argv) {
             double until = js_now_ms() + atoi(argv[i] + 5);
             while (js_now_ms() < until) { int t = dom_next_timer(); if (t < 0) break; usleep((t > 0 ? t : 1) * 1000); dom_run_timers(); js_gc(); }
         }
+        else if (!strcmp(argv[i], "styles")) {                 /* вычисленные стили видимых элементов */
+            int len0;
+            free(dom_serialize(&len0));
+            static const char *dn[] = { "inline", "block", "list-item", "inline-block", "flex", "grid", "table", "row", "cell", "contents", "none" };
+            for (int k = 0; k < d_count; k++) {
+                dnode *e = d_nodes[k];
+                if (e->type != DN_ELEMENT || !dn_connected(e) || css_hidden(e)) continue;
+                const struct dom_style *y = dom_style(k);
+                const char *idv = dn_get_attr(e, "id");
+                if (!idv) continue;                               /* только элементы с id */
+                printf("[style #%s] %s color=%06x bg=%s%06x%s fs=%d%s%s%s%s align=%d m=%d,%d,%d,%d p=%d,%d,%d,%d b=%d/%06x w=%d%s mw=%d%s list=%d%s%s\n",
+                       idv, dn[y->display], y->color, y->bg < 0 ? "(" : "", y->bg < 0 ? 0 : y->bg, y->bg < 0 ? ")" : "",
+                       y->font_px, y->bold ? " bold" : "", y->italic ? " italic" : "", y->underline ? " underline" : "",
+                       y->strike ? " strike" : "", y->align,
+                       y->margin[0], y->margin[1], y->margin[2], y->margin[3], y->padding[0], y->padding[1], y->padding[2], y->padding[3],
+                       y->border[0], y->border_color[0] < 0 ? 0 : y->border_color[0], y->width, y->width_pct ? "%" : "", y->max_width, y->max_width_pct ? "%" : "",
+                       y->list, y->transform ? " upper" : "", y->notext ? " notext" : "");
+            }
+            continue;
+        }
         char nav[1024];
         if (dom_pending_nav(nav, sizeof(nav))) printf("[navigate %s]\n", nav);
     }

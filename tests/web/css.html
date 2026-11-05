@@ -1,0 +1,33 @@
+<!doctype html>
+<html><head><title>CSS test</title>
+<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="print.css" media="print">
+<style>
+  h2 { color: var(--brand); margin: 2em 0 .5em; }
+  .side { display: none }
+</style>
+</head>
+<body>
+<div class="wrap" id="wrap">
+<nav id="nav"><ul id="menu"><li id="li1"><a href="/" id="home">Home</a></li><li id="li2"><a href="/about">About</a></li></ul></nav>
+<h1 id="title">Hello</h1>
+<span class="sr-only" id="sr">Skip to content</span>
+<div class="hidden" id="h1">hidden</div>
+<div class="hidden shown" id="h2">shown</div>
+<p class="lead" id="lead">Lead paragraph</p>
+<p class="note" id="note">A note</p>
+<p class="imp" id="imp">important</p>
+<div class="card" id="card"><h2 id="h2t">Card</h2><a class="btn" href="#" id="btn">Click</a></div>
+<div class="collapse" id="coll">collapsed</div>
+<a class="logo" href="/" id="logo">Logo text</a>
+<p class="from-import" id="fi">imported</p>
+<p style="color: #0f0; margin-left: 2em; display: block !important" class="hidden" id="inl">inline style</p>
+<ol id="ol"><li id="oli">one</li></ol>
+<aside class="side" id="side">side</aside>
+<div hidden id="hid">hidden attr</div>
+<script>
+console.log(getComputedStyle(document.getElementById('title')).color, getComputedStyle(document.getElementById('h1')).display);
+console.log(matchMedia('(min-width: 600px)').matches, matchMedia('(max-width: 30em)').matches);
+</script>
+</div>
+</body></html>

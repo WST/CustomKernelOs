@@ -339,9 +339,9 @@
   function Proxy_(st, el) {
     var o = Object.create(st);
     o.getPropertyValue = function (p) { return my.computed(el, String(p)); };
-    o.display = my.computed(el, 'display');
-    o.visibility = 'visible';
-    o.opacity = '1';
+    ['display', 'visibility', 'color', 'backgroundColor', 'fontSize', 'fontWeight', 'fontStyle', 'textAlign',
+     'opacity', 'position', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'paddingTop', 'paddingBottom',
+     'paddingLeft', 'paddingRight'].forEach(function (k) { o[k] = my.computed(el, k); });
     return o;
   }
   w.scrollTo = w.scroll = w.scrollBy = function () {};

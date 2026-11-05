@@ -1,0 +1,47 @@
+[fetch GET http://test.local/dir/style.css -> ok]
+[fetch GET http://test.local/dir/more.css -> ok]
+[console] rgb(34, 34, 34) none
+[console] true false
+[style #wrap] block color=1e1e1e bg=(000000) fs=16 align=0 m=0,-30000,0,-30000 p=0,12,0,12 b=0/000000 w=-1 mw=600 list=0
+[style #nav] block color=1e1e1e bg=(000000) fs=16 align=0 m=0,0,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #menu] flex color=1e1e1e bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=5
+[style #li1] inline-block color=1e1e1e bg=(000000) fs=16 align=0 m=0,16,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=5
+[style #home] inline color=cc0000 bg=(000000) fs=16 underline align=0 m=0,0,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=5
+[style #li2] inline-block color=1e1e1e bg=(000000) fs=16 align=0 m=0,16,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=5
+[style #title] block color=222222 bg=(000000) fs=48 bold align=0 m=32,0,32,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0 upper
+[style #h2] block color=1e1e1e bg=(000000) fs=16 align=0 m=0,0,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #lead] block color=008000 bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #note] block color=7d7d7d bg=(000000) fs=14 bold italic align=0 m=14,0,14,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #imp] block color=0000ff bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #card] block color=1e1e1e bg=ffffff fs=16 align=0 m=0,0,0,0 p=16,16,16,16 b=1/dddddd w=-1 mw=-1 list=0
+[style #h2t] block color=0a66c2 bg=(000000) fs=24 bold align=0 m=48,0,12,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #btn] inline-block color=cc0000 bg=0a66c2 fs=16 align=0 m=0,0,0,0 p=6,12,6,12 b=0/000000 w=-1 mw=-1 list=0
+[style #logo] inline color=cc0000 bg=(000000) fs=16 underline align=0 m=0,0,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0 notext
+[style #fi] block color=123456 bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #inl] block color=00ff00 bg=(000000) fs=16 align=0 m=16,0,16,32 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #ol] block color=1e1e1e bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,32 b=0/000000 w=-1 mw=-1 list=3
+[style #oli] list-item color=1e1e1e bg=(000000) fs=16 align=0 m=0,0,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=3
+--- JS: 1 script; last error: 
+<meta charset="utf-8"><title>CSS test</title><html data-n="2"><body data-n="4">
+
+<div data-n="12">
+<nav data-n="14"><ul data-n="15"><li data-n="16"><a href="/" data-n="17">Home</a></li><li data-n="19"><a href="/about" data-n="20">About</a></li></ul></nav>
+<h1 data-n="23">Hello</h1>
+
+
+<div data-n="32">shown</div>
+<p data-n="35">Lead paragraph</p>
+<p data-n="38">A note</p>
+<p data-n="41">important</p>
+<div data-n="44"><h2 data-n="45">Card</h2><a href="#" data-n="47">Click</a></div>
+
+<a href="/" data-n="53">Logo text</a>
+<p data-n="56">imported</p>
+<p data-n="59">inline style</p>
+<ol data-n="62"><li data-n="63">one</li></ol>
+
+
+
+</div>
+
+</body></html>

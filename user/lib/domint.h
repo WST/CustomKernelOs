@@ -59,16 +59,39 @@ void   html_decode(const char *s, int n, jsbuf *out);         /* &amp; -> & и �
 void   html_write(const char *s, int n);                       /* document.write во время разбора */
 
 /* селекторы и CSS */
-struct selector;
+/* простая часть: тег, #id, .классы, [атрибуты], :псевдоклассы */
+struct attrsel { char *name, *val; char op; };
+struct simple {
+    char *tag, *id;
+    char **cls;
+    int ncls;
+    struct attrsel *at;
+    int nat;
+    int pseudo;                     /* 1 first-child 2 last-child 3 only-child 4 nth-child 5 checked 6 disabled 7 empty 8 root 9 нельзя (никогда) */
+    int nth_a, nth_b;
+    struct simple *not_;
+    char comb;                      /* как связана с предыдущей: ' ' '>' '+' '~' (0 — первая) */
+};
+struct selector {
+    struct simple **parts;          /* для каждого варианта через запятую — цепочка */
+    int *nparts;
+    int nalt;
+};
+
 struct selector *sel_parse(const char *s);
 void   sel_free(struct selector *s);
 int    sel_match(struct selector *s, dnode *n);
 void   sel_query(dnode *root, struct selector *s, int first_only, dnode ***out, int *count);
-void   css_add_sheet(const char *s, int n);
-int    css_hidden(dnode *n);
-int    style_hidden(const char *st);
+dnode *walk_next(dnode *n, dnode *root);
+void   dn_resolve(const char *base, const char *rel, char *out, int max);
+extern int dom_mut;
+/* css.c: каскад стилей */
+int    css_hidden(dnode *n);                 /* display:none и т. п. (у самого элемента или предков) */
 int    dn_visible(dnode *n);
 void   css_reset(void);
+int    css_media_ok(const char *q, int n);   /* условие @media / matchMedia */
+const struct dom_style *css_style(dnode *n);
+void   css_computed(dnode *n, const char *prop, char *out, int max);   /* для getComputedStyle */
 
 /* domjs.c */
 jsval  dn_wrap(dnode *n);

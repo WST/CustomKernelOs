@@ -49,6 +49,10 @@
   сайты, которые просят «включите JavaScript», теперь работают. Проверено на jQuery,
   React 18, Vue 3, Alpine, Preact, htmx, lodash, moment, axios. Есть и программа **`js`**
   для терминала.
+- **Стили CSS** в браузере (`user/lib/css.c`): `<style>`, `<link rel=stylesheet>`,
+  `@import`, каскад, `var(--x)`, `calc()`, `@media` — сайты на Bootstrap и с тёмными
+  шапками выглядят похоже на себя: цвета, фон, рамки, отступы, колонка по центру,
+  меню в строку, спрятанное — спрятано.
 - **Свой компилятор Си `cc`** прямо внутри MyOS: пишешь программу в `edit`, `cc prog.c`,
   `./prog` — без WSL. Компилятор сам переводит Си в машинный код x86 и сам собирает ELF;
   он собирает все программы из `/bin` и даже сам себя.
@@ -482,6 +486,21 @@ sh:/$ mode cursor hw          # аппаратный курсор на рабо�
 - Картинки показываются рамкой с подписью. Шрифт без кириллицы, поэтому русский
   текст показывается латиницей (транслит): «Привет» → «Privet».
 - `http://localhost/` — страница самой MyOS: запусти в Терминале `httpd &`.
+- **CSS**: таблицы стилей страницы (`<style>`, `<link rel=stylesheet>` — скачиваются,
+  `@import`, `style=""`) применяются по правилам каскада: специфичность, `!important`,
+  наследование, переменные `var(--x)`, единицы `px/em/rem/%/vw/pt`, `calc()/min()/max()/clamp()`,
+  `@media` (окно 788 точек, светлая тема). Из стиля раскладка берёт `display`
+  (блок, строка, `inline-block`, `flex` в строку, `none`), отступы `margin/padding`,
+  рамки и фон блоков, фон «кнопок» из ссылок, цвет и жирность текста, крупный шрифт
+  (вдвое), выравнивание, `text-transform`, `white-space: pre`, маркеры списков,
+  `max-width` + `margin: auto` (колонка по центру). Прячет то, что сайты прячут:
+  `display:none`, `visibility:hidden`, `.sr-only`, `height:0; overflow:hidden`,
+  `text-indent:-9999px`. Фон-картинку не рисует, но если на ней светлый текст —
+  подкладывает тёмный фон. Нет float, сетки grid по колонкам, позиционирования,
+  `:hover`, `::before`. Ctrl+U — выключить стили страницы.
+
+  ![CSS в браузере: страница на Bootstrap](docs/screenshot-css.png)
+
 - **JavaScript** (см. ниже): страница `about:js` — примеры, Ctrl+K — консоль JS
   (`console.log` и ошибки скриптов), Ctrl+J — выключить/включить JavaScript.
 
@@ -636,7 +655,8 @@ P-256 (сервер, который не умеет X25519, ответит `hand
 | `user/lib/jslib.c`, `jslib2.c` | Object, Function, Error, Number, Math, Symbol, Proxy, Reflect, Array, String, JSON, Date, Map/Set, Promise, typed arrays |
 | `user/lib/jsnum.c` | числа: точная печать `double` (как в браузерах), разбор, математика через x87 |
 | `user/lib/jsre.c` | регулярные выражения: компиляция в байт-код и поиск с возвратами |
-| `user/lib/dom.c` | дерево документа: разбор HTML, `document.write`, селекторы CSS, правила `display:none` |
+| `user/lib/dom.c` | дерево документа: разбор HTML, `document.write`, селекторы CSS |
+| `user/lib/css.c` | таблицы стилей: разбор, `@media`/`@import`, каскад, `var()`, вычисленный стиль для раскладки и `getComputedStyle` |
 | `user/lib/domjs.c`, `dom_prelude.js` | document, элементы, window, события, таймеры, location, cookie, fetch/XMLHttpRequest, localStorage, URL... |
 
 Язык: почти весь ES5 и популярное из ES2015+ — `let`/`const`, стрелочные функции,
@@ -650,9 +670,9 @@ WebAssembly. Строки хранятся байтами UTF-8, поэтому 
 в простой HTML — его раскладывает прежний код браузера. После щелчков, набора текста,
 таймеров и ответов `fetch` раскладка пересчитывается, если скрипты поменяли дерево.
 Щелчок по любому тексту отправляет событие `click` его элементу (и выше — так работают
-React и Vue). Скрытое через `display:none` (в `style`, `hidden` или в правилах `<style>`)
-не показывается. Нет картинок, `<canvas>`, раскладки CSS (размеры элементов
-приблизительные) и WebSocket.
+React и Vue). Стили CSS считаются для каждого элемента (`user/lib/css.c`), и раскладка
+берёт из них, что умеет показать (см. «Браузер»). Нет картинок, `<canvas>`, точной
+раскладки CSS (размеры элементов приблизительные) и WebSocket.
 
 Память — сборщик мусора «пометить и вымести». Он запускается только когда никакой
 JS не выполняется (между скриптами, после событий и таймеров), поэтому не нужно следить
@@ -672,7 +692,8 @@ MyOS JavaScript. Type an expression, empty line or Ctrl+D to quit.
 
 `js файл.js` выполняет файл. Тесты на Linux: `make jstest` — ~200 проверок языка,
 генераторы и async, DOM на тестовых страницах (`tests/js`, `tests/web`).
-`build/dom-host страница.html` — браузерный DOM без окна, удобно для отладки.
+`build/dom-host страница.html` — браузерный DOM без окна, удобно для отладки
+(`build/dom-host страница.html styles` — ещё и вычисленные стили элементов с `id`).
 
 ## Компилятор cc
 
@@ -773,7 +794,8 @@ user/lib/tls.c     HTTPS: TLS 1.3, X25519, ChaCha20-Poly1305, AES-GCM, SHA-256 (
 user/browser.c     веб-браузер
 user/lib/js*.c     движок JavaScript (js.h); user/js.c — программа js
 user/lib/dom*.c    DOM для браузера (dom.h), dom_prelude.js — часть окружения на JS
-tests/js/ tests/web/  тесты JavaScript и DOM (make jstest)
+user/lib/css.c     стили CSS для браузера: каскад и вычисленный стиль
+tests/js/ tests/web/  тесты JavaScript, DOM и CSS (make jstest)
 user/terminal.c notepad.c files.c calc.c draw.c mines.c taskmgr.c about.c display.c hellowin.c
                    программы для рабочего стола
 user/cc/           компилятор Си для MyOS (lex, pp, parse, type, gen, main)
@@ -816,7 +838,7 @@ Makefile
    make run        # сборка ядра и программ, установка в /bin, запуск
    make test       # тесты файловой системы и кучи
    make cctest     # тесты компилятора cc (и сборка им самого себя)
-   make jstest     # тесты JavaScript и DOM браузера
+   make jstest     # тесты JavaScript, DOM и CSS браузера
    make cleandisk  # стереть disk.img (ФС создастся заново)
    ```
 
@@ -835,7 +857,7 @@ qemu-system-i386 -m 128M -vga vmware -drive format=raw,file=build\os.img,index=0
 1. Рабочий стол дальше: изменение размера окон, кириллица в шрифте, «настоящий»
    терминал (псевдотерминал в ядре).
 2. Браузер дальше: картинки (BMP/GIF/PNG), проверка сертификатов HTTPS (RSA, ECDSA,
-   корневые центры), закладки, раскладка CSS; в JS — модули и ускорение (байт-код).
+   корневые центры), закладки, float и колонки CSS, картинки фона; в JS — модули и ускорение (байт-код).
 3. Copy-on-write для `fork` (сейчас память копируется сразу целиком).
 4. Звук (PC speaker).
 5. Загрузка на настоящем компьютере с флешки.

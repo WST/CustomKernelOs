@@ -18,7 +18,7 @@
 [fetch GET http://test.local/dir/data.json -> ok]
 [console] xhr 200 13
 --- JS: 4 scripts; last error: 
-<meta charset="utf-8"><title>JS test</title>
+<meta charset="utf-8"><title>JS test</title><html data-n="2"><body data-n="4">
 
 
 <div data-n="16"><ul data-n="28"><li data-n="29">item 1</li><li data-n="31">item 2</li><li data-n="33">item 3</li></ul></div>
@@ -30,4 +30,4 @@
 <input name="q" value="ab" data-n="49">
 <div data-n="53">dynamic</div>
 
-
+</body></html>

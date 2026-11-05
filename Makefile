@@ -3,7 +3,7 @@
 #   make           — собрать ядро (build/os.img), программы и установить их в /bin на disk.img
 #   make run       — всё собрать и запустить в QEMU
 #   make test      — юнит-тесты файловой системы и кучи (на хосте)
-#   make jstest    — тесты JavaScript и DOM браузера (на хосте)
+#   make jstest    — тесты JavaScript, DOM и CSS браузера (на хосте)
 #   make clean     — удалить build/ (диск с файлами disk.img НЕ трогается)
 #   make cleandisk — удалить disk.img (при следующем запуске ФС создастся заново)
 #
@@ -100,7 +100,7 @@ $(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) $(BUILD)/user/tls.o use
 # Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
 JSLIB    := js jsparse jsrun jsnum jslib jslib2 jsre
 JS_OBJS  := $(patsubst %,$(BUILD)/user/l_%.o,$(JSLIB))
-DOM_OBJS := $(BUILD)/user/l_dom.o $(BUILD)/user/l_domjs.o
+DOM_OBJS := $(BUILD)/user/l_dom.o $(BUILD)/user/l_domjs.o $(BUILD)/user/l_css.o
 
 $(BUILD)/user/l_%.o: user/lib/%.c user/lib/js.h user/lib/jsint.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
@@ -197,7 +197,7 @@ JS_SRC := $(patsubst %,user/lib/%.c,$(JSLIB))
 jstest: user/lib/dom_prelude.h | $(BUILD)
 	gcc -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/js_host.c $(JS_SRC) -o $(BUILD)/js-host
 	gcc -DJS_HOST -O1 -g -Wall -Wno-unused-parameter -Wno-unused-function -Iuser/lib tests/dom_host.c $(JS_SRC) \
-	    user/lib/dom.c user/lib/domjs.c -o $(BUILD)/dom-host
+	    user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/dom-host
 	./$(BUILD)/js-host tests/js/lang.js | tee $(BUILD)/jstest.out
 	@grep -q " 0 failed" $(BUILD)/jstest.out
 	./$(BUILD)/js-host tests/js/gen.js > $(BUILD)/gentest.out
@@ -206,6 +206,8 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 	@diff -u tests/web/t1.expected $(BUILD)/domtest.out && echo "DOM test: OK"
 	./$(BUILD)/dom-host tests/web/async.html wait:300 > $(BUILD)/asynctest.out
 	@diff -u tests/web/async.expected $(BUILD)/asynctest.out && echo "DOM async test: OK"
+	./$(BUILD)/dom-host tests/web/css.html styles > $(BUILD)/csstest.out
+	@diff -u tests/web/css.expected $(BUILD)/csstest.out && echo "CSS test: OK"
 
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
 CCROOT := $(BUILD)/ccroot

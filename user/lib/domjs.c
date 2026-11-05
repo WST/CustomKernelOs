@@ -1494,7 +1494,7 @@ static int add_listener(dnode *n, jsstr *type, jsval fn, int capture, int once) 
     n->ls[n->nls].capture = capture;
     n->ls[n->nls].once = once;
     n->nls++;
-    if (!strcmp(type->s, "click")) dom_dirty = 1;              /* элемент стал «щёлкабельным» */
+    if (!strcmp(type->s, "click")) { dom_dirty = 1; dom_mut++; }             /* элемент стал «щёлкабельным» */
     return 0;
 }
 
@@ -2009,22 +2009,7 @@ NATIVE(My_go) {
     return 0;
 }
 
-static int media_ok_q(const char *q) {
-    char l[256];
-    int n = 0;
-    for (; q[n] && n < 255; n++) l[n] = tolower((ju8)q[n]);
-    l[n] = 0;
-    if (strstr(l, "print") || strstr(l, "prefers-color-scheme: dark") || strstr(l, "prefers-reduced-motion: reduce") || strstr(l, "hover: none") || strstr(l, "pointer: coarse")) return 0;
-    for (char *p = l; (p = strstr(p, "width")); p += 5) {
-        char *v = p + 5;
-        while (*v == ' ' || *v == ':') v++;
-        int num = atoi(v);
-        if (p >= l + 4 && !strncmp(p - 4, "max-", 4) && 790 > num) return 0;
-        if (p >= l + 4 && !strncmp(p - 4, "min-", 4) && 790 < num) return 0;
-    }
-    return 1;
-}
-NATIVE(My_media) { UNUSED; jsstr *q; TRY(js_to_string(ARG(0), &q)); *ret = js_bool(media_ok_q(q->s)); return 0; }
+NATIVE(My_media) { UNUSED; jsstr *q; TRY(js_to_string(ARG(0), &q)); *ret = js_bool(css_media_ok(q->s, -1)); return 0; }
 
 NATIVE(My_computed) {
     UNUSED;
@@ -2037,17 +2022,9 @@ NATIVE(My_computed) {
     camel_to_kebab(p->s, kebab);
     int vs, ve, ds, de;
     if (st && style_find(st, kebab, &vs, &ve, &ds, &de)) { *ret = js_strv(js_strn(st + vs, ve - vs)); return 0; }
-    if (!strcmp(kebab, "display")) {
-        if (dn_get_attr(n, "hidden") || css_hidden(n) || !strcmp(n->tag, "script") || !strcmp(n->tag, "style")) *ret = js_cstr("none");
-        else {
-            static const char *inl = " a span b i em strong img input button select textarea label code small sub sup abbr ";
-            char t[40];
-            snprintf(t, sizeof(t), " %s ", n->tag);
-            *ret = js_cstr(strstr(inl, t) ? "inline" : "block");
-        }
-        return 0;
-    }
-    *ret = js_cstr("");
+    char out[256];
+    css_computed(n, kebab, out, sizeof(out));
+    *ret = js_cstr(out);
     return 0;
 }
 
@@ -2331,7 +2308,7 @@ void dom_load(const char *html, int len, const char *url) {
     struct load_args a = { html, len };
     big_call(load_body, &a);
     js_gc();
-    dom_dirty = 1;
+    dom_dirty = 1; dom_mut++;
 }
 
 struct ev_args { int node, kind, key; const char *value; int result; };

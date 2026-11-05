@@ -18,6 +18,35 @@ struct dom_host {
 };
 
 extern int dom_scripting;                       /* 1 — JavaScript включён */
+extern int dom_css;                             /* 1 — стили страницы (CSS) включены */
+
+/* Вычисленный стиль элемента (css.c) — то, что понимает раскладка браузера.
+ * Цвета 0xRRGGBB, -1 — нет (прозрачный). Размеры в точках, стороны: верх, право, низ, лево. */
+enum { DS_INLINE, DS_BLOCK, DS_LIST_ITEM, DS_INLINE_BLOCK, DS_FLEX, DS_GRID, DS_TABLE, DS_ROW, DS_CELL,
+       DS_CONTENTS, DS_NONE };
+enum { LS_DISC, LS_CIRCLE, LS_SQUARE, LS_DECIMAL, LS_ALPHA, LS_NONE };
+#define CSS_AUTO (-30000)                       /* margin: auto */
+struct dom_style {
+    unsigned char display;
+    unsigned char bold, italic, underline, strike;
+    unsigned char align;                        /* 0 влево, 1 по центру, 2 вправо */
+    unsigned char transform;                    /* 1 ПРОПИСНЫЕ, 2 строчные, 3 Каждое Слово */
+    unsigned char pre;                          /* white-space: pre / pre-wrap / pre-line */
+    unsigned char nowrap;
+    unsigned char list;                         /* LS_... */
+    unsigned char notext;                       /* текст не показывать (font-size:0, text-indent:-9999px) */
+    unsigned char hidden;                       /* элемент не показывать совсем */
+    unsigned char flex_row;                     /* flex-контейнер в строку: дети встают в ряд */
+    unsigned char width_pct, max_width_pct;
+    unsigned char bg_image;                     /* фон — картинка (её не показываем) */
+    int   color, bg;
+    short font_px;
+    short margin[4], padding[4], border[4];
+    int   border_color[4];
+    short width, max_width;                     /* -1 — не задано */
+};
+/* стиль узла с номером id (из data-n) после dom_serialize; NULL — нет */
+const struct dom_style *dom_style(int id);
 
 void  dom_init(struct dom_host *h);
 /* разобрать страницу и выполнить её скрипты */

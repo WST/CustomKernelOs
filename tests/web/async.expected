@@ -6,5 +6,5 @@
 [console] fetched {"x":[1,2]}
 [console] run -> ok
 --- JS: 1 script; last error: 
-<meta charset="utf-8"><title></title><div data-n="5">step 3</div>
-
+<meta charset="utf-8"><title></title><html data-n="2"><body data-n="4"><div data-n="5">step 3</div>
+</body></html>
