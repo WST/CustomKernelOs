@@ -6,13 +6,16 @@
  * (поиск работает). Переходы по ссылкам и редиректам, «Назад»/«Вперёд».
  * Картинки показываются рамкой с подписью.
  *
- * HTTPS (шифрования) в MyOS нет, поэтому https-адреса открываются через
- * FrogFind — сервис для старых компьютеров: он сам скачивает страницу по
- * HTTPS и отдаёт её упрощённой, по обычному HTTP. Там же есть поиск.
+ * HTTPS — свой, через user/lib/tls.c (TLS 1.3: X25519 + ChaCha20-Poly1305 или
+ * AES-128-GCM). Сертификат сервера пока не проверяется. Если сайт не умеет
+ * TLS 1.3 (только 1.2 и старше), страница открывается через FrogFind — сервис
+ * для старых компьютеров: он сам скачивает страницу и отдаёт её по HTTP.
+ * Поиск — тоже через FrogFind.
  *
  * Шрифт без кириллицы, поэтому русский текст показывается латиницей (транслит).
  * Адрес file:/путь открывает HTML-файл с диска MyOS. */
 #include "win.h"
+#include "tls.h"
 
 #define W 800
 #define H 576
@@ -811,6 +814,12 @@ static void set_status(const char *s) {
 
 static char *body;                 /* содержимое последнего ответа */
 static int body_len;
+static tls *conn;                  /* открытое HTTPS-соединение (иначе NULL) */
+static char tls_err[96];           /* почему не вышло HTTPS */
+static char secure[48];            /* "TLS 1.3, ChaCha20-Poly1305" для статуса */
+
+static int net_read(int fd, void *b, int n) { return conn ? tls_read(conn, b, n) : read(fd, b, n); }
+static int net_write(int fd, const void *b, int n) { return conn ? tls_write(conn, b, n) : write(fd, b, n); }
 
 static const char *home_page =
     "<title>MyOS Browser</title>"
@@ -819,15 +828,18 @@ static const char *home_page =
     "TCP/IP stack and lays out HTML by itself.</p>"
     "<form action=\"http://frogfind.com/\"><b>Search the web:</b> <input name=\"q\" size=\"40\"> "
     "<input type=\"submit\" value=\"Search\"></form>"
-    "<p><i>(search and https:// sites go through FrogFind, a free service that simplifies modern "
-    "sites for old computers - MyOS has no HTTPS yet)</i></p>"
+    "<p><i>(search goes through FrogFind, a free service that simplifies modern sites for old "
+    "computers. https:// sites are opened directly with our own TLS 1.3; sites that only know "
+    "older TLS are opened through FrogFind)</i></p>"
     "<h2>Try these</h2><ul>"
     "<li><a href=\"http://info.cern.ch/hypertext/WWW/TheProject.html\">The first web site</a> - CERN, 1991</li>"
     "<li><a href=\"http://frogfind.com/\">FrogFind</a> - search engine for vintage computers</li>"
     "<li><a href=\"http://68k.news/\">68k.news</a> - news headlines, plain HTML</li>"
-    "<li><a href=\"https://en.wikipedia.org/wiki/Operating_system\">Wikipedia: Operating system</a> (via FrogFind)</li>"
+    "<li><a href=\"https://en.wikipedia.org/wiki/Operating_system\">Wikipedia: Operating system</a> (HTTPS)</li>"
     "<li><a href=\"https://ru.wikipedia.org/wiki/MS-DOS\">Wikipedia (ru): MS-DOS</a> - Russian is shown in Latin letters</li>"
-    "<li><a href=\"http://example.com/\">example.com</a></li>"
+    "<li><a href=\"" PROXY "https://en.wikipedia.org/wiki/Operating_system\">The same Wikipedia page via FrogFind</a> - simplified</li>"
+    "<li><a href=\"https://example.com/\">https://example.com/</a> - a tiny page over HTTPS</li>"
+    "<li><a href=\"https://lite.duckduckgo.com/lite/\">DuckDuckGo Lite</a> - search over HTTPS</li>"
     "<li><a href=\"http://neverssl.com/\">neverssl.com</a></li>"
     "<li><a href=\"http://localhost/\">http://localhost/</a> - this computer (start <b>httpd &amp;</b> in Terminal first)</li>"
     "<li><a href=\"file:/\">file:/</a> - files on the MyOS disk</li>"
@@ -881,15 +893,23 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
         set_status(msg);
         return -1;
     }
+    secure[0] = 0;
+    if (p.https) {                                          /* HTTPS: рукопожатие TLS 1.3 */
+        snprintf(msg, sizeof(msg), "TLS handshake with %s...", p.host);
+        set_status(msg);
+        conn = tls_open(fd, p.host, tls_err, sizeof(tls_err));
+        if (!conn) { close(fd); return -2; }
+        snprintf(secure, sizeof(secure), "%s", tls_info(conn));
+    }
     char req[1024];
     int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-Browser/0.12 (Lynx-like)\r\n"
+        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-Browser/0.13 (Lynx-like)\r\n"
         "Accept: text/html, text/plain, */*\r\nAccept-Language: ru, en\r\nConnection: close\r\n\r\n",
         p.path, p.host);
-    write(fd, req, rl);
+    net_write(fd, req, rl);
     int n, total = 0, expect = -1;                       /* expect: где кончится ответ по Content-Length */
     unsigned last = ticks();
-    while (total < MAX_PAGE && (n = read(fd, body + total, MAX_PAGE - total)) > 0) {
+    while (total < MAX_PAGE && (n = net_read(fd, body + total, MAX_PAGE - total)) > 0) {
         total += n;
         if (expect < 0) {                                   /* заголовки пришли? узнаем длину */
             body[total] = 0;
@@ -911,6 +931,7 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
             set_status(msg);
         }
     }
+    if (conn) { tls_close(conn); conn = NULL; }
     close(fd);
     /* заголовки */
     int hend = -1;
@@ -977,18 +998,22 @@ static void navigate(const char *target, bool add_history) {
     }
     bool html = true;
     int code = -1;
+    char fallback[160];
+    fallback[0] = 0;
     for (int hop = 0; hop < 6; hop++) {
-        if (!strncmp(u, "https://", 8)) {                 /* шифрования нет — через FrogFind */
-            char enc[400], t[512];
-            url_encode(u, enc, sizeof(enc));
-            snprintf(t, sizeof(t), PROXY "%s", enc);
-            snprintf(u, sizeof(u), "%s", t);
-        }
         snprintf(url, sizeof(url), "%s", u);
         snprintf(addr, sizeof(addr), "%s", u);
         draw_toolbar();
         win_update_rect(win, 0, 0, W, BAR_H);
         code = http_get(u, loc, sizeof(loc), &html);
+        if (code == -2) {                                 /* TLS 1.3 не вышел — через FrogFind */
+            char enc[400], t[512];
+            snprintf(fallback, sizeof(fallback), "TLS: %s - trying FrogFind instead", tls_err);
+            url_encode(u, enc, sizeof(enc));
+            snprintf(t, sizeof(t), PROXY "%s", enc);
+            snprintf(u, sizeof(u), "%s", t);
+            continue;
+        }
         if (code >= 300 && code < 400 && loc[0]) {
             resolve_url(u, loc, u, sizeof(u));
             continue;
@@ -997,10 +1022,9 @@ static void navigate(const char *target, bool add_history) {
     }
     arena_used = 0;
     if (code < 0) {
-        const char *err = "<title>Error</title><h1>Cannot open this page</h1><p>See the status line below. "
-                          "Check the address, or go <a href=\"about:home\">home</a>.</p>";
-        body_len = strlen(err);
-        memcpy(body, err, body_len);
+        body_len = snprintf(body, MAX_PAGE, "<title>Error</title><h1>Cannot open this page</h1><p>See the status line below. "
+                            "Check the address, or go <a href=\"about:home\">home</a>.</p>%s%s%s",
+                            fallback[0] ? "<p><b>HTTPS:</b> " : "", fallback, fallback[0] ? "</p>" : "");
         html = true;
     }
     layout_html(body, body_len, !html);
@@ -1011,6 +1035,9 @@ static void navigate(const char *target, bool add_history) {
     if (code >= 0) {
         snprintf(status, sizeof(status), code == 200 ? "Done: %d KB, %d links" : "HTTP %d", code == 200 ? body_len / 1024 : code, n_links);
         if (code == 200) snprintf(status, sizeof(status), "Done: %d KB, %d links", body_len / 1024, n_links);
+        int sl = strlen(status);
+        if (secure[0]) snprintf(status + sl, sizeof(status) - sl, " - %s (certificate not checked)", secure);
+        else if (fallback[0]) snprintf(status + sl, sizeof(status) - sl, " - %s", fallback);
     }
     hover_link[0] = 0;
     if (add_history) {

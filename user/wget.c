@@ -1,15 +1,21 @@
-/* wget [-O file] [-q] http://host[:port]/path — скачать файл по HTTP
+/* wget [-O file] [-q] http(s)://host[:port]/path — скачать файл по HTTP или HTTPS
  *   -O file   куда сохранить (-O - = на экран); по умолчанию — имя из адреса
  *   -q        молча (без строки прогресса)
- * HTTPS нет: шифрование — отдельная большая история. */
+ * HTTPS — через tls.c (TLS 1.3); сертификат сервера пока не проверяется. */
 #include "myos.h"
+#include "tls.h"
 
 static char host[128], path[256];
 static int port = 80;
+static bool https;
+static tls *conn;                       /* не NULL — читаем/пишем через TLS */
+
+static int net_read(int fd, void *b, int n) { return conn ? tls_read(conn, b, n) : read(fd, b, n); }
+static int net_write(int fd, const void *b, int n) { return conn ? tls_write(conn, b, n) : write(fd, b, n); }
 
 static int parse_url(const char *url) {
     if (!strncmp(url, "http://", 7)) url += 7;
-    else if (!strncmp(url, "https://", 8)) { dprintf(STDERR, "wget: https is not supported, try http://\n"); return -1; }
+    else if (!strncmp(url, "https://", 8)) { url += 8; https = true; port = 443; }
     int i = 0;
     while (*url && *url != '/' && *url != ':' && i < (int)sizeof(host) - 1) host[i++] = *url++;
     host[i] = 0;
@@ -27,7 +33,7 @@ static int resp_len, body_off;
 
 static int read_headers(int fd) {
     while (resp_len < (int)sizeof(resp) - 1) {
-        int n = read(fd, resp + resp_len, sizeof(resp) - 1 - resp_len);
+        int n = net_read(fd, resp + resp_len, sizeof(resp) - 1 - resp_len);
         if (n <= 0) return n < 0 ? n : -EIO;
         resp_len += n;
         resp[resp_len] = 0;
@@ -68,7 +74,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-q")) quiet = true;
         else url = argv[i];
     }
-    if (!url || parse_url(url) < 0) { dprintf(STDERR, "usage: wget [-q] [-O file|-] http://host[:port]/path\n"); return 2; }
+    if (!url || parse_url(url) < 0) { dprintf(STDERR, "usage: wget [-q] [-O file|-] http[s]://host[:port]/path\n"); return 2; }
 
     char name[32];
     if (!out) {                                             /* имя файла — последний кусок пути */
@@ -90,12 +96,19 @@ int main(int argc, char **argv) {
         return 1;
     }
     if (!quiet) dprintf(STDERR, "connected.\n");
+    if (https) {
+        char err[96];
+        if (!quiet) dprintf(STDERR, "TLS handshake... ");
+        conn = tls_open(fd, host, err, sizeof(err));
+        if (!conn) { dprintf(STDERR, "%swget: TLS: %s\n", quiet ? "" : "\n", err); close(fd); return 1; }
+        if (!quiet) dprintf(STDERR, "%s (certificate not verified)\n", tls_info(conn));
+    }
 
     char req[512];
     int rl = snprintf(req, sizeof(req),
-        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-wget/0.9\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-wget/0.13\r\nAccept: */*\r\nConnection: close\r\n\r\n",
         path, host);
-    if (write(fd, req, rl) != rl) { dprintf(STDERR, "wget: send failed\n"); close(fd); return 1; }
+    if (net_write(fd, req, rl) != rl) { dprintf(STDERR, "wget: send failed\n"); close(fd); return 1; }
 
     int r = read_headers(fd);
     if (r < 0) { dprintf(STDERR, "wget: bad response: %s\n", strerror(-r)); close(fd); return 1; }
@@ -122,7 +135,7 @@ int main(int argc, char **argv) {
     static char buf[4096];
     int n;
     bool failed = false;
-    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+    while ((n = net_read(fd, buf, sizeof(buf))) > 0) {
         int w = write(ofd, buf, n);
         if (w != n) { dprintf(STDERR, "\nwget: write to %s: %s\n", out, strerror(w < 0 ? -w : ENOSPC)); failed = true; n = 0; break; }
         got += n;
@@ -132,9 +145,10 @@ int main(int argc, char **argv) {
             else dprintf(STDERR, "\r%u bytes", got);
         }
     }
+    if (conn) tls_close(conn);
     close(fd);
     if (!to_stdout) close(ofd);
-    if (n < 0) { dprintf(STDERR, "\nwget: %s\n", strerror(-n)); return 1; }
+    if (n < 0) { dprintf(STDERR, "\nwget: %s\n", conn ? "TLS error" : strerror(-n)); return 1; }
     if (failed) return 1;
     unsigned ms = ticks() - t0;
     if (!quiet) {

@@ -83,6 +83,18 @@ $(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/gfx.h user/lib/win.h | $(BU
 $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
 	$(LD) $(ULDFLAGS) $(ULIB) $< -o $@
 
+# HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
+# Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
+TLS_PROGS := $(BUILD)/user/browser $(BUILD)/user/wget
+
+$(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(patsubst %,%.o,$(TLS_PROGS)): user/lib/tls.h
+
+$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) $(BUILD)/user/tls.o user/user.ld
+	$(LD) $(ULDFLAGS) $(ULIB) $(BUILD)/user/tls.o $< -o $@
+
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
 CC_OBJS := $(patsubst user/cc/%.c,$(BUILD)/user/cc_%.o,$(CC_SRC))
@@ -116,8 +128,8 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
 	@for d in /include /lib /src /src/cc; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
-	@for f in myos.h gfx.h win.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
-	@for f in libc.c gfx.c win.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in libc.c gfx.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 
@@ -144,6 +156,8 @@ cleandisk:
 
 # Юнит-тесты (запускаются на хосте, не в QEMU)
 test: | $(BUILD)
+	gcc -O1 -Wall -Wno-unused-function -Iuser/lib tests/tls_test.c -o $(BUILD)/tls_test
+	./$(BUILD)/tls_test
 	gcc -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/string.c -o $(BUILD)/fs_test
 	./$(BUILD)/fs_test
 	gcc -O1 -w -fno-builtin -Ikernel -include tests/host_env.h \

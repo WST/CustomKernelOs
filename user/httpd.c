@@ -60,7 +60,7 @@ static void respond(int fd, int code, const char *type, const char *body, int le
     const char *msg = code == 200 ? "OK" : code == 404 ? "Not Found" : code == 400 ? "Bad Request" : "Error";
     char h[256];
     int n = snprintf(h, sizeof(h),
-        "HTTP/1.0 %d %s\r\nServer: MyOS-httpd/0.12\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
+        "HTTP/1.0 %d %s\r\nServer: MyOS-httpd/0.13\r\nContent-Type: %s\r\nContent-Length: %d\r\n"
         "Connection: close\r\n\r\n", code, msg, type, len);
     send_all(fd, h, n);
     send_all(fd, body, len);
@@ -83,7 +83,7 @@ static void status_page(int fd) {
     static const char *states[] = { "ready", "running", "sleeping", "blocked", "zombie" };
     page_start("MyOS", true);
     unsigned up = ticks() / 1000;
-    sb_printf("<h1>MyOS v0.12 is alive</h1><p>Uptime %u:%02u:%02u &middot; "
+    sb_printf("<h1>MyOS v0.13 is alive</h1><p>Uptime %u:%02u:%02u &middot; "
               "this page is served by <b>httpd</b> running inside MyOS "
               "<span class=dim>(refreshes every 3 s)</span></p>", up / 3600, up / 60 % 60, up % 60);
 
@@ -144,7 +144,7 @@ static void files_page(int fd, const char *path) {     /* path — путь на
         int f = open(path, O_READ);
         if (f < 0) { not_found(fd, path); return; }
         char h[256];
-        int n = snprintf(h, sizeof(h), "HTTP/1.0 200 OK\r\nServer: MyOS-httpd/0.12\r\nContent-Type: %s\r\n"
+        int n = snprintf(h, sizeof(h), "HTTP/1.0 200 OK\r\nServer: MyOS-httpd/0.13\r\nContent-Type: %s\r\n"
                          "Content-Length: %u\r\nConnection: close\r\n\r\n", mime(path), st.size);
         send_all(fd, h, n);
         static char buf[4096];
