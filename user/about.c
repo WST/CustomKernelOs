@@ -9,7 +9,7 @@ int main(void) {
     if (!win) { dprintf(STDERR, "about: the desktop is not running\n"); return 1; }
     for (int y = 0; y < 90; y++) gfx_fill_rect(0, y, W, 1, RGB(10 + y / 3, 60 + y, 140 + y));
     gfx_text_scaled(24, 18, "MyOS", C_WHITE, 4);
-    gfx_text(170, 40, "version 0.14", RGB(220, 235, 255), TRANSPARENT);
+    gfx_text(170, 40, "version 0.15", RGB(220, 235, 255), TRANSPARENT);
     gfx_fill_rect(0, 90, W, H - 90, C_WHITE);
     static const char *lines[] = {
         "An operating system written from scratch",

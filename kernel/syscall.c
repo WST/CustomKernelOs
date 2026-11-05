@@ -24,6 +24,7 @@
 #include "net.h"
 #include "ipc.h"
 #include "e1000.h"
+#include "display.h"
 
 #define SBRK_LIMIT SHM_BASE         /* выше — общая память (ipc.c) и стек */
 #define PATH_MAX   128
@@ -361,6 +362,53 @@ static int sys_gfx_blit(u32 ubuf, u32 urect) {
     return 0;
 }
 
+static int sys_gfx_mode(u32 w, u32 h) {
+    if (!fb_ready()) return -ENODEV;
+    return display_set_mode(w, h) < 0 ? -EINVAL : 0;
+}
+
+static int sys_gfx_info2(u32 uout) {
+    if (!fb_ready()) return -ENODEV;
+    if (!user_buf_ok(uout, sizeof(struct gfx_info2), true)) return -EFAULT;
+    struct fb_info fi;
+    fb_get_info(&fi);
+    struct gfx_info2 *o = (struct gfx_info2 *)uout;
+    memset(o, 0, sizeof(*o));
+    o->width = fi.width; o->height = fi.height; o->bpp = fi.bpp; o->pitch = fi.pitch;
+    o->vram_kb = fi.vram >> 10; o->max_w = fi.max_w; o->max_h = fi.max_h;
+    if (o->max_w > FB_MAX_W) o->max_w = FB_MAX_W;
+    if (o->max_h > FB_MAX_H) o->max_h = FB_MAX_H;
+    o->caps = fi.caps; o->gen = fi.gen;
+    o->hw_cursor = fb_cursor_enabled();
+    for (int i = 0; i < 23 && fi.driver[i]; i++) o->driver[i] = fi.driver[i];
+    return 0;
+}
+
+/* копирование и заливка прямоугольника прямо на экране — делает видеокарта */
+static int sys_gfx_accel(u32 op, u32 uargs) {
+    if (!fb_ready()) return -ENODEV;
+    if (!fb_is_owner(task_current()->id)) return -EPERM;
+    if (!user_buf_ok(uargs, 6 * 4, false)) return -EFAULT;
+    const i32 *a = (const i32 *)uargs;
+    if (op == GA_COPY) { fb_copy(a[0], a[1], a[2], a[3], a[4], a[5]); return 0; }
+    if (op == GA_FILL) { fb_fill(a[0], a[1], a[2], a[3], (u32)a[4]); return 0; }
+    return -EINVAL;
+}
+
+static int sys_gfx_cursor(u32 on, u32 ushape) {
+    if (!fb_ready()) return -ENODEV;
+    if (!fb_is_owner(task_current()->id)) return -EPERM;
+    if (ushape) {
+        if (!user_buf_ok(ushape, sizeof(struct gfx_cursor), false)) return -EFAULT;
+        const struct gfx_cursor *c = (const struct gfx_cursor *)ushape;
+        if (c->w <= 0 || c->h <= 0 || c->w > 32 || c->h > 32) return -EINVAL;
+        if (fb_cursor_define(c->px, c->w, c->h, c->hot_x, c->hot_y) < 0) return -ENODEV;
+    }
+    if (fb_cursor_enable(on != 0) < 0) return -ENODEV;
+    if (on) { struct mouse_state m; mouse_get(&m); fb_cursor_move(m.x, m.y); }
+    return 0;
+}
+
 static int sys_mouse(u32 uout) {
     if (!user_buf_ok(uout, sizeof(struct mouse_state), true)) return -EFAULT;
     mouse_get((struct mouse_state *)uout);
@@ -594,6 +642,10 @@ void syscall_dispatch(struct regs *r) {
     case SYS_MSG_RECV:    ret = sys_msg_recv(a, b); break;
     case SYS_SERVICE:     ret = sys_service(a, b); break;
     case SYS_TIME:        ret = sys_time(a); break;
+    case SYS_GFX_MODE:    ret = sys_gfx_mode(a, b); break;
+    case SYS_GFX_INFO2:   ret = sys_gfx_info2(a); break;
+    case SYS_GFX_ACCEL:   ret = sys_gfx_accel(a, b); break;
+    case SYS_GFX_CURSOR:  ret = sys_gfx_cursor(a, b); break;
     }
     r->eax = (u32)ret;
 

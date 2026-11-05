@@ -164,14 +164,17 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive format=raw,file=$(DISK),index=1,media=disk
 QEMU_MEM ?= 128M
+# видеокарта: vmware — VMware SVGA II с ускорением 2D и аппаратным курсором (по умолчанию),
+# std — простая Bochs VBE: make run VGA=std
+VGA ?= vmware
 # сеть: карта e1000 за NAT QEMU; порт 8080 Windows -> порт 80 MyOS (httpd)
 QEMU_NET := -nic user,model=e1000,hostfwd=tcp::8080-:80 -rtc base=localtime
 
 run: all
-	$(QEMU) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_NET)
+	$(QEMU) -m $(QEMU_MEM) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET)
 
 debug: all
-	$(QEMU) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
+	$(QEMU) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
 
 clean:
 	rm -rf $(BUILD)

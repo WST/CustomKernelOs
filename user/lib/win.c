@@ -20,7 +20,7 @@ static void copy_title(char *dst, const char *src) {
 }
 
 window *win_create(const char *title, int w, int h) {
-    if (!win_desktop_pid() || w <= 0 || h <= 0 || w > 1024 || h > 740) return NULL;
+    if (!win_desktop_pid() || w <= 0 || h <= 0 || w > 2560 || h > 1600) return NULL;
     if (!font_loaded) { gfx_load_font(); font_loaded = true; }
     int slot = -1;
     for (int i = 0; i < MAX_WINDOWS; i++) if (!wins[i]) { slot = i; break; }

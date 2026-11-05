@@ -12,6 +12,7 @@
 #include "task.h"
 #include "gdt.h"
 #include "fb.h"
+#include "display.h"
 #include "net.h"
 #include "mouse.h"
 
@@ -42,7 +43,7 @@ void kmain(void) {
         " | |\\/| | | | | | | \\___ \\ \n"
         " | |  | | |_| | |_| |___) |\n"
         " |_|  |_|\\__, |\\___/|____/ \n"
-        "         |___/   v0.14     \n\n");
+        "         |___/   v0.15     \n\n");
 
     ok("VGA text console 80x25");
     gdt_init();
@@ -64,10 +65,12 @@ void kmain(void) {
         struct fb_info fi;
         fb_get_info(&fi);
         vga_switch_to_fb();
-        ok("Graphics: %ux%u, %u bpp, framebuffer at %p -> console %ux%u",
-           fi.width, fi.height, fi.bpp, fi.phys, vga_cols(), vga_rows());
+        ok("Graphics: %s, %u MB VRAM, %ux%u, %u bpp -> console %ux%u",
+           fi.driver, fi.vram >> 20, fi.width, fi.height, fi.bpp, vga_cols(), vga_rows());
+        if (fi.caps & FB_CAP_GPU)
+            ok("GPU 2D acceleration: rect copy, fill%s", fi.caps & FB_CAP_CURSOR ? ", hardware cursor" : "");
     } else {
-        ok("Graphics: no Bochs VBE adapter - staying in VGA text mode");
+        ok("Graphics: no VMware SVGA / Bochs VBE adapter - staying in VGA text mode");
     }
     fpu_init();
     tasking_init();
@@ -76,7 +79,7 @@ void kmain(void) {
     timer_init();
     keyboard_init();
     bool have_mouse = mouse_init();
-    if (have_mouse && fb_ready()) mouse_set_bounds(FB_WIDTH, FB_HEIGHT);
+    if (have_mouse && fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }
     __asm__ volatile ("sti");
     ok("PIT timer 100 Hz, PS/2 keyboard%s, FPU, interrupts on", have_mouse ? ", PS/2 mouse" : "");
 
@@ -95,6 +98,12 @@ void kmain(void) {
             fs_info(&fi);
             ok("MyFS %s, %u KB free",
                formatted ? "created (new disk formatted)" : "mounted", fi.free_blocks / 2);
+            struct fb_info before, after;
+            fb_get_info(&before);
+            display_load_config();
+            fb_get_info(&after);
+            if (fb_ready() && after.gen != before.gen)
+                ok("Display: %ux%u from /etc/display", after.width, after.height);
         } else {
             fail("MyFS", fs_strerror(r));
         }

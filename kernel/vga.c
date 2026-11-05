@@ -9,12 +9,14 @@
 #include "string.h"
 #include "fb.h"
 
-#define MAX_W   (FB_WIDTH / FONT_W)     /* 128 */
-#define MAX_H   (FB_HEIGHT / FONT_H)    /* 48 */
+#define MAX_W   (FB_MAX_W / FONT_W)     /* 320 */
+#define MAX_H   (FB_MAX_H / FONT_H)     /* 100 */
 #define VGA_MEM ((volatile u16 *)0xB8000)
 
 static volatile u16 *cells = VGA_MEM;
 static u16  shadow[MAX_W * MAX_H];
+static u16  saved_text[80 * 25];        /* текстовый экран до включения графики */
+static int  PW, PH;                     /* размер экрана в пикселях (графика) */
 static int  W = 80, H = 25;
 static bool fbmode;                     /* рисуем пикселями */
 static bool suspended;                  /* экран захватила программа — только запоминаем */
@@ -86,7 +88,7 @@ void vga_reset_terminal(void) { u32 f = irq_save(); esc_state = 0; attr = defaul
 
 static void clear_nolock(void) {
     for (int i = 0; i < W * H; i++) cells[i] = cell(' ');
-    if (fbmode && !suspended) { cur_x = -1; fb_fill(0, 0, FB_WIDTH, FB_HEIGHT, palette[attr >> 4]); }
+    if (fbmode && !suspended) { cur_x = -1; fb_fill(0, 0, PW, PH, palette[attr >> 4]); }
     col = row = 0;
     update_cursor();
 }
@@ -110,20 +112,53 @@ static void repaint(void) {
  * видеокарта перестаёт показывать память 0xB8000, и прочитать её уже нельзя. */
 void vga_save_text(void) {
     u32 f = irq_save();
-    for (int i = 0; i < MAX_W * MAX_H; i++) shadow[i] = (u16)' ' | ((u16)default_attr << 8);
-    for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++) shadow[y * MAX_W + x] = VGA_MEM[y * W + x];
+    for (int i = 0; i < 80 * 25; i++) saved_text[i] = VGA_MEM[i];
     irq_restore(f);
+}
+
+static void fb_dims(void) {
+    struct fb_info fi;
+    fb_get_info(&fi);
+    PW = fi.width; PH = fi.height;
 }
 
 /* Перейти на графическую консоль: сохранённый текст — в новую, большую сетку */
 void vga_switch_to_fb(void) {
     u32 f = irq_save();
+    fb_dims();
+    int nw = PW / FONT_W, nh = PH / FONT_H;
+    for (int i = 0; i < nw * nh; i++) shadow[i] = (u16)' ' | ((u16)default_attr << 8);
+    for (int y = 0; y < 25 && y < nh; y++)
+        for (int x = 0; x < 80 && x < nw; x++) shadow[y * nw + x] = saved_text[y * 80 + x];
     cells = shadow;
-    W = MAX_W;
-    H = MAX_H;
+    W = nw;
+    H = nh;
     fbmode = true;
     repaint();
+    irq_restore(f);
+}
+
+/* Разрешение сменилось: новая сетка ячеек. Текст переносим как есть (лишние
+ * столбцы обрезаются); если строк стало меньше — сохраняем нижние, где курсор. */
+void vga_resize(void) {
+    if (!fbmode) return;
+    static u16 tmp[MAX_W * MAX_H];
+    u32 f = irq_save();
+    fb_dims();
+    int nw = PW / FONT_W, nh = PH / FONT_H;
+    int off = row + 1 > nh ? row + 1 - nh : 0;
+    for (int i = 0; i < nw * nh; i++) tmp[i] = (u16)' ' | ((u16)default_attr << 8);
+    for (int y = 0; y < nh && y + off < H; y++)
+        for (int x = 0; x < nw && x < W; x++) tmp[y * nw + x] = shadow[(y + off) * W + x];
+    memcpy(shadow, tmp, nw * nh * 2);
+    W = nw; H = nh;
+    row -= off;
+    if (col >= W) col = W - 1;
+    cur_x = cur_y = -1;
+    if (!suspended) {
+        fb_fill(0, 0, PW, PH, palette[default_attr >> 4]);
+        repaint();
+    }
     irq_restore(f);
 }
 
@@ -132,7 +167,7 @@ void vga_suspend(bool suspend) {
     u32 f = irq_save();
     if (suspended != suspend) {
         suspended = suspend;
-        if (!suspend && fbmode) repaint();
+        if (!suspend && fbmode) { fb_fill(0, 0, PW, PH, palette[default_attr >> 4]); repaint(); }
     }
     irq_restore(f);
 }

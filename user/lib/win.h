@@ -70,6 +70,7 @@ bool ui_inside(int px, int py, int x, int y, int w, int h);
 /* ---- протокол с рабочим столом (для любопытных: см. desktop.c) ---- */
 enum {
     WM_CREATE = 100, WM_CREATED, WM_UPDATE, WM_TITLE, WM_DESTROY,
+    WM_DISPLAY = 110,               /* программа -> стол: a = аппаратный курсор вкл/выкл */
     WM_KEY = 200, WM_MOUSE, WM_CLOSE, WM_FOCUS, WM_QUIT,
 };
 

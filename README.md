@@ -29,8 +29,12 @@
   группы процессов, сироты, SIGPIPE. Система загружается прямо в **`/bin/sh`** —
   оболочку-программу с конвейерами `|`, перенаправлениями `>` `>>` `<`, фоном `&`,
   кавычками, `$?`, шаблонами `*` `?`, историей (↑↓) и Tab-дополнением.
-- **Графика**: режим 1024×768×32 через Bochs VBE (видеокарта QEMU), поиск видеопамяти
-  по PCI, графическая консоль 128×48 шрифтом 8×16, мышь PS/2, сохранение FPU при
+- **Графика и видеокарта**: драйвер **VMware SVGA II** — очередь команд GPU (FIFO),
+  аппаратное копирование прямоугольников (прокрутка консоли, перетаскивание окон),
+  заливка, **аппаратный курсор**; запасной драйвер Bochs VBE. **Разрешение меняется
+  на лету** — от 640×480 до 1920×1200 (и выше, если хватает видеопамяти): программа
+  **Display** на рабочем столе или команда **`mode 1280x720`**, выбор запоминается в
+  `/etc/display`. Графическая консоль шрифтом 8×16, мышь PS/2, сохранение FPU при
   переключении задач (программам можно `float`/`double`), библиотека `gfx` для программ.
   Программы **`mandel`** и **`paint`**.
 - **Сеть**: драйвер карты Intel e1000 (её даёт QEMU), свой стек TCP/IP — Ethernet,
@@ -406,6 +410,54 @@ sh:/$ desktop
   открывает текст в **Notepad** (Ctrl+S — сохранить, имя файла — в поле сверху).
 - **Calculator**, **Paint** (правая кнопка — ластик), **Minesweeper**,
   **Task Manager** (процессы, загрузка процессора, «End task»), **About MyOS**.
+- **Display** — видеокарта и разрешение: щелчок по разрешению меняет его сразу
+  (рабочий стол, консоль и мышь перестраиваются без перезагрузки) и запоминает.
+  Галочка «Hardware mouse cursor» — стрелку рисует сама видеокарта.
+
+### Видеокарта (GPU)
+
+![Display](docs/screenshot-display.png)
+
+```
+sh:/$ mode
+Adapter:    VMware SVGA II, 16384 KB video memory
+Resolution: 1280x720, 32 bpp, 5120 bytes per line
+GPU 2D:     on (rect copy and fill on the card)
+HW cursor:  off
+Modes:      640x480 800x600 1024x768 1152x864 [1280x720] 1280x800 ... 1920x1200
+sh:/$ mode 1920x1080          # сменить и запомнить
+sh:/$ mode cursor hw          # аппаратный курсор на рабочем столе
+```
+
+`make run` запускает QEMU с `-vga vmware` — это видеокарта VMware SVGA II, которую
+понимают QEMU, VirtualBox (VMSVGA) и VMware. `make run VGA=std` — старая Bochs VBE
+(тогда всё рисует процессор, аппаратного курсора нет, но разрешение тоже меняется).
+
+Как устроено (`kernel/fb.c`):
+- Карта находится по PCI (15ad:0405). У неё три окна: порты регистров (ширина, высота,
+  курсор...), видеопамять и **FIFO** — кольцевая очередь команд в памяти. Ядро
+  дописывает команды в конец и сдвигает `NEXT_CMD`, карта выполняет их сама.
+- `UPDATE x,y,w,h` — «покажи этот прямоугольник»: процессор рисует в видеопамять,
+  а карте надо сказать, что изменилось. Консоль копит изменения и отправляет их из
+  таймера (100 раз в секунду), программы — сразу после `gfx_flip`.
+- `RECT_COPY` — карта сама двигает пиксели: прокрутка консоли — одна команда, а когда
+  тащишь окно, рабочий стол просит карту сдвинуть его на экране (`gfx_hw_copy`) и
+  дорисовывает только открывшуюся полоску.
+- Заливка: `RECT_FILL` в SVGA устарела (QEMU её объявляет, но не выполняет), поэтому
+  процессор заливает одну строку, а карта копирует её вниз, удваивая: 1, 2, 4, 8...
+  строк — 11 команд на весь экран 1080 строк.
+- Курсор: `DEFINE_CURSOR` загружает в карту картинку стрелки, дальше обработчик
+  прерывания мыши просто пишет координаты в регистры.
+- Перед тем как процессор сам пишет в видеопамять, ядро ждёт, пока карта доделает
+  очередь (`SYNC`), иначе запоздавшее копирование затёрло бы свежие пиксели.
+- QEMU применяет новый размер экрана только при перерисовке своего окна, а до этого
+  отбрасывает копирования. Поэтому после смены режима ядро проверяет карту: ставит
+  метку в углу и просит скопировать её на соседний пиксель — пока не сойдётся,
+  копирует процессором. (В окне QEMU в это время могут мелькнуть строки
+  `vmsvga_fifo_run: Unknown command 0x03` — это и есть проверка.)
+- Для программ: `gfx_info2`, `gfx_set_mode`, `gfx_check_mode` (разрешение сменилось —
+  буфер пересоздан), `gfx_hw_copy`, `gfx_hw_fill`, `gfx_hw_cursor`, `gfx_modes` (см. `gfx.h`).
+  В ядре — системные вызовы `gfx_mode`, `gfx_info2`, `gfx_accel`, `gfx_cursor`.
 
 ![Меню Пуск](docs/screenshot-start.png)
 
@@ -706,7 +758,8 @@ kernel/process.c   загрузчик ELF, запуск процессов, Ctrl
 kernel/syscall.c   системные вызовы int 0x80
 kernel/file.c      открытые файлы со счётчиком ссылок, консоль, каналы
 kernel/pci.c       чтение конфигурации PCI
-kernel/fb.c        графический режим Bochs VBE, шрифт, рисование, захват экрана
+kernel/fb.c        видеокарты VMware SVGA II (FIFO, RECT_COPY, курсор) и Bochs VBE, режимы, шрифт
+kernel/display.c   смена разрешения целиком (карта, консоль, мышь), /etc/display
 kernel/mouse.c     мышь PS/2
 kernel/e1000.c     драйвер сетевой карты Intel e1000
 kernel/net.c       Ethernet, ARP, IPv4, ICMP, UDP, DHCP, поток net
@@ -721,7 +774,7 @@ user/browser.c     веб-браузер
 user/lib/js*.c     движок JavaScript (js.h); user/js.c — программа js
 user/lib/dom*.c    DOM для браузера (dom.h), dom_prelude.js — часть окружения на JS
 tests/js/ tests/web/  тесты JavaScript и DOM (make jstest)
-user/terminal.c notepad.c files.c calc.c draw.c mines.c taskmgr.c about.c hellowin.c
+user/terminal.c notepad.c files.c calc.c draw.c mines.c taskmgr.c about.c display.c hellowin.c
                    программы для рабочего стола
 user/cc/           компилятор Си для MyOS (lex, pp, parse, type, gen, main)
 tests/cc/          тесты компилятора (make cctest)
@@ -771,7 +824,7 @@ Makefile
 образы (`disk.img` уже лежит в папке):
 
 ```
-qemu-system-i386 -m 128M -drive format=raw,file=build\os.img,index=0,media=disk -drive format=raw,file=disk.img,index=1,media=disk -nic user,model=e1000,hostfwd=tcp::8080-:80 -rtc base=localtime
+qemu-system-i386 -m 128M -vga vmware -drive format=raw,file=build\os.img,index=0,media=disk -drive format=raw,file=disk.img,index=1,media=disk -nic user,model=e1000,hostfwd=tcp::8080-:80 -rtc base=localtime
 ```
 
 Отладка: `make debug` запускает QEMU, ждущий GDB на порту 1234

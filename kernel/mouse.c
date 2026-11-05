@@ -8,6 +8,7 @@
  * Координаты мы складываем сами: мышь сообщает только «насколько сдвинулась». */
 #include "mouse.h"
 #include "idt.h"
+#include "fb.h"
 
 static struct mouse_state st;
 static i32 max_x = 1023, max_y = 767;
@@ -51,6 +52,7 @@ static void mouse_irq(struct regs *r) {
     if (st.y > max_y) st.y = max_y;
     st.buttons = packet[0] & 7;
     st.events++;
+    fb_cursor_move(st.x, st.y);                  /* аппаратный курсор двигает сама карта */
 }
 
 bool mouse_init(void) {
@@ -66,11 +68,18 @@ bool mouse_init(void) {
     if (!mouse_cmd(0xF4)) return false;          /* начать присылать пакеты */
     st.x = (max_x + 1) / 2;
     st.y = (max_y + 1) / 2;
+    if (fb_ready()) { struct fb_info fi; fb_get_info(&fi); st.x = fi.width / 2; st.y = fi.height / 2; }
     irq_install(12, mouse_irq);
     return true;
 }
 
-void mouse_set_bounds(i32 w, i32 h) { max_x = w - 1; max_y = h - 1; st.x = w / 2; st.y = h / 2; }
+void mouse_set_bounds(i32 w, i32 h) {
+    u32 f = irq_save();
+    max_x = w - 1; max_y = h - 1;
+    if (st.x > max_x) st.x = max_x;
+    if (st.y > max_y) st.y = max_y;
+    irq_restore(f);
+}
 
 void mouse_get(struct mouse_state *out) {
     u32 f = irq_save();

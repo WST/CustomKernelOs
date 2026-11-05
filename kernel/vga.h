@@ -15,6 +15,7 @@ void vga_set_default_color(u8 fg, u8 bg);   /* цвет, к которому в�
 void vga_reset_terminal(void);
 void vga_save_text(void);                   /* снимок текстового экрана (до fb_init) */
 void vga_switch_to_fb(void);                /* перейти на графическую консоль 128x48 */
+void vga_resize(void);                       /* сменилось разрешение экрана */
 void vga_suspend(bool suspend);              /* программа рисует сама — консоль не трогает экран */
 int  vga_cols(void);
 int  vga_rows(void);

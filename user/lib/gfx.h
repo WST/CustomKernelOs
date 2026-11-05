@@ -6,6 +6,13 @@
  *   gfx_flip();                         показать кадр (или gfx_flip_rect — только часть)
  *   gfx_close();                        вернуть экран консоли (при выходе — само)
  *
+ * Видеокарта и разрешение:
+ *   gfx_info2(&gi)                      драйвер, режим, видеопамять, умения (GFX_CAP_*)
+ *   gfx_set_mode(1280, 720)             сменить разрешение (для всех: консоль, стол)
+ *   if (gfx_check_mode()) ...           режим сменился: gfx_w/gfx_h/gfx_buf уже новые
+ *   gfx_hw_copy(...), gfx_hw_fill(...)  копирование/заливка прямо на экране — на GPU
+ *   gfx_hw_cursor(1)                    аппаратный курсор (карта рисует стрелку сама)
+ *
  * Пиксели — 0x00RRGGBB. Мышь — mouse_get(). Клавиши — readkey() в режиме
  * TTY_RAW | TTY_NONBLOCK (его включает gfx_open). */
 #ifndef GFX_H
@@ -32,6 +39,32 @@ int  gfx_load_font(void);           /* только шрифт (gfx_open дел�
 void gfx_close(void);
 void gfx_flip(void);
 void gfx_flip_rect(int x, int y, int w, int h);
+
+struct gfx_info2 {
+    unsigned width, height, bpp, pitch;
+    unsigned vram_kb, max_w, max_h, caps, gen;
+    int hw_cursor;
+    char driver[24];
+};
+#define GFX_CAP_COPY      1         /* gfx_hw_copy работает (на GPU или процессором ядра) */
+#define GFX_CAP_FILL      2
+#define GFX_CAP_CURSOR    4         /* у карты есть аппаратный курсор */
+#define GFX_CAP_GPU       8         /* копирование/заливку умеет сама видеокарта */
+#define GFX_CAP_GPU_ON    16        /* ...и сейчас она это делает */
+#define GFX_CAP_CURSOR_ON 32
+int  gfx_info2(struct gfx_info2 *gi);
+int  gfx_set_mode(int w, int h);    /* 0 или -EINVAL */
+int  gfx_check_mode(void);          /* 1 — разрешение сменилось, буфер пересоздан */
+/* Прямо на экране, минуя буфер: свой gfx_buf программа поправляет сама. */
+int  gfx_hw_copy(int sx, int sy, int dx, int dy, int w, int h);
+int  gfx_hw_fill(int x, int y, int w, int h, color_t c);
+int  gfx_hw_cursor(int on);         /* 0 или -ENODEV (нет аппаратного курсора) */
+/* Список стандартных разрешений: -> сколько; поддерживаемые картой — с флагом ok */
+struct gfx_mode { int w, h, ok; };
+int  gfx_modes(struct gfx_mode *out, int max);
+/* /etc/display: сохранить/прочитать выбор пользователя («1280x720» и «cursor=hw») */
+int  gfx_save_config(int w, int h, int hw_cursor);
+int  gfx_load_config(int *w, int *h, int *hw_cursor);
 
 static inline void gfx_pixel(int x, int y, color_t c) {
     if ((unsigned)x < (unsigned)gfx_w && (unsigned)y < (unsigned)gfx_h) gfx_buf[y * gfx_w + x] = c;

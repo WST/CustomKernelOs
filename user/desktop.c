@@ -7,7 +7,13 @@
  * переносим на экран только изменившиеся прямоугольники.
  *
  * Мышь: перетаскивание окон за заголовок, кнопки «_» и «X», клик по окну
- * поднимает его наверх. Двойной клик по значку запускает программу. */
+ * поднимает его наверх. Двойной клик по значку запускает программу.
+ *
+ * Видеокарта: перетаскиваемое окно не перерисовываем, а просим карту сдвинуть
+ * его пиксели прямо на экране (gfx_hw_copy) — дорисовываем только открывшуюся
+ * полоску. Курсор может рисовать сама карта (аппаратный курсор). Разрешение
+ * экрана может смениться в любой момент (программа Display, команда mode) —
+ * тогда пересоздаём буферы и обои и раскладываем окна заново. */
 #include "win.h"
 
 #define TASKBAR_H 40
@@ -18,6 +24,8 @@
 static int SW, SH;                      /* размер экрана */
 static color_t *wallpaper;              /* обои, нарисованные один раз */
 static color_t *back;                   /* сюда собираем кадр */
+static bool hwcur;                      /* курсор рисует видеокарта */
+static int drag = -1;                   /* окно, которое тащим */
 
 /* ------------------------------------------------------------ окна */
 
@@ -148,6 +156,11 @@ static const struct icon_def icons[] = {
         ".BkkkkkkkkknkkB.", ".BkkknkkkkknkkB.", ".BkkknkkknknkkB.", ".BkkknknknknkkB.",
         ".BknknknknknkkB.", ".BknknknknknknB.", ".BknknknknknknB.", ".BkkkkkkkkkkkkB.",
         ".BBBBBBBBBBBBBB.", "......GGGG......", "....GGGGGGGG....", "................" } },
+    { "Display", "display", {
+        "................", ".GGGGGGGGGGGGGG.", ".GBBBBBBBBBBBBG.", ".GBbbbbbbbbbbBG.",
+        ".GBbccbbbbbbbBG.", ".GBbccbbbbnnbBG.", ".GBbbbbbbnnnnBG.", ".GBbbbbbnnnnnBG.",
+        ".GBbbbnnnnnnnBG.", ".GBnnnnnnnnnnBG.", ".GBBBBBBBBBBBBG.", ".GGGGGGGGGGGGGG.",
+        "......GGGG......", ".....GGGGGG.....", "...GGGGGGGGGG...", "................" } },
     { "About MyOS", "about", {
         "................", ".....bbbbbb.....", "...bbbbbbbbbb...", "..bbbbbwwbbbbb..",
         "..bbbbbwwbbbbb..", ".bbbbbbbbbbbbbb.", ".bbbbbwwwbbbbbb.", ".bbbbbbwwbbbbbb.",
@@ -162,8 +175,13 @@ static const struct icon_def icons[] = {
 #define ICON_CELL_H 84
 static int selected_icon = -1;
 
+static int icons_per_col(void) {
+    int n = (SH - TASKBAR_H - ICON_Y) / ICON_CELL_H;
+    return n > 0 ? n : 1;
+}
+
 static void icon_cell(int i, int *x, int *y) {
-    int per_col = (SH - TASKBAR_H - ICON_Y) / ICON_CELL_H;
+    int per_col = icons_per_col();
     *x = ICON_X + (i / per_col) * ICON_CELL_W;
     *y = ICON_Y + (i % per_col) * ICON_CELL_H;
 }
@@ -244,10 +262,14 @@ static void make_wallpaper(void) {
 
 static bool menu_open;
 #define MENU_W 250
-#define MENU_ITEM_H 34
 #define MENU_HEAD 44
 static int menu_hover = -1;
 static int menu_items(void) { return N_ICONS + 1; }               /* + «Выход» */
+static int menu_item_h(void) {                                    /* на маленьком экране — теснее */
+    int h = (SH - TASKBAR_H - MENU_HEAD - 12) / menu_items();
+    return h > 34 ? 34 : h;
+}
+#define MENU_ITEM_H menu_item_h()
 static struct rect menu_rect(void) {
     int h = MENU_HEAD + menu_items() * MENU_ITEM_H + 12;
     struct rect r = { 0, SH - TASKBAR_H - h, MENU_W, h };
@@ -323,7 +345,7 @@ static void draw_menu(void) {
     for (int i = 0; i < MENU_HEAD; i++)                           /* шапка с градиентом */
         gfx_fill_rect(r.x + 1, r.y + 1 + i, r.w - 2, 1, RGB(20 + i, 80 + i * 2, 160 + i));
     gfx_text_scaled(r.x + 14, r.y + 6, "MyOS", C_WHITE, 2);
-    gfx_text(r.x + 92, r.y + 22, "v0.14", RGB(200, 220, 255), TRANSPARENT);
+    gfx_text(r.x + 92, r.y + 22, "v0.15", RGB(200, 220, 255), TRANSPARENT);
     for (int i = 0; i < menu_items(); i++) {
         int iy = r.y + MENU_HEAD + 6 + i * MENU_ITEM_H;
         if (i == menu_hover) gfx_fill_rect(r.x + 4, iy, r.w - 8, MENU_ITEM_H, RGB(65, 75, 100));
@@ -382,7 +404,8 @@ static int mouse_x, mouse_y;
 static void compose(struct rect r) {
     for (int y = r.y; y < r.y + r.h; y++)                         /* обои */
         memcpy(back + y * SW + r.x, wallpaper + y * SW + r.x, r.w * 4);
-    struct rect desk_icons = { 0, 0, ICON_CELL_W * 2 + ICON_X, SH - TASKBAR_H };
+    int icon_cols = (N_ICONS + icons_per_col() - 1) / icons_per_col();
+    struct rect desk_icons = { 0, 0, ICON_CELL_W * icon_cols + ICON_X, SH - TASKBAR_H };
     if (intersect(r, desk_icons, NULL))
         for (int i = 0; i < N_ICONS; i++) {
             int x, y;
@@ -405,7 +428,7 @@ static void compose(struct rect r) {
     if (intersect(r, tb, NULL)) draw_taskbar();
     if (menu_open && intersect(r, menu_rect(), NULL)) draw_menu();
     struct rect cur = { mouse_x, mouse_y, CURSOR_W, CURSOR_H };
-    if (intersect(r, cur, NULL)) gfx_cursor_draw(mouse_x, mouse_y);
+    if (!hwcur && intersect(r, cur, NULL)) gfx_cursor_draw(mouse_x, mouse_y);
 }
 
 static void flush(void) {
@@ -487,13 +510,87 @@ static void restore(int idx) {
     dirty_taskbar();
 }
 
+static void set_hw_cursor(bool on) {
+    if (on == hwcur) return;
+    if (on && gfx_hw_cursor(1) < 0) return;                       /* карта не умеет */
+    if (!on) gfx_hw_cursor(0);
+    hwcur = on;
+    add_dirty(mouse_x, mouse_y, CURSOR_W, CURSOR_H);              /* убрать/нарисовать программный */
+}
+
+/* окно целиком в пределах экрана (насколько влезает) */
+static void fit_window(struct win *w) {
+    if (w->x + outer_w(w) > SW) w->x = SW - outer_w(w);
+    if (w->y + outer_h(w) > SH - TASKBAR_H) w->y = SH - TASKBAR_H - outer_h(w);
+    if (w->x < 0) w->x = 0;
+    if (w->y < 0) w->y = 0;
+}
+
+/* сменилось разрешение экрана */
+static void screen_resized(void) {
+    SW = gfx_w; SH = gfx_h;
+    back = gfx_buf;
+    free(wallpaper);
+    make_wallpaper();
+    menu_open = false;
+    drag = -1;
+    for (int i = 0; i < MAXWIN; i++) if (wins[i].used) fit_window(&wins[i]);
+    struct mouse ms;
+    mouse_get(&ms);
+    mouse_x = ms.x; mouse_y = ms.y;
+    if (hwcur) { hwcur = false; set_hw_cursor(true); }
+    ndirty = 0;
+    add_dirty(0, 0, SW, SH);
+}
+
+/* прямоугольник a без b: до четырёх полосок — в «грязные» */
+static void dirty_minus(struct rect a, struct rect b) {
+    struct rect in;
+    if (!intersect(a, b, &in)) { add_dirty(a.x, a.y, a.w, a.h); return; }
+    if (in.y > a.y) add_dirty(a.x, a.y, a.w, in.y - a.y);
+    if (in.y + in.h < a.y + a.h) add_dirty(a.x, in.y + in.h, a.w, a.y + a.h - in.y - in.h);
+    if (in.x > a.x) add_dirty(a.x, in.y, in.x - a.x, in.h);
+    if (in.x + in.w < a.x + a.w) add_dirty(in.x + in.w, in.y, a.x + a.w - in.x - in.w, in.h);
+}
+
+/* Сдвинуть перетаскиваемое окно. Окно — самое верхнее, поэтому на экране его
+ * пиксели можно просто передвинуть видеокартой; заново собираем только
+ * открывшиеся куски обоев и края, которые раньше были за экраном/под панелью. */
+static void move_window(struct win *w, int nx, int ny) {
+    if (nx == w->x && ny == w->y) return;
+    struct rect old = { w->x, w->y, outer_w(w), outer_h(w) };
+    struct rect nw = { nx, ny, old.w, old.h };
+    struct rect desk = { 0, 0, SW, SH - TASKBAR_H }, src, dst;
+    int dx = nx - w->x, dy = ny - w->y;
+    bool copied = false;
+    if (intersect(old, desk, &src)) {
+        struct rect moved = { src.x + dx, src.y + dy, src.w, src.h };
+        if (intersect(moved, desk, &dst)) {
+            flush();                                              /* на экране — актуальный кадр */
+            if (gfx_hw_copy(dst.x - dx, dst.y - dy, dst.x, dst.y, dst.w, dst.h) == 0) {
+                copied = true;
+                w->x = nx; w->y = ny;
+                dirty_minus(old, dst);
+                dirty_minus(nw, dst);
+                if (!hwcur)                                       /* курсор уехал вместе с окном */
+                    add_dirty(mouse_x + dx - 1, mouse_y + dy - 1, CURSOR_W + 2, CURSOR_H + 2);
+            }
+        }
+    }
+    if (!copied) {
+        dirty_win(w);
+        w->x = nx; w->y = ny;
+        dirty_win(w);
+    }
+}
+
 static void handle_msg(struct msg *m) {
     switch (m->type) {
     case WM_CREATE: {
         int idx = -1;
         for (int i = 0; i < MAXWIN; i++) if (!wins[i].used) { idx = i; break; }
         color_t *px = idx >= 0 ? shm_map(m->a) : NULL;
-        if (!px || m->b <= 0 || m->c <= 0 || m->b > SW - 2 || m->c > SH - TASKBAR_H - TITLE_H - 1) {
+        if (!px || m->b <= 0 || m->c <= 0 || m->b > 2560 || m->c > 1600) {
             if (px) shm_unmap(px);
             send(m->from, WM_CREATED, -1, 0, 0, 0);
             return;
@@ -511,10 +608,7 @@ static void handle_msg(struct msg *m) {
         w->x = 200 + (cascade % 8) * 32;
         w->y = 40 + (cascade % 8) * 28;
         cascade++;
-        if (w->x + outer_w(w) > SW) w->x = SW - outer_w(w);
-        if (w->y + outer_h(w) > SH - TASKBAR_H) w->y = SH - TASKBAR_H - outer_h(w);
-        if (w->x < 0) w->x = 0;
-        if (w->y < 0) w->y = 0;
+        fit_window(w);
         zorder[nz++] = idx;
         taskbar_order[n_taskbar++] = idx;
         send(m->from, WM_CREATED, idx, 0, 0, 0);
@@ -542,6 +636,9 @@ static void handle_msg(struct msg *m) {
     case WM_DESTROY:
         if (m->a < 0 || m->a >= MAXWIN || !wins[m->a].used || wins[m->a].owner != m->from) return;
         remove_window(m->a);
+        return;
+    case WM_DISPLAY:                                              /* Display / mode: курсор */
+        set_hw_cursor(m->a != 0);
         return;
     }
 }
@@ -590,7 +687,7 @@ static void update_clock(void) {
 
 /* ------------------------------------------------------------ мышь */
 
-static int drag = -1, drag_dx, drag_dy;
+static int drag_dx, drag_dy;
 static int capture = -1;                                          /* окно, где нажали кнопку */
 static unsigned prev_buttons;
 static unsigned last_click_tick;
@@ -680,20 +777,18 @@ static void mouse_down(int x, int y) {
 }
 
 static void mouse_move(int ox, int oy, int x, int y) {
-    add_dirty(ox, oy, CURSOR_W, CURSOR_H);
-    add_dirty(x, y, CURSOR_W, CURSOR_H);
     if (drag >= 0) {
         struct win *w = &wins[drag];
-        dirty_win(w);
-        w->x = x - drag_dx;
-        w->y = y - drag_dy;
-        if (w->y < 0) w->y = 0;
-        if (w->y > SH - TASKBAR_H - TITLE_H) w->y = SH - TASKBAR_H - TITLE_H;
-        if (w->x < 60 - outer_w(w)) w->x = 60 - outer_w(w);
-        if (w->x > SW - 60) w->x = SW - 60;
-        dirty_win(w);
+        int nx = x - drag_dx, ny = y - drag_dy;
+        if (ny < 0) ny = 0;
+        if (ny > SH - TASKBAR_H - TITLE_H) ny = SH - TASKBAR_H - TITLE_H;
+        if (nx < 60 - outer_w(w)) nx = 60 - outer_w(w);
+        if (nx > SW - 60) nx = SW - 60;
+        move_window(w, nx, ny);
+        if (!hwcur) { add_dirty(ox, oy, CURSOR_W, CURSOR_H); add_dirty(x, y, CURSOR_W, CURSOR_H); }
         return;
     }
+    if (!hwcur) { add_dirty(ox, oy, CURSOR_W, CURSOR_H); add_dirty(x, y, CURSOR_W, CURSOR_H); }
     if (menu_open) {
         int item = menu_item_at(x, y);
         if (item < 0) item = -1;
@@ -748,6 +843,8 @@ int main(void) {
     mouse_x = ms.x; mouse_y = ms.y;
     prev_buttons = ms.buttons;
     update_clock();
+    int cw, ch, want_hw = 0;
+    if (gfx_load_config(&cw, &ch, &want_hw) == 0 && want_hw) set_hw_cursor(true);
     add_dirty(0, 0, SW, SH);
     flush();
 
@@ -758,6 +855,7 @@ int main(void) {
             handle_msg(&m);
             while (msg_recv(&m, 0) == 0) handle_msg(&m);
         }
+        if (gfx_check_mode()) screen_resized();
         mouse_get(&ms);
         if (ms.x != mouse_x || ms.y != mouse_y) {
             int ox = mouse_x, oy = mouse_y;
@@ -805,6 +903,7 @@ int main(void) {
     for (int j = 0; j < n_owners; j++) kill(owners[j]);
     for (int i = 0; i < MAXWIN; i++) if (wins[i].used) shm_unmap(wins[i].px);
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    if (hwcur) gfx_hw_cursor(0);
     gfx_close();
     printf(ANSI_CLEAR "Desktop closed.\n");
     return 0;

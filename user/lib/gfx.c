@@ -49,6 +49,80 @@ void gfx_flip(void) { gfx_flip_rect(0, 0, gfx_w, gfx_h); }
 
 int mouse_get(struct mouse *m) { return sc(SYS_MOUSE, (int)m, 0); }
 
+/* ---------------------------------------------------------------- видеокарта */
+
+int gfx_info2(struct gfx_info2 *gi) { return sc(SYS_GFX_INFO2, (int)gi, 0); }
+int gfx_set_mode(int w, int h) { return sc(SYS_GFX_MODE, w, h); }
+
+int gfx_check_mode(void) {
+    struct gfx_info2 gi;
+    if (gfx_info2(&gi) < 0) return 0;
+    if ((int)gi.width == gfx_w && (int)gi.height == gfx_h) return 0;
+    color_t *nb = malloc(gi.width * gi.height * 4);
+    if (!nb) return 0;
+    free(gfx_buf);
+    gfx_buf = nb;
+    gfx_w = gi.width;
+    gfx_h = gi.height;
+    gfx_clear(C_BLACK);
+    return 1;
+}
+
+int gfx_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
+    int a[6];
+    a[0] = sx; a[1] = sy; a[2] = dx; a[3] = dy; a[4] = w; a[5] = h;
+    return sc(SYS_GFX_ACCEL, 1, (int)a);
+}
+
+int gfx_hw_fill(int x, int y, int w, int h, color_t c) {
+    int a[6];
+    a[0] = x; a[1] = y; a[2] = w; a[3] = h; a[4] = (int)c; a[5] = 0;
+    return sc(SYS_GFX_ACCEL, 2, (int)a);
+}
+
+static const int std_modes[][2] = {
+    { 640, 480 }, { 800, 600 }, { 1024, 768 }, { 1152, 864 }, { 1280, 720 }, { 1280, 800 },
+    { 1280, 1024 }, { 1360, 768 }, { 1440, 900 }, { 1600, 900 }, { 1600, 1200 },
+    { 1680, 1050 }, { 1920, 1080 }, { 1920, 1200 }, { 2560, 1440 }, { 2560, 1600 },
+};
+
+int gfx_modes(struct gfx_mode *out, int max) {
+    struct gfx_info2 gi;
+    int n = 0;
+    if (gfx_info2(&gi) < 0) return 0;
+    for (int i = 0; i < (int)(sizeof(std_modes) / sizeof(std_modes[0])) && n < max; i++) {
+        int w = std_modes[i][0], h = std_modes[i][1];
+        out[n].w = w; out[n].h = h;
+        out[n].ok = w <= (int)gi.max_w && h <= (int)gi.max_h && (unsigned)(w * h / 256) <= gi.vram_kb;
+        n++;
+    }
+    return n;
+}
+
+int gfx_save_config(int w, int h, int hw_cursor) {
+    mkdir("/etc");
+    int fd = open("/etc/display", O_WRITE);
+    if (fd < 0) return fd;
+    dprintf(fd, "%dx%d\ncursor=%s\n", w, h, hw_cursor ? "hw" : "sw");
+    close(fd);
+    return 0;
+}
+
+int gfx_load_config(int *w, int *h, int *hw_cursor) {
+    char buf[64];
+    int fd = open("/etc/display", O_READ);
+    if (fd < 0) return fd;
+    int n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0) return -EINVAL;
+    buf[n] = 0;
+    *w = atoi(buf);
+    char *x = strchr(buf, 'x');
+    *h = x ? atoi(x + 1) : 0;
+    *hw_cursor = strstr(buf, "cursor=hw") != NULL;
+    return 0;
+}
+
 /* ---------------------------------------------------------------- фигуры */
 
 void gfx_fill_rect(int x, int y, int w, int h, color_t c) {
@@ -168,6 +242,19 @@ void gfx_cursor_draw(int x, int y) {
             if (c == 'X') gfx_pixel(x + i, y + j, C_BLACK);
             else if (c == '.') gfx_pixel(x + i, y + j, C_WHITE);
         }
+}
+
+/* аппаратный курсор: та же стрелка, картинкой для видеокарты */
+int gfx_hw_cursor(int on) {
+    static struct { int w, h, hot_x, hot_y; unsigned px[32 * 32]; } c;
+    if (!on) return sc(SYS_GFX_CURSOR, 0, 0);
+    c.w = CURSOR_W; c.h = CURSOR_H; c.hot_x = 0; c.hot_y = 0;
+    for (int j = 0; j < CURSOR_H; j++)
+        for (int i = 0; i < CURSOR_W; i++) {
+            char ch = arrow[j][i];
+            c.px[j * CURSOR_W + i] = ch == 'X' ? 0xFF000000u : ch == '.' ? 0xFFFFFFFFu : 0;
+        }
+    return sc(SYS_GFX_CURSOR, 1, (int)&c);
 }
 
 void gfx_cursor_erase(void) {

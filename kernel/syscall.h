@@ -56,6 +56,10 @@ enum {
     SYS_MSG_RECV    = 47,   /* msg_recv(&msg[64], мс: 0 не ждать, -1 вечно) */
     SYS_SERVICE     = 48,   /* service(1 зарегистрировать | 2 найти, имя) */
     SYS_TIME        = 49,   /* time(&rtc_time): дата и время из CMOS     */
+    SYS_GFX_MODE    = 50,   /* gfx_mode(ширина, высота): сменить разрешение */
+    SYS_GFX_INFO2   = 51,   /* gfx_info2(&gfx_info2): карта, режим, умения */
+    SYS_GFX_ACCEL   = 52,   /* gfx_accel(GA_COPY|GA_FILL, &args): на GPU */
+    SYS_GFX_CURSOR  = 53,   /* gfx_cursor(вкл, &gfx_cursor|0): аппаратный курсор */
     SYS_COUNT
 };
 
@@ -113,6 +117,15 @@ struct proc_info {
 
 struct gfx_info { unsigned width, height, bpp, pitch; };
 struct gfx_rect { int x, y, w, h; };
+struct gfx_info2 {
+    unsigned width, height, bpp, pitch;
+    unsigned vram_kb, max_w, max_h, caps, gen;
+    int hw_cursor;                  /* аппаратный курсор сейчас включён */
+    char driver[24];
+};
+#define GA_COPY 1                   /* args: sx, sy, dx, dy, w, h */
+#define GA_FILL 2                   /* args: x, y, w, h, цвет */
+struct gfx_cursor { int w, h, hot_x, hot_y; unsigned px[32 * 32]; };
 
 void syscall_dispatch(struct regs *r);
 
