@@ -1,5 +1,14 @@
 #include "string.h"
 
+int memcmp(const void *a, const void *b, size_t n) {
+    const u8 *x=a,*y=b;
+    while(n--) { if(*x!=*y) return *x-*y; x++; y++; }
+    return 0;
+}
+char *strcpy(char *dst,const char *src) {
+    char *result=dst; while((*dst++=*src++)) {} return result;
+}
+
 void *memset(void *dst, int c, size_t n) {
     u8 *d = dst;
     while (n--) *d++ = (u8)c;

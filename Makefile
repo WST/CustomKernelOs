@@ -175,9 +175,9 @@ programs: $(UBINS)
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
-$(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/fs.h kernel/string.c | $(BUILD)
+$(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/myfs.c kernel/myfs.h kernel/block.c kernel/block.h kernel/fs.h kernel/string.c | $(BUILD)
 	$(HOSTCC) -std=gnu17 -O1 -c tools/host_io.c -o $(BUILD)/host_io.o
-	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tools/myfs.c kernel/fs.c kernel/string.c \
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tools/myfs.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c \
 	    $(BUILD)/host_io.o -o $@
 
 # Диск: если его нет — создаём пустой (myfs сам его отформатирует)
@@ -189,7 +189,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
-	@for d in /include /lib /lib/fonts /src /src/cc; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
+	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in libc.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -206,11 +206,18 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive format=raw,file=$(DISK),index=1,media=disk
 QEMU_MEM ?= 256M
+# Optional independent data disk on secondary master: make run DATA_DISK=data.img
+DATA_DISK ?=
+ifneq ($(strip $(DATA_DISK)),)
+QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk
+endif
 # видеокарта: vmware — VMware SVGA II с ускорением 2D и аппаратным курсором (по умолчанию),
 # std — простая Bochs VBE: make run VGA=std
 VGA ?= vmware
-# сеть: карта e1000 за NAT QEMU; порт 8080 Windows -> порт 80 MyOS (httpd)
-QEMU_NET := -nic user,model=e1000,hostfwd=tcp::8080-:80 -rtc base=localtime
+# сеть: карта e1000 за NAT QEMU; HOST_PORT хоста -> порт 80 MyOS (httpd)
+# Другой порт: make run HOST_PORT=8081
+HOST_PORT ?= 8080
+QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80 -rtc base=localtime
 
 # всё, что пишет консоль ядра (и browser -v), — ещё и в build/serial.log
 run: all
@@ -231,7 +238,7 @@ test: | $(BUILD)
 	./$(BUILD)/tls_test
 	$(HOSTCC) -std=gnu17 -O1 -w -Iuser/lib tests/x509_test.c -o $(BUILD)/x509-test
 	./$(BUILD)/x509-test
-	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/string.c -o $(BUILD)/fs_test
+	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c -o $(BUILD)/fs_test
 	./$(BUILD)/fs_test
 	gcc -std=gnu17 -O1 -w -fno-builtin -Ikernel -include tests/host_env.h \
 	    tests/heap_test.c kernel/heap.c kernel/string.c -o $(BUILD)/heap_test
@@ -304,5 +311,15 @@ cctest: $(BUILD)/cc-host
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)"
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest
+vfstest: all
+	python3 tests/vfs_smoke.py
+
+largetest: | $(BUILD)
+	$(HOSTCC) -std=gnu17 -O1 -c tools/host_io.c -o $(BUILD)/large-host-io.o
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/large_fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/large-host-io.o -o $(BUILD)/large-fs-test
+	python3 tests/run_large_fs.py $(BUILD)/large-fs-test
+
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest
 .SECONDARY:
+
+

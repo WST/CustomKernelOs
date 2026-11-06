@@ -27,6 +27,7 @@
 #include "ipc.h"
 #include "e1000.h"
 #include "display.h"
+#include "block.h"
 
 #define SBRK_LIMIT SHM_BASE         /* выше — общая память (ipc.c) и стек */
 #define PATH_MAX   128
@@ -69,6 +70,9 @@ static int fs_errno(int e) {
     case FS_ENODEV:       return -ENODEV;
     case FS_EFBIG:        return -EFBIG;
     case FS_ENAMETOOLONG: return -ENAMETOOLONG;
+    case FS_EROFS:        return -30;
+    case FS_EBUSY:        return -16;
+    case FS_EXDEV:        return -18;
     default:              return e < 0 ? -EIO : e;
     }
 }
@@ -112,7 +116,7 @@ static int sys_read(u32 fd, u32 buf, u32 len) {
 }
 
 /* mode: 0 — чтение, 1 — запись (создать/обнулить), 2 — дозапись (создать) */
-static int sys_open(u32 upath, u32 mode) {
+static int sys_open_impl(u32 upath, u32 mode) {
     struct task *t = task_current();
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
@@ -124,7 +128,8 @@ static int sys_open(u32 upath, u32 mode) {
     if (r == FS_ENOENT && mode != 0) r = fs_create(t->cwd, path, FS_TYPE_FILE, &ino);
     if (r) return fs_errno(r);
     if ((r = fs_stat(ino, &st))) return fs_errno(r);
-    if (st.type != FS_TYPE_FILE) return -EISDIR;
+    if (st.type == FS_TYPE_DIR) return -EISDIR;
+    if (st.type == FS_TYPE_BLOCK && mode != 0) return -30;
     if (mode == 1 && (r = fs_truncate(ino))) return fs_errno(r);
 
     struct file *f = file_open_disk(ino, mode, mode == 2 ? st.size : 0);
@@ -132,6 +137,13 @@ static int sys_open(u32 upath, u32 mode) {
     int fd = alloc_fd(f);
     if (fd < 0) file_close(f);
     return fd;
+}
+
+static int sys_open(u32 upath,u32 mode) {
+    fs_namespace_lock();
+    int r=sys_open_impl(upath,mode);
+    fs_namespace_unlock();
+    return r;
 }
 
 static int sys_close(u32 fd) {
@@ -615,6 +627,39 @@ void syscall_dispatch(struct regs *r) {
         break;
     case SYS_READ:    ret = sys_read(a, b, c); break;
     case SYS_OPEN:    ret = sys_open(a, b); break;
+    case SYS_MOUNT: {
+        char device[128],target[128];
+        ret = !user_str(a,device,sizeof(device)) || !user_str(b,target,sizeof(target)) ? -EFAULT : fs_errno(fs_mount(t->cwd,device,target));
+        break;
+    }
+    case SYS_MKFS: {
+        char device[128];
+        ret=!user_str(a,device,sizeof(device)) ? -EFAULT : fs_errno(fs_mkfs(device));
+        break;
+    }
+    case SYS_PARTCTL: {
+        char device[128]; u32 args[3];
+        if(!user_str(a,device,sizeof(device)) || !user_buf_ok(c,sizeof(args),false)) { ret=-EFAULT; break; }
+        memcpy(args,(const void*)c,sizeof(args));
+        ret=fs_errno(fs_partition(device,b,args[0],args[1],args[2]));
+        break;
+    }
+    case SYS_MOUNTINFO: {
+        char device[128],target[128];
+        if(!user_buf_ok(b,128,true) || !user_buf_ok(c,128,true)) { ret=-EFAULT; break; }
+        ret=fs_mount_info(a,device,target);
+        if(ret>0) { memcpy((void*)b,device,strlen(device)+1); memcpy((void*)c,target,strlen(target)+1); }
+        else ret=fs_errno(ret);
+        break;
+    }
+    case SYS_BLOCKINFO: {
+        struct { char name[12]; u32 start,sectors,partition; } info;
+        if(!user_buf_ok(b,sizeof(info),true)) { ret=-EFAULT; break; }
+        const struct block_device *dev=block_get(block_at(a));
+        ret=0;
+        if(dev) { memset(&info,0,sizeof(info)); memcpy(info.name,dev->name,12); info.start=dev->start; info.sectors=dev->sectors; info.partition=dev->partition; memcpy((void*)b,&info,sizeof(info)); ret=1; }
+        break;
+    }
     case SYS_CLOSE:   ret = sys_close(a); break;
     case SYS_SBRK:    ret = (int)sys_sbrk((i32)a); break;
     case SYS_SLEEP:   sleep_ms(a); ret = 0; break;
@@ -689,3 +734,4 @@ void syscall_dispatch(struct regs *r) {
     t->in_syscall = false;
     if (t->kill_pending) task_exit_code(t->pending_code ? t->pending_code : 137);  /* убит, пока был в ядре */
 }
+

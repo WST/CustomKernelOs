@@ -1,590 +1,311 @@
-/* MyFS: реализация. Описание формата — в fs.h. */
+/* VFS: opaque handles encode mount slot + local inode. /dev is virtual.
+ * The recursive lock stays held across backend selection and blocking I/O. */
 #include "fs.h"
-#include "ata.h"
-#include "string.h"
+#include "myfs.h"
+#include "block.h"
 #include "task.h"
-
-#define BS            512                       /* размер блока */
-#define MAGIC         0x5346594D                /* "MYFS" в little-endian */
-#define VERSION       1
-#define NDIRECT       12
-#define NINDIRECT     (BS / 4)                  /* 128 ссылок в косвенном блоке */
-#define NDINDIRECT    (NINDIRECT * NINDIRECT)  /* 16384 блока через двойной косвенный */
-#define MAX_FILE_BLKS (NDIRECT + NINDIRECT + NDINDIRECT)
-#define INODES_PER_BLK (BS / sizeof(struct inode))
-#define BITS_PER_BLK  (BS * 8)
-#define MAX_BLOCKS    65536                     /* 32 МБ — ограничение битмапа в памяти */
-#define INODE_COUNT   256
-
-struct superblock {
-    u32 magic;
-    u32 version;
-    u32 total_blocks;
-    u32 bitmap_start, bitmap_blocks;
-    u32 inode_start, inode_blocks, inode_count;
-    u32 data_start;
-    u8  pad[BS - 9 * 4];
-} __attribute__((packed));
-
-struct inode {
-    u16 type;
-    u16 links;
-    u32 size;
-    u32 direct[NDIRECT];
-    u32 indirect;
-    u32 dindirect;      /* двойной косвенный: блок ссылок на блоки ссылок (было reserved = 0) */
-} __attribute__((packed));                      /* ровно 64 байта */
-
-struct dirent {
-    u32  ino;
-    char name[FS_NAME_MAX + 1];
-} __attribute__((packed));                      /* 32 байта, 16 в блоке */
-
-_Static_assert(sizeof(struct inode) == 64, "inode must be 64 bytes");
-_Static_assert(sizeof(struct dirent) == 32, "dirent must be 32 bytes");
-_Static_assert(sizeof(struct superblock) == BS, "superblock must be one block");
-
-static struct superblock sb;
-static u8   bitmap[MAX_BLOCKS / 8];
-static bool mounted;
-static u32  free_blocks, free_inodes;
-
-/* ---------------------------------------------------------------- блоки */
-
-static int bread(u32 b, void *buf)        { return ata_read(b, buf)  ? FS_EIO : FS_OK; }
-static int bwrite(u32 b, const void *buf) { return ata_write(b, buf) ? FS_EIO : FS_OK; }
-
-static bool bit_get(u32 b) { return bitmap[b / 8] & (1 << (b % 8)); }
-static void bit_set(u32 b, bool v) {
-    if (v) bitmap[b / 8] |=  (1 << (b % 8));
-    else   bitmap[b / 8] &= ~(1 << (b % 8));
+#include "string.h"
+#define DEVROOT 0xf0000001u
+#define DEVBASE 0xf0000010u
+#define DEVNULL 0xf0000100u
+#define DEVZERO 0xf0000101u
+#define SLOT(i) ((i)>>24)
+#define LOCAL(i) ((i)&0xffffff)
+#define HANDLE(s,i) (((u32)(s)<<24)|(i))
+static struct { bool used; int device; u32 covered, parent; } mounts[4];
+static struct mutex lock;
+void fs_namespace_lock(void) { mutex_lock(&lock); }
+void fs_namespace_unlock(void) { mutex_unlock(&lock); }
+static bool ready;
+static bool isdev(u32 i) { return i>=DEVROOT; }
+static int select_inode(u32 i) {
+    u32 s=SLOT(i); if(s>=4 || !mounts[s].used) return FS_ENODEV;
+    myfs_select(s,mounts[s].device); return 0;
 }
-
-/* записать на диск тот сектор битмапа, где лежит бит блока b */
-static int bitmap_sync(u32 b) {
-    u32 sec = b / BITS_PER_BLK;
-    return bwrite(sb.bitmap_start + sec, bitmap + sec * BS);
+static u32 cross(u32 i) {
+    for(int s=1;s<4;s++) if(mounts[s].used && mounts[s].covered==i) return HANDLE(s,FS_ROOT);
+    return i;
 }
-
-static u32 balloc(void) {
-    static u8 zero[BS];
-    for (u32 b = sb.data_start; b < sb.total_blocks; b++) {
-        if (!bit_get(b)) {
-            bit_set(b, true);
-            if (bitmap_sync(b) || bwrite(b, zero)) { bit_set(b, false); return 0; }
-            free_blocks--;
-            return b;
+static int stat_impl(u32 i,struct fs_stat *st) {
+    if(!isdev(i)) { int r=select_inode(i); return r ? r : myfs_stat(LOCAL(i),st); }
+    memset(st,0,sizeof(*st));
+    if(i==DEVROOT) { st->type=FS_TYPE_DIR; return 0; }
+    if(i==DEVNULL || i==DEVZERO) { st->type=FS_TYPE_CHAR; return 0; }
+    const struct block_device *d=block_get((int)(i-DEVBASE)); if(!d) return FS_ENOENT;
+    st->type=FS_TYPE_BLOCK; st->blocks=d->sectors;
+    st->size=d->sectors>0x7fffff ? 0xffffffffu : d->sectors*512; return 0;
+}
+static int readdir_impl(u32 dir,u32 *pos,struct fs_dirent *out) {
+    if(dir==DEVROOT) {
+        u32 n=(*pos)++;
+        if(n<(u32)block_count()) { int id=block_at(n); out->ino=DEVBASE+id; strcpy(out->name,block_get(id)->name); return 1; }
+        if(n==(u32)block_count()) { out->ino=DEVNULL; strcpy(out->name,"null"); return 1; }
+        if(n==(u32)block_count()+1) { out->ino=DEVZERO; strcpy(out->name,"zero"); return 1; }
+        return 0;
+    }
+    if(isdev(dir)) return FS_ENOTDIR;
+    int r=select_inode(dir); if(r) return r;
+    if(dir==FS_ROOT && *pos==0) { *pos=1; out->ino=DEVROOT; strcpy(out->name,"dev"); return 1; }
+    u32 p=dir==FS_ROOT ? *pos-1 : *pos;
+    while((r=myfs_readdir(LOCAL(dir),&p,out))==1) {
+        if(dir==FS_ROOT && !strcmp(out->name,"dev")) continue;
+        out->ino=cross(HANDLE(SLOT(dir),out->ino)); break;
+    }
+    *pos=dir==FS_ROOT ? p+1 : p; return r;
+}
+static int lookup(u32 dir,const char *name,u32 *out) {
+    struct fs_stat st; int r=stat_impl(dir,&st); if(r) return r;
+    if(st.type!=FS_TYPE_DIR) return FS_ENOTDIR;
+    if(!strcmp(name,".")) { *out=dir; return 0; }
+    if(!strcmp(name,"..")) {
+        if(dir==DEVROOT) { *out=FS_ROOT; return 0; }
+        if(LOCAL(dir)==FS_ROOT && SLOT(dir)>0) { *out=mounts[SLOT(dir)].parent; return 0; }
+        r=select_inode(dir); if(r) return r;
+        r=myfs_resolve(LOCAL(dir),"..",out); if(!r) *out=HANDLE(SLOT(dir),*out); return r;
+    }
+    u32 pos=0; struct fs_dirent de;
+    while((r=readdir_impl(dir,&pos,&de))==1) if(!strcmp(name,de.name)) { *out=de.ino; return 0; }
+    return r<0 ? r : FS_ENOENT;
+}
+static int resolve_impl(u32 cwd,const char *path,u32 *out) {
+    if(!ready) return FS_ENODEV;
+    if(!path || !*path) return FS_ENOENT;
+    u32 cur=*path=='/' ? FS_ROOT : cwd;
+    while(*path) {
+        while(*path=='/') path++;
+        if(!*path) break;
+        char name[FS_NAME_MAX+1]; u32 n=0;
+        while(path[n] && path[n]!='/') { if(n==FS_NAME_MAX) return FS_ENAMETOOLONG; name[n]=path[n]; n++; }
+        name[n]=0; path+=n; int r=lookup(cur,name,&cur); if(r) return r;
+        if(*path=='/') { struct fs_stat st; r=stat_impl(cur,&st); if(r) return r; if(st.type!=FS_TYPE_DIR) return FS_ENOTDIR; }
+    }
+    *out=cur; return 0;
+}
+static int parent_impl(u32 cwd,const char *path,u32 *parent,char *name) {
+    char buf[128]; u32 n=strlen(path); if(!n || n>=sizeof(buf)) return FS_EINVAL;
+    memcpy(buf,path,n+1); while(n>1 && buf[n-1]=='/') buf[--n]=0;
+    int slash=-1; for(u32 j=0;j<n;j++) if(buf[j]=='/') slash=j;
+    const char *base=buf+slash+1;
+    if(!*base || !strcmp(base,".") || !strcmp(base,"..")) return FS_EINVAL;
+    if(strlen(base)>FS_NAME_MAX) return FS_ENAMETOOLONG;
+    strcpy(name,base); int r=0;
+    if(slash<0) *parent=cwd; else if(slash==0) *parent=FS_ROOT;
+    else { buf[slash]=0; r=resolve_impl(cwd,buf,parent); }
+    if(r) return r;
+    struct fs_stat st; r=stat_impl(*parent,&st); return r ? r : st.type==FS_TYPE_DIR ? 0 : FS_ENOTDIR;
+}
+static bool protected(u32 ino) {
+    if(isdev(ino) || LOCAL(ino)==FS_ROOT) return true;
+    /* Prevent moving ancestors of active mounts. */
+    for(int s=1;s<4;s++) if(mounts[s].used) {
+        u32 p=mounts[s].covered;
+        for(int depth=0;depth<64;depth++) { if(p==ino) return true; if(p==FS_ROOT || lookup(p,"..",&p)) break; }
+    }
+    return false;
+}
+static int getpath_impl(u32 ino,char *buf,u32 len) {
+    char parts[64][FS_NAME_MAX+1]; int depth=0;
+    while(ino!=FS_ROOT) {
+        if(depth==64) return FS_ENAMETOOLONG;
+        u32 parent; int r=lookup(ino,"..",&parent); if(r) return r;
+        u32 pos=0; struct fs_dirent de; bool found=false;
+        while(readdir_impl(parent,&pos,&de)==1) if(de.ino==ino) { strcpy(parts[depth++],de.name); found=true; break; }
+        if(!found) return FS_ENOENT;
+        ino=parent;
+    }
+    u32 n=1; for(int j=0;j<depth;j++) n+=strlen(parts[j])+(j!=0);
+    if(n+1>len) return FS_ENAMETOOLONG;
+    u32 p=0; buf[p++]='/';
+    for(int j=depth-1;j>=0;j--) { u32 l=strlen(parts[j]); memcpy(buf+p,parts[j],l); p+=l; if(j) buf[p++]='/'; }
+    buf[p]=0; return 0;
+}
+int fs_init(bool *formatted) {
+    mutex_lock(&lock); ready=false; memset(mounts,0,sizeof(mounts)); *formatted=false;
+    int r=block_init();
+    if(!r) {
+        r=FS_ENODEV;
+        for(int d=block_partitioned()?1:0;d<5;d++) {
+            if(!block_get(d)) continue;
+            myfs_select(0,d); r=myfs_init(formatted,!block_partitioned());
+            if(!r) { mounts[0].used=true; mounts[0].device=d; ready=true; break; }
         }
+    } else r=FS_EIO;
+    mutex_unlock(&lock); return r;
+}
+bool fs_ready(void) { return ready; }
+int fs_format(void) {
+    mutex_lock(&lock); int r=ready ? 0 : FS_ENODEV;
+    for(int s=1;s<4;s++) if(mounts[s].used) r=FS_EBUSY;
+    if(!r) { myfs_select(0,mounts[0].device); r=myfs_format(); }
+    mutex_unlock(&lock); return r;
+}
+int fs_mount(u32 cwd,const char *device,const char *target) {
+    mutex_lock(&lock); int d=block_find(device),r=0,slot=0; u32 ino=0,parent=0;
+    if(d<0) r=FS_ENODEV;
+    if(!r) r=resolve_impl(cwd,target,&ino);
+    struct fs_stat st;
+    if(!r) { r=stat_impl(ino,&st); if(!r && st.type!=FS_TYPE_DIR) r=FS_ENOTDIR; }
+    if(!r && protected(ino)) r=FS_EBUSY;
+    for(int s=0;!r && s<4;s++) if(mounts[s].used) {
+        const struct block_device *a=block_get(d),*b=block_get(mounts[s].device);
+        if(d/5==mounts[s].device/5 && a->start < b->start+b->sectors && b->start < a->start+a->sectors) r=FS_EBUSY;
     }
-    return 0;  /* места нет */
+    if(!r) r=lookup(ino,"..",&parent);
+    for(int s=1;s<4;s++) if(!mounts[s].used) { slot=s; break; }
+    if(!r && !slot) r=FS_ENOSPC;
+    if(!r) { bool formatted; myfs_select(slot,d); r=myfs_init(&formatted,false); }
+    if(!r) { mounts[slot].used=true; mounts[slot].device=d; mounts[slot].covered=ino; mounts[slot].parent=parent; }
+    mutex_unlock(&lock); return r;
 }
-
-static void bfree(u32 b) {
-    if (b < sb.data_start || b >= sb.total_blocks || !bit_get(b)) return;
-    bit_set(b, false);
-    bitmap_sync(b);
-    free_blocks++;
+int fs_mount_info(u32 index,char *device,char *target) {
+    mutex_lock(&lock); int r=0;
+    if(index<4 && mounts[index].used) {
+        strcpy(device,"/dev/"); strcpy(device+5,block_get(mounts[index].device)->name);
+        r=getpath_impl(HANDLE(index,FS_ROOT),target,128); r=r ? r : 1;
+    }
+    mutex_unlock(&lock); return r;
 }
-
-/* ---------------------------------------------------------------- inode */
-
-static int iread(u32 ino, struct inode *out) {
-    static struct inode blk[INODES_PER_BLK];
-    if (ino == 0 || ino >= sb.inode_count) return FS_EINVAL;
-    if (bread(sb.inode_start + ino / INODES_PER_BLK, blk)) return FS_EIO;
-    *out = blk[ino % INODES_PER_BLK];
-    return FS_OK;
+/* Administrative writes are restricted to unmounted disks/ranges. No generic
+ * raw-write interface is exported to userspace. Slot 4 is a private formatter. */
+static bool device_busy(int d,bool whole_disk) {
+#ifndef HOST_TEST
+    if(task_raw_device_busy(d/5)) return true;
+#endif
+    const struct block_device *a=block_get(d);
+    for(int s=0;s<4;s++) if(mounts[s].used && mounts[s].device/5==d/5) {
+        const struct block_device *b=block_get(mounts[s].device);
+        if(whole_disk || (a->start<b->start+b->sectors && b->start<a->start+a->sectors)) return true;
+    }
+    return false;
 }
-
-static int iwrite(u32 ino, const struct inode *in) {
-    static struct inode blk[INODES_PER_BLK];
-    u32 b = sb.inode_start + ino / INODES_PER_BLK;
-    if (ino == 0 || ino >= sb.inode_count) return FS_EINVAL;
-    if (bread(b, blk)) return FS_EIO;
-    blk[ino % INODES_PER_BLK] = *in;
-    return bwrite(b, blk);
+int fs_mkfs(const char *device) {
+    mutex_lock(&lock); int d=block_find(device),r=0;
+    if(d<0) r=FS_ENODEV;
+    else if(device_busy(d,false)) r=FS_EBUSY;
+    /* Whole disks with a partition table must be explicitly reinitialized first. */
+    else if(!block_get(d)->partition && block_disk_partitioned(d/5)) r=FS_EINVAL;
+    else { myfs_select(4,d); r=myfs_format(); }
+    mutex_unlock(&lock); return r;
 }
-
-static u32 ialloc(int type) {
-    struct inode in;
-    for (u32 i = FS_ROOT; i < sb.inode_count; i++) {
-        if (iread(i, &in)) return 0;
-        if (in.type == FS_TYPE_FREE) {
-            memset(&in, 0, sizeof(in));
-            in.type = type;
-            in.links = 1;
-            if (iwrite(i, &in)) return 0;
-            free_inodes--;
-            return i;
+static u32 mbr_u32(const u8 *p) { return p[0]|(u32)p[1]<<8|(u32)p[2]<<16|(u32)p[3]<<24; }
+static void mbr_put(u8 *p,u32 v) { for(int i=0;i<4;i++) p[i]=v>>(8*i); }
+int fs_partition(const char *device,u32 op,u32 slot,u32 start,u32 sectors) {
+    mutex_lock(&lock); int d=block_find(device),r=0;
+    if(d<0) r=FS_ENODEV;
+    else if(block_get(d)->partition || op>2) r=FS_EINVAL;
+    else if(device_busy(d,true)) r=FS_EBUSY;
+    u8 buf[512];
+    if(!r && block_read(d,0,buf)) r=FS_EIO;
+    if(!r && op==0) { /* Explicit init: preserve boot code, clear primary entries. */
+        if(buf[510]==0x55 && buf[511]==0xaa)
+            for(int i=0;i<4;i++) if(buf[446+i*16+4]==0xee) r=FS_EINVAL;
+        if(!r) { memset(buf+446,0,64); buf[510]=0x55; buf[511]=0xaa; }
+    } else if(!r) {
+        if(slot<1 || slot>4 || buf[510]!=0x55 || buf[511]!=0xaa) r=FS_EINVAL;
+        for(int i=0;!r && i<4;i++) {
+            const u8 *e=buf+446+i*16;
+            if(e[4] && e[4]!=0x83) r=FS_EINVAL;
         }
-    }
-    return 0;
-}
-
-/* Номер дискового блока для idx-го блока файла. alloc=true — выделить, если нет.
- * Возвращает 0, если блока нет (или не удалось выделить). */
-static u32 bmap(struct inode *in, u32 idx, bool alloc) {
-    static u32 ind[NINDIRECT];
-    if (idx < NDIRECT) {
-        if (!in->direct[idx] && alloc) in->direct[idx] = balloc();
-        return in->direct[idx];
-    }
-    idx -= NDIRECT;
-    if (idx >= NINDIRECT) {                  /* двойной косвенный: idx / 128 — какой блок ссылок, idx % 128 — где в нём */
-        static u32 top[NINDIRECT];
-        idx -= NINDIRECT;
-        if (idx >= NDINDIRECT) return 0;
-        if (!in->dindirect && (!alloc || !(in->dindirect = balloc()))) return 0;
-        if (bread(in->dindirect, top)) return 0;
-        u32 *mid = &top[idx / NINDIRECT];
-        if (!*mid) {
-            if (!alloc || !(*mid = balloc())) return 0;
-            memset(ind, 0, sizeof(ind));
-            if (bwrite(*mid, ind) || bwrite(in->dindirect, top)) return 0;
-        }
-        u32 m = *mid;
-        if (bread(m, ind)) return 0;
-        if (!ind[idx % NINDIRECT] && alloc) {
-            if (!(ind[idx % NINDIRECT] = balloc())) return 0;
-            if (bwrite(m, ind)) return 0;
-        }
-        return ind[idx % NINDIRECT];
-    }
-    if (!in->indirect) {
-        if (!alloc || !(in->indirect = balloc())) return 0;
-    }
-    if (bread(in->indirect, ind)) return 0;
-    if (!ind[idx] && alloc) {
-        if (!(ind[idx] = balloc())) return 0;
-        if (bwrite(in->indirect, ind)) return 0;
-    }
-    return ind[idx];
-}
-
-static void free_all_blocks(struct inode *in) {
-    static u32 ind[NINDIRECT];
-    for (int i = 0; i < NDIRECT; i++) { bfree(in->direct[i]); in->direct[i] = 0; }
-    if (in->indirect) {
-        if (!bread(in->indirect, ind))
-            for (u32 i = 0; i < NINDIRECT; i++) bfree(ind[i]);
-        bfree(in->indirect);
-        in->indirect = 0;
-    }
-    if (in->dindirect) {
-        static u32 top[NINDIRECT];
-        if (!bread(in->dindirect, top))
-            for (u32 j = 0; j < NINDIRECT; j++) {
-                if (!top[j]) continue;
-                if (!bread(top[j], ind))
-                    for (u32 i = 0; i < NINDIRECT; i++) bfree(ind[i]);
-                bfree(top[j]);
+        if(!r) {
+            u8 *p=buf+446+(slot-1)*16;
+            if(op==2) {
+                if(!p[4]) r=FS_ENOENT; else memset(p,0,16);
+            } else {
+                u32 total=block_get(d)->sectors;
+                if(p[4]) r=FS_EEXIST;
+                else if(start<2048 || !sectors || sectors>2097152u || start>=total || sectors>total-start) r=FS_EINVAL;
+                for(int i=0;!r && i<4;i++) {
+                    const u8 *e=buf+446+i*16; if(!e[4]) continue;
+                    u32 a=mbr_u32(e+8),n=mbr_u32(e+12);
+                    if(!a || !n || a>=total || n>total-a || (start<a+n && a<start+sectors)) r=FS_EINVAL;
+                }
+                if(!r) { memset(p,0,16); p[1]=p[5]=0xfe; p[2]=p[3]=p[6]=p[7]=0xff; p[4]=0x83; mbr_put(p+8,start); mbr_put(p+12,sectors); }
             }
-        bfree(in->dindirect);
-        in->dindirect = 0;
-    }
-    in->size = 0;
-}
-
-/* ---------------------------------------------------------------- чтение/запись */
-
-static int fs_read_impl(u32 ino, u32 off, void *buf, u32 n) {
-    static u8 blk[BS];
-    struct inode in;
-    int r = iread(ino, &in);
-    if (r) return r;
-    if (off >= in.size) return 0;
-    if (n > in.size - off) n = in.size - off;
-
-    u8 *dst = buf;
-    u32 done = 0;
-    while (done < n) {
-        u32 pos = off + done, bo = pos % BS;
-        u32 chunk = BS - bo;
-        if (chunk > n - done) chunk = n - done;
-        u32 b = bmap(&in, pos / BS, false);
-        if (b) { if (bread(b, blk)) return FS_EIO; memcpy(dst + done, blk + bo, chunk); }
-        else   memset(dst + done, 0, chunk);    /* «дырка» в файле */
-        done += chunk;
-    }
-    return done;
-}
-
-static int fs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
-    static u8 blk[BS];
-    struct inode in;
-    int r = iread(ino, &in);
-    if (r) return r;
-    if (off + n > MAX_FILE_BLKS * BS) return FS_EFBIG;
-
-    const u8 *src = buf;
-    u32 done = 0;
-    while (done < n) {
-        u32 pos = off + done, bo = pos % BS;
-        u32 chunk = BS - bo;
-        if (chunk > n - done) chunk = n - done;
-        u32 b = bmap(&in, pos / BS, true);
-        if (!b) { r = FS_ENOSPC; break; }
-        if (chunk < BS && bread(b, blk)) { r = FS_EIO; break; }
-        memcpy(blk + bo, src + done, chunk);
-        if (bwrite(b, blk)) { r = FS_EIO; break; }
-        done += chunk;
-    }
-    if (off + done > in.size) in.size = off + done;
-    int w = iwrite(ino, &in);
-    if (r) return r;
-    return w ? w : (int)done;
-}
-
-static int fs_truncate_impl(u32 ino) {
-    struct inode in;
-    int r = iread(ino, &in);
-    if (r) return r;
-    if (in.type != FS_TYPE_FILE) return FS_EISDIR;
-    free_all_blocks(&in);
-    return iwrite(ino, &in);
-}
-
-static int fs_stat_impl(u32 ino, struct fs_stat *st) {
-    struct inode in;
-    int r = iread(ino, &in);
-    if (r) return r;
-    if (in.type == FS_TYPE_FREE) return FS_ENOENT;
-    st->type = in.type;
-    st->size = in.size;
-    u32 data = (in.size + BS - 1) / BS;
-    st->blocks = data + (in.indirect ? 1 : 0);
-    if (data > NDIRECT + NINDIRECT)          /* блоки ссылок двойного косвенного */
-        st->blocks += 1 + (data - NDIRECT - NINDIRECT + NINDIRECT - 1) / NINDIRECT;
-    return FS_OK;
-}
-
-/* ---------------------------------------------------------------- каталоги */
-
-static int dir_check(u32 dir) {
-    struct inode in;
-    int r = iread(dir, &in);
-    if (r) return r;
-    if (in.type == FS_TYPE_FREE) return FS_ENOENT;
-    return in.type == FS_TYPE_DIR ? FS_OK : FS_ENOTDIR;
-}
-
-/* найти запись name; вернуть inode (0 — нет) и смещение записи */
-static u32 dir_lookup(u32 dir, const char *name, u32 *offset) {
-    struct dirent de;
-    for (u32 off = 0; fs_read(dir, off, &de, sizeof(de)) == sizeof(de); off += sizeof(de)) {
-        if (de.ino && !strcmp(de.name, name)) {
-            if (offset) *offset = off;
-            return de.ino;
         }
     }
-    return 0;
+    if(!r && block_write(d,0,buf)) r=FS_EIO;
+    if(!r && block_rescan(d/5)) r=FS_EIO;
+    mutex_unlock(&lock); return r;
 }
-
-static int dir_add(u32 dir, const char *name, u32 ino) {
-    struct dirent de;
-    u32 off = 0;
-    while (fs_read(dir, off, &de, sizeof(de)) == sizeof(de) && de.ino) off += sizeof(de);
-    memset(&de, 0, sizeof(de));
-    de.ino = ino;
-    memcpy(de.name, name, strlen(name) + 1);
-    int r = fs_write(dir, off, &de, sizeof(de));
-    return r < 0 ? r : FS_OK;
+int fs_resolve(u32 cwd,const char *path,u32 *ino) { mutex_lock(&lock); int r=resolve_impl(cwd,path,ino); mutex_unlock(&lock); return r; }
+int fs_stat(u32 ino,struct fs_stat *st) { mutex_lock(&lock); int r=stat_impl(ino,st); mutex_unlock(&lock); return r; }
+int fs_readdir(u32 dir,u32 *pos,struct fs_dirent *out) { mutex_lock(&lock); int r=readdir_impl(dir,pos,out); mutex_unlock(&lock); return r; }
+int fs_getpath(u32 ino,char *buf,u32 len) { mutex_lock(&lock); int r=getpath_impl(ino,buf,len); mutex_unlock(&lock); return r; }
+int fs_create(u32 cwd,const char *path,int type,u32 *out) {
+    mutex_lock(&lock); u32 parent=0,ino; char name[28]; int r=parent_impl(cwd,path,&parent,name);
+    if(!r && (isdev(parent) || (parent==FS_ROOT && !strcmp(name,"dev")))) r=FS_EROFS;
+    if(!r && type!=FS_TYPE_DIR && type!=FS_TYPE_FILE) r=FS_EINVAL;
+    if(!r) { r=select_inode(parent); if(!r) r=myfs_create(LOCAL(parent),name,type,&ino); if(!r && out) *out=HANDLE(SLOT(parent),ino); }
+    mutex_unlock(&lock); return r;
 }
-
-static int dir_set(u32 dir, u32 off, u32 ino, const char *name) {
-    struct dirent de;
-    memset(&de, 0, sizeof(de));
-    de.ino = ino;
-    if (name) memcpy(de.name, name, strlen(name) + 1);
-    int r = fs_write(dir, off, &de, sizeof(de));
-    return r < 0 ? r : FS_OK;
+int fs_remove(u32 cwd,const char *path) {
+    mutex_lock(&lock); u32 ino,parent; char name[28]; int r=resolve_impl(cwd,path,&ino);
+    if(!r && protected(ino)) r=FS_EBUSY;
+    if(!r) r=parent_impl(cwd,path,&parent,name);
+    if(!r) { r=select_inode(parent); if(!r) r=myfs_remove(LOCAL(parent),name); }
+    mutex_unlock(&lock); return r;
 }
-
-static bool dir_empty(u32 dir) {
-    struct dirent de;
-    for (u32 off = 0; fs_read(dir, off, &de, sizeof(de)) == sizeof(de); off += sizeof(de))
-        if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) return false;
-    return true;
-}
-
-static int fs_readdir_impl(u32 dir, u32 *pos, struct fs_dirent *out) {
-    struct dirent de;
-    int r = dir_check(dir);
-    if (r) return r;
-    while (fs_read(dir, *pos, &de, sizeof(de)) == sizeof(de)) {
-        *pos += sizeof(de);
-        if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) {
-            out->ino = de.ino;
-            memcpy(out->name, de.name, FS_NAME_MAX + 1);
-            return 1;
+int fs_rename(u32 cwd,const char *src,const char *dst) {
+    mutex_lock(&lock); u32 ino,sp,dp,dest; char sn[28],dn[28]; int r=resolve_impl(cwd,src,&ino);
+    if(!r && protected(ino)) r=FS_EBUSY;
+    if(!r) r=parent_impl(cwd,src,&sp,sn);
+    if(!r) {
+        struct fs_stat st;
+        if(!resolve_impl(cwd,dst,&dest) && !stat_impl(dest,&st) && st.type==FS_TYPE_DIR) { dp=dest; strcpy(dn,sn); }
+        else r=parent_impl(cwd,dst,&dp,dn);
+    }
+    if(!r && (isdev(dp) || (dp==FS_ROOT && !strcmp(dn,"dev")))) r=FS_EROFS;
+    if(!r && SLOT(sp)!=SLOT(dp)) r=FS_EXDEV;
+    if(!r) {
+        char destpath[128]; r=select_inode(dp);
+        if(!r) r=myfs_getpath(LOCAL(dp),destpath,sizeof(destpath));
+        if(!r) { u32 n=strlen(destpath),l=strlen(dn);
+            if(n+l+2>sizeof(destpath)) r=FS_ENAMETOOLONG;
+            else { if(n>1) destpath[n++]='/'; strcpy(destpath+n,dn); r=myfs_rename(LOCAL(sp),sn,destpath); }
         }
     }
-    return 0;
+    mutex_unlock(&lock); return r;
+}
+int fs_truncate(u32 ino) {
+    mutex_lock(&lock); int r;
+    if(ino==DEVNULL || ino==DEVZERO) r=0; else if(isdev(ino)) r=FS_EROFS;
+    else { r=select_inode(ino); if(!r) r=myfs_truncate(LOCAL(ino)); }
+    mutex_unlock(&lock); return r;
+}
+int fs_read(u32 ino,u32 off,void *buf,u32 n) {
+    mutex_lock(&lock); int r=0;
+    if(ino==DEVNULL) r=0; else if(ino==DEVZERO) { memset(buf,0,n); r=n; }
+    else if(ino==DEVROOT) r=FS_EISDIR;
+    else if(isdev(ino)) {
+        if(n>0xffffffffu-off) n=0xffffffffu-off;
+        int d=(int)(ino-DEVBASE); const struct block_device *dev=block_get(d);
+        if(!dev) r=FS_ENODEV;
+        else {
+            u32 done=0; u8 sector[512];
+            while(done<n && off/512<dev->sectors) {
+                if(block_read(d,off/512,sector)) { r=FS_EIO; break; }
+                u32 part=512-off%512; if(part>n-done) part=n-done;
+                memcpy((u8*)buf+done,sector+off%512,part); done+=part;
+                if(off>0xffffffffu-part) break;
+                off+=part;
+            }
+            if(done) r=done;
+        }
+    } else { r=select_inode(ino); if(!r) r=myfs_read(LOCAL(ino),off,buf,n); }
+    mutex_unlock(&lock); return r;
+}
+int fs_write(u32 ino,u32 off,const void *buf,u32 n) {
+    mutex_lock(&lock); int r;
+    if(ino==DEVNULL || ino==DEVZERO) r=n; else if(isdev(ino)) r=FS_EROFS;
+    else { r=select_inode(ino); if(!r) r=myfs_write(LOCAL(ino),off,buf,n); }
+    mutex_unlock(&lock); return r;
+}
+void fs_info(struct fs_info *info) { mutex_lock(&lock); memset(info,0,sizeof(*info)); if(ready) { myfs_select(0,mounts[0].device); myfs_info(info); } mutex_unlock(&lock); }
+const char *fs_strerror(int e) {
+    if(e==FS_EROFS) return "read-only filesystem/device";
+    if(e==FS_EBUSY) return "mountpoint or device busy";
+    if(e==FS_EXDEV) return "cross-device rename";
+    return myfs_strerror(e);
 }
 
-/* ---------------------------------------------------------------- пути */
 
-/* Разбор пути: "/a/b", "a/b", "../x", "." — относительно cwd */
-static int fs_resolve_impl(u32 cwd, const char *path, u32 *ino) {
-    if (!mounted) return FS_ENODEV;
-    u32 cur = (path[0] == '/') ? FS_ROOT : cwd;
-    char name[FS_NAME_MAX + 1];
-
-    while (*path) {
-        while (*path == '/') path++;
-        if (!*path) break;
-        u32 len = 0;
-        while (path[len] && path[len] != '/') len++;
-        if (len > FS_NAME_MAX) return FS_ENAMETOOLONG;
-        memcpy(name, path, len);
-        name[len] = 0;
-        path += len;
-
-        int r = dir_check(cur);
-        if (r) return r;
-        u32 next = dir_lookup(cur, name, NULL);
-        if (!next) return FS_ENOENT;
-        cur = next;
-    }
-    *ino = cur;
-    return FS_OK;
-}
-
-/* Разделить путь на родительский каталог и последнее имя */
-static int resolve_parent(u32 cwd, const char *path, u32 *parent, char *name) {
-    char buf[128];
-    u32 len = strlen(path);
-    if (len == 0 || len >= sizeof(buf)) return FS_EINVAL;
-    memcpy(buf, path, len + 1);
-    while (len > 1 && buf[len - 1] == '/') buf[--len] = 0;   /* хвостовые '/' */
-
-    int slash = -1;
-    for (int i = len - 1; i >= 0; i--) if (buf[i] == '/') { slash = i; break; }
-
-    const char *base = buf + slash + 1;
-    if (!*base || !strcmp(base, ".") || !strcmp(base, "..")) return FS_EINVAL;
-    if (strlen(base) > FS_NAME_MAX) return FS_ENAMETOOLONG;
-    memcpy(name, base, strlen(base) + 1);
-
-    int r;
-    if (slash < 0)       { *parent = cwd; r = FS_OK; }
-    else if (slash == 0) { *parent = FS_ROOT; r = FS_OK; }
-    else                 { buf[slash] = 0; r = fs_resolve(cwd, buf, parent); }
-    if (r) return r;
-    return dir_check(*parent);
-}
-
-static int fs_create_impl(u32 cwd, const char *path, int type, u32 *out) {
-    if (!mounted) return FS_ENODEV;
-    u32 parent;
-    char name[FS_NAME_MAX + 1];
-    int r = resolve_parent(cwd, path, &parent, name);
-    if (r) return r;
-    if (dir_lookup(parent, name, NULL)) return FS_EEXIST;
-
-    u32 ino = ialloc(type);
-    if (!ino) return FS_ENOSPC;
-    if (type == FS_TYPE_DIR) {
-        if ((r = dir_add(ino, ".", ino)) || (r = dir_add(ino, "..", parent))) return r;
-    }
-    if ((r = dir_add(parent, name, ino))) return r;
-    if (out) *out = ino;
-    return FS_OK;
-}
-
-static int fs_remove_impl(u32 cwd, const char *path) {
-    if (!mounted) return FS_ENODEV;
-    u32 parent, off;
-    char name[FS_NAME_MAX + 1];
-    int r = resolve_parent(cwd, path, &parent, name);
-    if (r) return r;
-    u32 ino = dir_lookup(parent, name, &off);
-    if (!ino) return FS_ENOENT;
-
-    struct inode in;
-    if ((r = iread(ino, &in))) return r;
-    if (in.type == FS_TYPE_DIR && !dir_empty(ino)) return FS_ENOTEMPTY;
-
-    free_all_blocks(&in);
-    in.type = FS_TYPE_FREE;
-    in.links = 0;
-    if ((r = iwrite(ino, &in))) return r;
-    free_inodes++;
-    return dir_set(parent, off, 0, NULL);
-}
-
-static int fs_rename_impl(u32 cwd, const char *src, const char *dst) {
-    if (!mounted) return FS_ENODEV;
-    u32 sparent, soff, dparent, existing;
-    char sname[FS_NAME_MAX + 1], dname[FS_NAME_MAX + 1];
-    int r = resolve_parent(cwd, src, &sparent, sname);
-    if (r) return r;
-    u32 ino = dir_lookup(sparent, sname, &soff);
-    if (!ino) return FS_ENOENT;
-
-    /* mv file dir  ->  dir/file */
-    if (fs_resolve(cwd, dst, &existing) == FS_OK && dir_check(existing) == FS_OK) {
-        dparent = existing;
-        memcpy(dname, sname, sizeof(sname));
-    } else if ((r = resolve_parent(cwd, dst, &dparent, dname))) {
-        return r;
-    }
-    if (dir_lookup(dparent, dname, NULL)) return FS_EEXIST;
-
-    /* нельзя переместить каталог внутрь самого себя */
-    for (u32 p = dparent; ; p = dir_lookup(p, "..", NULL)) {
-        if (p == ino) return FS_EINVAL;
-        if (p == FS_ROOT || p == 0) break;
-    }
-
-    if ((r = dir_add(dparent, dname, ino))) return r;
-    if ((r = dir_set(sparent, soff, 0, NULL))) return r;
-
-    u32 dotdot;
-    if (dir_check(ino) == FS_OK && dparent != sparent && dir_lookup(ino, "..", &dotdot))
-        return dir_set(ino, dotdot, dparent, "..");
-    return FS_OK;
-}
-
-static int fs_getpath_impl(u32 ino, char *buf, u32 len) {
-    u32 chain[32];
-    int depth = 0;
-    while (ino != FS_ROOT) {
-        if (depth == 32) return FS_EINVAL;
-        chain[depth++] = ino;
-        ino = dir_lookup(ino, "..", NULL);
-        if (!ino) return FS_ENOENT;
-    }
-    u32 pos = 0;
-    buf[pos++] = '/';
-    for (int i = depth - 1; i >= 0; i--) {
-        u32 parent = (i == depth - 1) ? FS_ROOT : chain[i + 1];
-        struct fs_dirent de;
-        u32 p = 0;
-        bool found = false;
-        while (fs_readdir(parent, &p, &de) == 1) if (de.ino == chain[i]) { found = true; break; }
-        if (!found) return FS_ENOENT;
-        u32 n = strlen(de.name);
-        if (pos + n + 2 > len) return FS_ENAMETOOLONG;
-        memcpy(buf + pos, de.name, n);
-        pos += n;
-        if (i) buf[pos++] = '/';
-    }
-    buf[pos] = 0;
-    return FS_OK;
-}
-
-/* ---------------------------------------------------------------- монтирование */
-
-static int fs_format_impl(void) {
-    static u8 zero[BS];
-    u32 total = ata_sectors();
-    if (!total) return FS_ENODEV;
-    if (total > MAX_BLOCKS) total = MAX_BLOCKS;
-
-    memset(&sb, 0, sizeof(sb));
-    sb.magic         = MAGIC;
-    sb.version       = VERSION;
-    sb.total_blocks  = total;
-    sb.bitmap_start  = 1;
-    sb.bitmap_blocks = (total + BITS_PER_BLK - 1) / BITS_PER_BLK;
-    sb.inode_start   = sb.bitmap_start + sb.bitmap_blocks;
-    sb.inode_count   = INODE_COUNT;
-    sb.inode_blocks  = INODE_COUNT / INODES_PER_BLK;
-    sb.data_start    = sb.inode_start + sb.inode_blocks;
-    if (sb.data_start + 16 > total) return FS_ENOSPC;
-
-    /* битмап: служебные блоки заняты */
-    memset(bitmap, 0, sizeof(bitmap));
-    for (u32 b = 0; b < sb.data_start; b++) bit_set(b, true);
-    for (u32 i = 0; i < sb.bitmap_blocks; i++)
-        if (bwrite(sb.bitmap_start + i, bitmap + i * BS)) return FS_EIO;
-    for (u32 i = 0; i < sb.inode_blocks; i++)
-        if (bwrite(sb.inode_start + i, zero)) return FS_EIO;
-    if (bwrite(0, &sb)) return FS_EIO;
-
-    free_blocks = total - sb.data_start;
-    free_inodes = INODE_COUNT - 1;
-    mounted = true;
-
-    /* корневой каталог: inode 1, «..» указывает на себя */
-    struct inode root;
-    memset(&root, 0, sizeof(root));
-    root.type = FS_TYPE_DIR;
-    root.links = 1;
-    if (iwrite(FS_ROOT, &root)) return FS_EIO;
-    free_inodes--;
-    int r;
-    if ((r = dir_add(FS_ROOT, ".", FS_ROOT)) || (r = dir_add(FS_ROOT, "..", FS_ROOT))) return r;
-    return FS_OK;
-}
-
-static int fs_init_impl(bool *formatted) {
-    *formatted = false;
-    mounted = false;
-    if (!ata_sectors()) return FS_ENODEV;
-    if (bread(0, &sb)) return FS_EIO;
-
-    if (sb.magic != MAGIC || sb.version != VERSION || sb.total_blocks > MAX_BLOCKS) {
-        *formatted = true;
-        return fs_format();
-    }
-
-    for (u32 i = 0; i < sb.bitmap_blocks; i++)
-        if (bread(sb.bitmap_start + i, bitmap + i * BS)) return FS_EIO;
-    mounted = true;
-
-    free_blocks = 0;
-    for (u32 b = sb.data_start; b < sb.total_blocks; b++) if (!bit_get(b)) free_blocks++;
-    free_inodes = 0;
-    struct inode in;
-    for (u32 i = FS_ROOT; i < sb.inode_count; i++)
-        if (!iread(i, &in) && in.type == FS_TYPE_FREE) free_inodes++;
-    return FS_OK;
-}
-
-bool fs_ready(void) { return mounted; }
-
-static void fs_info_impl(struct fs_info *info) {
-    info->total_blocks = sb.total_blocks - sb.data_start;
-    info->free_blocks  = free_blocks;
-    info->total_inodes = sb.inode_count - 1;
-    info->free_inodes  = free_inodes;
-}
-
-const char *fs_strerror(int err) {
-    switch (err) {
-    case FS_OK:           return "success";
-    case FS_ENOENT:       return "no such file or directory";
-    case FS_EEXIST:       return "already exists";
-    case FS_ENOTDIR:      return "not a directory";
-    case FS_EISDIR:       return "is a directory";
-    case FS_ENOSPC:       return "no space left on disk";
-    case FS_ENOTEMPTY:    return "directory not empty";
-    case FS_EINVAL:       return "invalid argument";
-    case FS_EIO:          return "disk I/O error";
-    case FS_ENODEV:       return "no disk / file system not mounted";
-    case FS_EFBIG:        return "file too large (max 8 MB)";
-    case FS_ENAMETOOLONG: return "name too long (max 27 chars)";
-    default:              return "unknown error";
-    }
-}
-
-/* ---------------------------------------------------------------- блокировка
- * Файловая система общая для всех задач, а операции с ней долгие (диск!),
- * поэтому вместо запрета прерываний — мьютекс: ждущая задача спит, а не крутится.
- * Мьютекс рекурсивный: fs_create внутри себя вызывает fs_write и т.п. */
-static struct mutex fs_lock;
-int fs_init(bool *formatted) { mutex_lock(&fs_lock); int r = fs_init_impl(formatted); mutex_unlock(&fs_lock); return r; }
-int fs_format(void) { mutex_lock(&fs_lock); int r = fs_format_impl(); mutex_unlock(&fs_lock); return r; }
-int fs_resolve(u32 cwd, const char *path, u32 *ino) { mutex_lock(&fs_lock); int r = fs_resolve_impl(cwd, path, ino); mutex_unlock(&fs_lock); return r; }
-int fs_create(u32 cwd, const char *path, int type, u32 *out) { mutex_lock(&fs_lock); int r = fs_create_impl(cwd, path, type, out); mutex_unlock(&fs_lock); return r; }
-int fs_remove(u32 cwd, const char *path) { mutex_lock(&fs_lock); int r = fs_remove_impl(cwd, path); mutex_unlock(&fs_lock); return r; }
-int fs_rename(u32 cwd, const char *src, const char *dst) { mutex_lock(&fs_lock); int r = fs_rename_impl(cwd, src, dst); mutex_unlock(&fs_lock); return r; }
-int fs_read(u32 ino, u32 off, void *buf, u32 n) { mutex_lock(&fs_lock); int r = fs_read_impl(ino, off, buf, n); mutex_unlock(&fs_lock); return r; }
-int fs_write(u32 ino, u32 off, const void *buf, u32 n) { mutex_lock(&fs_lock); int r = fs_write_impl(ino, off, buf, n); mutex_unlock(&fs_lock); return r; }
-int fs_truncate(u32 ino) { mutex_lock(&fs_lock); int r = fs_truncate_impl(ino); mutex_unlock(&fs_lock); return r; }
-int fs_stat(u32 ino, struct fs_stat *st) { mutex_lock(&fs_lock); int r = fs_stat_impl(ino, st); mutex_unlock(&fs_lock); return r; }
-int fs_readdir(u32 dir, u32 *pos, struct fs_dirent *out) { mutex_lock(&fs_lock); int r = fs_readdir_impl(dir, pos, out); mutex_unlock(&fs_lock); return r; }
-int fs_getpath(u32 ino, char *buf, u32 len) { mutex_lock(&fs_lock); int r = fs_getpath_impl(ino, buf, len); mutex_unlock(&fs_lock); return r; }
-void fs_info(struct fs_info *info) { mutex_lock(&fs_lock); fs_info_impl(info); mutex_unlock(&fs_lock); }

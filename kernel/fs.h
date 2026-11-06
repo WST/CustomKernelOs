@@ -15,7 +15,7 @@
 #define FS_ROOT       1
 #define FS_NAME_MAX   27
 
-enum { FS_TYPE_FREE = 0, FS_TYPE_FILE = 1, FS_TYPE_DIR = 2 };
+enum { FS_TYPE_FREE = 0, FS_TYPE_FILE = 1, FS_TYPE_DIR = 2, FS_TYPE_BLOCK = 3, FS_TYPE_CHAR = 4 };
 
 enum {
     FS_OK        =  0,
@@ -30,7 +30,19 @@ enum {
     FS_ENODEV    = -9,
     FS_EFBIG     = -10,
     FS_ENAMETOOLONG = -11,
+    FS_EROFS = -12,
+    FS_EBUSY = -13,
+    FS_EXDEV = -14,
 };
+
+/* VFS: up to four MyFS volumes; /dev is a virtual filesystem. */
+int fs_mount(u32 cwd, const char *device, const char *target);
+int fs_mount_info(u32 index, char *device, char *target);
+int fs_mkfs(const char *device);
+int fs_partition(const char *device,u32 op,u32 slot,u32 start,u32 sectors);
+/* Keep raw-device lookup and descriptor publication atomic with admin writes. */
+void fs_namespace_lock(void);
+void fs_namespace_unlock(void);
 
 struct fs_stat {
     u32 type;
@@ -48,7 +60,7 @@ struct fs_info {
     u32 total_inodes, free_inodes;
 };
 
-int  fs_init(bool *formatted);   /* смонтировать, при отсутствии ФС — отформатировать */
+int  fs_init(bool *formatted);   /* root: raw MyFS or first valid MyFS MBR partition */
 int  fs_format(void);
 bool fs_ready(void);
 

@@ -82,6 +82,7 @@ void  task_wakeup(void *chan);
 
 void  mutex_lock(struct mutex *m);
 void  mutex_unlock(struct mutex *m);
+bool task_raw_device_busy(int disk);
 
 /* для idt.c */
 struct regs *sched_tick(struct regs *r);

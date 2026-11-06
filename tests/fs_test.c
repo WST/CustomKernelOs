@@ -1,10 +1,12 @@
 /* Тесты MyFS на хосте: fs.c собирается обычным gcc с «диском» в памяти.  Запуск: make test */
 #include "fs.h"
 #include "ata.h"
+#include "myfs.h"
+#include "block.h"
 #include "string.h"
 int printf(const char*,...); void *malloc(unsigned long); void exit(int);
 #define SECTORS 2600     /* маленький диск, чтобы проверить ENOSPC */
-static u8 disk[SECTORS*512];
+static u8 disk[SECTORS*512], snapshot[SECTORS*512];
 bool ata_init(void){return 1;} u32 ata_sectors(void){return SECTORS;} const char*ata_model(void){return "fake";}
 int ata_read(u32 l,void*b){if(l>=SECTORS)return -1;memcpy(b,disk+l*512,512);return 0;}
 int ata_write(u32 l,const void*b){if(l>=SECTORS)return -1;memcpy(disk+l*512,b,512);return 0;}
@@ -17,7 +19,21 @@ void mutex_unlock(struct mutex *m) { (void)m; lock_depth--; }
 #define BIGN 1000000
 static u8 big[BIGN], rd[BIGN];
 int main(){
+  /* Administrative APIs work before mounting; edits validate before writing. */
+  CHECK(block_init()==0);
+  CHECK(fs_partition("sdb",0,0,0,0)==0);
+  CHECK(fs_partition("sdb",1,4,2048,400)==0 && block_find("sdb4")==4);
+  memcpy(snapshot,disk,sizeof(disk));
+  CHECK(fs_partition("sdb",1,1,2050,300)==FS_EINVAL && !memcmp(snapshot,disk,sizeof(disk)));
+  CHECK(fs_partition("sdb",1,4,2048,400)==FS_EEXIST);
+  CHECK(fs_partition("sdb",1,1,2500,400)==FS_EINVAL);
+  CHECK(fs_partition("sdb",1,1,0,400)==FS_EINVAL);
+  CHECK(fs_mkfs("sdb")==FS_EINVAL); /* table may not be overwritten by mkfs */
+  CHECK(fs_mkfs("sdb4")==0);
+  CHECK(fs_partition("sdb",2,4,0,0)==0 && block_find("sdb4")==-1);
+  memset(disk,0,sizeof(disk));
   bool f; CHECK(fs_init(&f)==0 && f);
+  CHECK(fs_mkfs("sdb")==FS_EBUSY && fs_partition("sdb",0,0,0,0)==FS_EBUSY);
   struct fs_info fi0; fs_info(&fi0);
   u32 ino; CHECK(fs_create(1,"/big",FS_TYPE_FILE,&ino)==0);
   for(int i=0;i<BIGN;i++) big[i]=(u8)(i*7+i/512);
@@ -55,8 +71,64 @@ int main(){
   CHECK(fs_create(1,"b/c/x.txt",FS_TYPE_FILE,&up)==0 && fs_resolve(1,"b/c/x.txt/y",&up)==FS_ENOTDIR);
   /* 100 файлов в одном каталоге (каталог > 1 блока) */
   for(int i=0;i<100;i++){ name[0]='n'; name[1]='0'+i/10; name[2]='0'+i%10; name[3]=0; CHECK(fs_create(1,name,FS_TYPE_FILE,0)==0);}
-  u32 pos=0,cnt=0; struct fs_dirent de; while(fs_readdir(1,&pos,&de)==1) cnt++; CHECK(cnt==102);
+  u32 pos=0,cnt=0; struct fs_dirent de; while(fs_readdir(1,&pos,&de)==1) cnt++; CHECK(cnt==103);
   CHECK(fs_resolve(1,"n77",&up)==0);
   CHECK(lock_depth == 0 && lock_calls > 0);
   printf("fs mutex: %d lock calls, all balanced, max nesting %d\n", lock_calls, max_depth);
-  printf("ALL TESTS PASSED\n"); return 0; }
+  /* Virtual devices: byte reads, EOF and read-only raw access. */
+  u32 dev,zero,raw; CHECK(fs_resolve(1,"/dev",&dev)==0);
+  CHECK(fs_resolve(dev,"../dev/./zero",&zero)==0);
+  memset(rd,0xff,100); CHECK(fs_read(zero,0,rd,100)==100);
+  for(int i=0;i<100;i++) CHECK(rd[i]==0);
+  CHECK(fs_resolve(dev,"null",&ino)==0 && fs_read(ino,0,rd,10)==0 && fs_write(ino,0,"x",1)==1);
+  CHECK(fs_resolve(1,"/dev/sdb",&raw)==0 && fs_stat(raw,&st)==0 && st.type==FS_TYPE_BLOCK);
+  CHECK(fs_read(raw,509,rd,20)==20 && !memcmp(rd,disk+509,20));
+  CHECK(fs_write(raw,0,"x",1)==FS_EROFS && fs_truncate(raw)==FS_EROFS);
+  CHECK(fs_create(dev,"fake",FS_TYPE_FILE,0)==FS_EROFS);
+  CHECK(fs_remove(1,"/dev")==FS_EBUSY);
+  CHECK(fs_getpath(dev,p,sizeof(p))==0 && !strcmp(p,"/dev"));
+  /* Unknown/corrupt metadata must never be reformatted. */
+  disk[0]^=1; memcpy(snapshot,disk,sizeof(disk));
+  CHECK(fs_init(&f)<0 && !memcmp(snapshot,disk,sizeof(disk))); disk[0]^=1;
+  disk[20]=0xff; memcpy(snapshot,disk,sizeof(disk));
+  CHECK(fs_init(&f)<0 && !memcmp(snapshot,disk,sizeof(disk)));
+  /* Two primary MBR partitions with independent MyFS instances. */
+  memset(disk,0,sizeof(disk)); disk[510]=0x55; disk[511]=0xaa;
+  for(int j=0;j<2;j++) {
+    u8 *e=disk+446+j*16; e[4]=0x83;
+    u32 start=1+j*1200, size=1200;
+    for(int b=0;b<4;b++) { e[8+b]=start>>(b*8); e[12+b]=size>>(b*8); }
+  }
+  CHECK(block_init()==0 && block_count()==3);
+  CHECK(block_read(1,1200,rd)<0 && block_write(2,1200,rd)<0);
+  CHECK(fs_init(&f)<0); /* unformatted partitions are not formatted implicitly */
+  CHECK(fs_mkfs("sdb1")==0 && fs_mkfs("sdb2")==0);
+  CHECK(fs_init(&f)==0 && !f);
+  CHECK(fs_create(1,"mnt",FS_TYPE_DIR,0)==0);
+  CHECK(fs_mount(1,"/dev/sdb2","/mnt")==0);
+  CHECK(fs_mkfs("sdb2")==FS_EBUSY);
+  CHECK(fs_partition("sdb",2,2,0,0)==FS_EBUSY);
+  CHECK(fs_resolve(1,"/mnt",&ino)==0 && ino!=1);
+  CHECK(fs_getpath(ino,p,sizeof(p))==0 && !strcmp(p,"/mnt"));
+  CHECK(fs_resolve(ino,"..",&up)==0 && up==1);
+  CHECK(fs_create(ino,"hello",FS_TYPE_FILE,&up)==0 && fs_write(up,0,"partition",9)==9);
+  CHECK(fs_create(1,"hello",FS_TYPE_FILE,&raw)==0 && fs_write(raw,0,"root",4)==4);
+  CHECK(fs_read(up,0,rd,9)==9 && !memcmp(rd,"partition",9));
+  CHECK(fs_read(raw,0,rd,4)==4 && !memcmp(rd,"root",4));
+  CHECK(fs_rename(1,"hello","/mnt/other")==FS_EXDEV);
+  CHECK(fs_rename(1,"mnt","moved")==FS_EBUSY && fs_remove(1,"mnt")==FS_EBUSY);
+  CHECK(fs_format()==FS_EBUSY);
+  CHECK(fs_create(1,"other",FS_TYPE_DIR,0)==0);
+  CHECK(fs_mount(1,"/dev/sdb","/other")==FS_EBUSY);
+  CHECK(fs_mount(1,"/dev/sdb2","/other")==FS_EBUSY);
+  char device[128],target[128];
+  CHECK(fs_mount_info(1,device,target)==1 && !strcmp(device,"/dev/sdb2") && !strcmp(target,"/mnt"));
+  CHECK(fs_init(&f)==0 && fs_mount(1,"sdb2","/mnt")==0);
+  CHECK(fs_resolve(1,"/mnt/hello",&ino)==0 && fs_read(ino,0,rd,9)==9 && !memcmp(rd,"partition",9));
+  /* Invalid and overlapping partition extents are skipped. */
+  disk[446+16+8]=1; disk[446+16+9]=0;
+  CHECK(block_init()==0 && block_count()==2);
+  CHECK(lock_depth==0);
+  printf("ALL TESTS PASSED (VFS, devfs, MBR, two volumes, corruption)\n"); return 0; }
+
+

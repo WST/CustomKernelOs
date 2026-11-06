@@ -1,6 +1,8 @@
 /* Мини-libc для программ MyOS. Всё общение с миром — через int 0x80. */
 #include "myos.h"
 
+/* Filesystem administration wrappers are defined below syscall3. */
+
 /* ================================================================ точка входа */
 
 int main(int argc, char **argv);
@@ -240,6 +242,9 @@ char *strncpy(char *d, const char *s, size_t n) {
 }
 const char *strerror(int e) {
     switch (e) {
+    case EBUSY: return "mountpoint or device busy";
+    case EXDEV: return "cross-device rename";
+    case EROFS: return "read-only filesystem/device";
     case EPERM:     return "operation not permitted";
     case ENOENT:    return "no such file or directory";
     case ESRCH:     return "no such process";
@@ -256,7 +261,7 @@ const char *strerror(int e) {
     case EISDIR:    return "is a directory";
     case EINVAL:    return "invalid argument";
     case EMFILE:    return "too many open files";
-    case EFBIG:     return "file too large (MyFS max is 8 MB)";
+    case EFBIG:     return "file or filesystem too large";
     case ENOSPC:    return "no space left on disk";
     case EPIPE:     return "broken pipe";
     case ENOTEMPTY: return "directory not empty";
@@ -556,6 +561,14 @@ unsigned rand(void) { rnd_state = rnd_state * 1103515245 + 12345; return (rnd_st
 
 /* ================================================================ сеть */
 
+int mount(const char *device,const char *target) { return syscall3(SYS_MOUNT,(int)device,(int)target,0); }
+int mkfs(const char *device) { return syscall3(SYS_MKFS,(int)device,0,0); }
+int partctl(const char *device,unsigned op,unsigned slot,unsigned start,unsigned sectors) {
+    unsigned args[3]; args[0]=slot; args[1]=start; args[2]=sectors;
+    return syscall3(SYS_PARTCTL,(int)device,op,(int)args);
+}
+int mountinfo(unsigned index,char device[128],char target[128]) { return syscall3(SYS_MOUNTINFO,index,(int)device,(int)target); }
+int blockinfo(unsigned index,struct block_info *info) { return syscall3(SYS_BLOCKINFO,index,(int)info,0); }
 int socket(int type)                       { return syscall3(SYS_SOCKET, type, 0, 0); }
 int connect(int fd, unsigned ip, int port) { return syscall3(SYS_CONNECT, fd, (int)ip, port); }
 int bind(int fd, int port)                 { return syscall3(SYS_BIND, fd, port, 0); }
@@ -728,3 +741,5 @@ int shm_unmap(void *addr)                       { return syscall3(SYS_SHM_UNMAP,
 int service_register(const char *name)          { return syscall3(SYS_SERVICE, 1, (int)name, 0); }
 int service_find(const char *name)              { return syscall3(SYS_SERVICE, 2, (int)name, 0); }
 int get_time(struct datetime *t)                { return syscall3(SYS_TIME, (int)t, 0, 0); }
+
+

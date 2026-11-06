@@ -9,5 +9,9 @@ u32  ata_sectors(void);                      /* размер диска в се�
 const char *ata_model(void);
 int  ata_read(u32 lba, void *buf);           /* 0 = успех, <0 = ошибка */
 int  ata_write(u32 lba, const void *buf);
+/* unit 0: primary slave (system), unit 1: secondary master (data). */
+u32 ata_unit_sectors(int unit);
+int ata_unit_read(int unit,u32 lba,void *buf);
+int ata_unit_write(int unit,u32 lba,const void *buf);
 
 #endif

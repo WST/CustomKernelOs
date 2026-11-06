@@ -64,6 +64,11 @@ enum {
     SYS_TTYCTL      = 55,   /* ttyctl(fd, op, arg): размер pty и т.п. (tty.h) */
     SYS_KBLAYOUT    = 56,   /* kblayout(-1 узнать | 0 US | 1 RU) -> текущая */
     SYS_SOCKCTL     = 57,   /* sockctl(fd, op, arg): тайм-ауты сокета (net.h) */
+    SYS_MOUNT,
+    SYS_MOUNTINFO,
+    SYS_BLOCKINFO,
+    SYS_MKFS,
+    SYS_PARTCTL,
     SYS_COUNT
 };
 

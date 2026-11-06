@@ -40,11 +40,15 @@ enum {
     SYS_NETINFO, SYS_PING, SYS_NETCONFIG, SYS_SHM_ALLOC, SYS_SHM_MAP,
     SYS_SHM_UNMAP, SYS_MSG_SEND, SYS_MSG_RECV, SYS_SERVICE, SYS_TIME,
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
-    SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL
+    SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
+    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
 #define EPERM 1
+#define EBUSY 16
+#define EXDEV 18
+#define EROFS 30
 #define ENOENT 2
 #define ESRCH 3
 #define EINTR 4
@@ -103,6 +107,12 @@ int   write(int fd, const void *buf, size_t len);
 int   read(int fd, void *buf, size_t len);
 int   open(const char *path, int mode);
 int   close(int fd);
+struct block_info { char name[12]; unsigned start,sectors,partition; };
+int mount(const char *device,const char *target);
+int mountinfo(unsigned index,char device[128],char target[128]);
+int blockinfo(unsigned index,struct block_info *info);
+int mkfs(const char *device);
+int partctl(const char *device,unsigned op,unsigned slot,unsigned start,unsigned sectors);
 void *sbrk(int increment);
 void  sleep_ms(unsigned ms);
 int   getpid(void);

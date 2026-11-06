@@ -30,6 +30,17 @@
 static struct task *tasks[MAX_TASKS];
 static struct task *current;
 static struct task *idle_task;
+
+/* VFS holds its lock, so no new raw opens can race this snapshot. */
+bool task_raw_device_busy(int disk) {
+    u32 flags=irq_save(); bool busy=false;
+    for(int i=0;i<MAX_TASKS;i++) if(tasks[i])
+        for(int j=0;j<MAX_FDS;j++) {
+            struct file *f=tasks[i]->fds[j];
+            if(f && f->type==FILE_DISK && f->ino>=0xf0000010u && f->ino<0xf0000010u+10 && (int)((f->ino-0xf0000010u)/5)==disk) busy=true;
+        }
+    irq_restore(flags); return busy;
+}
 static struct task  task0;          /* kmain / оболочка: живёт на стеке загрузчика */
 static u32 next_id;
 static u32 slice;
