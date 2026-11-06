@@ -242,6 +242,20 @@ static int collect(const char *dir, const char *prefix, bool only_bin) {
         cand_dir[n++] = e.type == 2;
         used += l;
     }
+    /* /ext/bin дополняет /bin, но не перекрывает одноимённую родную команду */
+    if (only_bin) {
+        for (int i = 0; n < 64 && readdir("/ext/bin", i, &e) == 1; i++) {
+            if (strncmp(e.name, prefix, plen)) continue;
+            bool seen = false;
+            for (int k = 0; k < n; k++) if (!strcmp(cand[k], e.name)) { seen = true; break; }
+            if (seen) continue;
+            int l = strlen(e.name) + 1;
+            if (used + l > (int)sizeof(cand_pool)) break;
+            cand[n] = strcpy(cand_pool + used, e.name);
+            cand_dir[n++] = false;
+            used += l;
+        }
+    }
     return n;
 }
 
@@ -424,7 +438,11 @@ static void help(void) {
     printf("Programs in /bin:");
     struct dirent_info e;
     for (int i = 0; readdir("/bin", i, &e) == 1; i++) printf(" %s", e.name);
-    printf("\n");
+    printf("\nPrograms in /ext/bin:");
+    int ext = 0;
+    for (int i = 0; readdir("/ext/bin", i, &e) == 1; i++) { printf(" %s", e.name); ext++; }
+    if (!ext) printf(" (none)");
+    printf("\nSame name: /bin wins. Run the other copy as /ext/bin/name.\n");
 }
 
 /* -> true, если команда встроенная (и уже выполнена) */
@@ -490,12 +508,19 @@ static void child(struct cmd *c, int in_fd, int out_fd, int pgid) {
         dup2(fd, STDOUT);
         close(fd);
     }
-    char path[64];
-    if (strchr(c->argv[0], '/')) strncpy(path, c->argv[0], sizeof(path) - 1);
-    else snprintf(path, sizeof(path), "/bin/%s", c->argv[0]);
-    path[sizeof(path) - 1] = 0;
-
-    int r = exec(path, c->argv);            /* при успехе сюда не вернёмся */
+    char path[96];
+    int r;
+    if (strchr(c->argv[0], '/')) {
+        snprintf(path, sizeof(path), "%s", c->argv[0]);
+        r = exec(path, c->argv);
+    } else {
+        snprintf(path, sizeof(path), "/bin/%s", c->argv[0]);
+        r = exec(path, c->argv);
+        if (r == -ENOENT) {                 /* родной копии нет — сторонняя в /ext/bin */
+            snprintf(path, sizeof(path), "/ext/bin/%s", c->argv[0]);
+            r = exec(path, c->argv);
+        }
+    }
     struct dirent_info st;
     if (r == -ENOENT && !strchr(c->argv[0], '/') && stat(c->argv[0], &st) == 0 && st.type == 1)
         dprintf(STDERR, "sh: %s: command not found (the file is here - run it as ./%s)\n", c->argv[0], c->argv[0]);

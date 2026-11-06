@@ -669,9 +669,9 @@ static void cmd_run(char *a) {
     run_program(argv, argc);
 }
 
-/* команда не встроенная — ищем программу: путь с '/' как есть, иначе в /bin */
+/* путь с '/' как есть; иначе сначала /bin, затем /ext/bin */
 static bool try_program(char *cmd, char *args) {
-    static char path[64];
+    static char path[96];
     if (!fs_ready()) return false;
     u32 ino;
     bool has_slash = false;
@@ -679,12 +679,17 @@ static bool try_program(char *cmd, char *args) {
     if (has_slash) {
         if (strlen(cmd) >= sizeof(path)) return false;
         memcpy(path, cmd, strlen(cmd) + 1);
+        if (fs_resolve(cwd, path, &ino)) return false;
     } else {
-        if (strlen(cmd) + 6 > sizeof(path)) return false;
+        if (strlen(cmd) + 10 > sizeof(path)) return false;
         memcpy(path, "/bin/", 5);
         memcpy(path + 5, cmd, strlen(cmd) + 1);
+        if (fs_resolve(cwd, path, &ino)) {
+            memcpy(path, "/ext/bin/", 9);
+            memcpy(path + 9, cmd, strlen(cmd) + 1);
+            if (fs_resolve(cwd, path, &ino)) return false;
+        }
     }
-    if (fs_resolve(cwd, path, &ino)) return false;
 
     char *argv[PROC_MAX_ARGS + 1];
     argv[0] = path;

@@ -184,12 +184,17 @@ $(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/myfs.c kernel/myf
 $(DISK):
 	$(call padto,$@,$$(( $(DISK_MB) * 1048576 )))
 
-# Установить программы в /bin (остальные файлы на диске не трогаются)
-install: $(UBINS) $(BUILD)/myfs | $(DISK)
+# Установить программы в /bin (остальные файлы на диске не трогаются).
+# Сторонние утилиты — в /ext/bin под своими именами, чтобы не затереть /bin/wc и /bin/head.
+install: $(UBINS) $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
+	@echo "==> сторонние программы в /ext/bin"
+	@$(BUILD)/myfs $(DISK) mkdir /ext/bin >/dev/null
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/owc /ext/bin/wc || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/ohead /ext/bin/head || exit 1
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
-	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
+	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run /ext /ext/bin; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
