@@ -1,0 +1,10 @@
+import base, { count, increment as inc } from './module-counter.js';
+import * as values from './module-barrel.js';
+import './module-counter.js';
+const secretModuleVariable = 'private';
+inc();
+document.getElementById('result').textContent = 'modules-ok:' + (base + count);
+console.log('live', count, values.value, values.count, window.moduleExecutions);
+console.log('isolated', typeof window.secretModuleVariable);
+console.log('meta', import.meta.url);
+console.log('literal', 'import nope from "x"', /export.*from/.test('export from'));

@@ -27,7 +27,7 @@ static int h_fetch(const char *url, const char *method, const char *body, int bl
         int r = curl_fetch(url, data, len);
         printf("[fetch %s %s -> %s %d]\n", method, url, r ? "fail" : "ok", *len);
         *status = r ? 0 : 200;
-        snprintf(ctype, cmax, "text/plain");
+        snprintf(ctype, cmax, "application/javascript"); /* --net is a script compatibility harness */
         return r;
     }
     const char *p = strrchr(url, '/');
@@ -41,7 +41,7 @@ static int h_fetch(const char *url, const char *method, const char *body, int bl
     *len = fread(*data, 1, 4 << 20, f);
     fclose(f);
     *status = 200;
-    snprintf(ctype, cmax, "%s", strstr(path, ".json") ? "application/json" : "text/plain");
+    snprintf(ctype, cmax, "%s", strstr(path, ".json") ? "application/json" : strstr(path, ".js") ? "application/javascript" : "text/plain");
     return 0;
 }
 static void h_status(const char *m) { (void)m; }

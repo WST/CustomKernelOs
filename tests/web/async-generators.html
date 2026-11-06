@@ -1,0 +1,41 @@
+<p id=result>pending</p>
+<script>
+function check(v) { if (!v) throw new Error('async generator assertion failed'); }
+async function* sequence() {
+  yield new Promise(resolve => setTimeout(() => resolve(1), 5));
+  yield await Promise.resolve(2);
+  return Promise.resolve(3);
+}
+async function* recovery() {
+  try { yield Promise.reject('reject-value'); }
+  catch(e) { yield e; }
+  try { yield 5; } finally { window.finalized = true; }
+}
+async function* delegated() { yield* sequence(); yield* [Promise.resolve(4)]; }
+async function main() {
+  const it = sequence();
+  check(it[Symbol.asyncIterator]() === it);
+  check(it[Symbol.iterator] === undefined);
+  const results = await Promise.all([it.next(), it.next(), it.next()]);
+  check(results[0].value === 1 && !results[0].done);
+  check(results[1].value === 2 && !results[1].done);
+  check(results[2].value === 3 && results[2].done);
+  check((await it.return(9)).value === 9);
+  try { await it.throw('closed'); check(false); } catch(e) { check(e === 'closed'); }
+  const r = recovery();
+  check((await r.next()).value === 'reject-value');
+  await r.next(); await r.return(8); check(window.finalized);
+  let sum = 0;
+  for await (const value of delegated()) sum += value;
+  check(sum === 7);
+  let fallback = 0;
+  for await (const v of [Promise.resolve(2), 3]) fallback += v;
+  check(fallback === 5);
+  window.finalized = false;
+  for await (const value of recovery()) { if (value === 5) break; }
+  check(window.finalized);
+  document.getElementById('result').textContent = 'async-generators-ok';
+  console.log('async-generators-ok');
+}
+main().catch(e => console.log('ASYNC-FAIL', e.message || e));
+</script>

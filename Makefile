@@ -260,6 +260,7 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 	@diff -u tests/web/async.expected $(BUILD)/asynctest.out && echo "DOM async test: OK"
 	./$(BUILD)/dom-host tests/web/css.html styles > $(BUILD)/csstest.out
 	@diff -u tests/web/css.expected $(BUILD)/csstest.out && echo "CSS test: OK"
+	python3 tests/modules_test.py
 
 # Картинки и сертификаты на образцах (нужен python3 с Pillow и cryptography: pip install pillow cryptography)
 imgtest: | $(BUILD)
@@ -281,6 +282,10 @@ browsertest: user/lib/dom_prelude.h | $(BUILD)
 	    user/lib/img.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
+	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --compat-test
+	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/modules.html assert-no-errors scroll
+	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/async-generators.html timers 150 assert-no-errors
+	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/web-api.html timers 250 assert-no-errors
 
 # Сглаженная графика и шрифты на Linux: пробная картинка build/gfxtest.ppm
 gfxtest: | $(BUILD)
