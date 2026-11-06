@@ -168,6 +168,7 @@ static void load(Type *ty) {
     case TY_DOUBLE: E("DD 00"); return;                         /* fld qword [eax] */
     default: break;
     }
+    if (ty->kind == TY_LONGLONG) { E("89 C1 8B 01 8B 51 04"); return; } /* edx:eax = [eax] */
     if (ty->size == 1) { if (ty->is_unsigned || ty->kind == TY_BOOL) E("0F B6 00"); else E("0F BE 00"); }
     else if (ty->size == 2) { if (ty->is_unsigned) E("0F B7 00"); else E("0F BF 00"); }
     else E("8B 00");                                            /* mov eax, [eax] */
@@ -187,6 +188,7 @@ static void store(Type *ty) {
     case TY_DOUBLE: E("DD 11"); return;                         /* fst qword [ecx] */
     default: break;
     }
+    if (ty->kind == TY_LONGLONG) { E("89 01 89 51 04"); return; } /* [ecx] = edx:eax */
     if (ty->size == 1) E("88 01");
     else if (ty->size == 2) E("66 89 01");
     else E("89 01");
@@ -199,6 +201,8 @@ static void cmp_zero(Type *ty) {
         E("DA E9");                                             /* fucompp */
         E("DF E0");                                             /* fnstsw ax */
         E("9E");                                                /* sahf */
+    } else if (ty->kind == TY_LONGLONG) {
+        E("09 D0 85 C0");                                       /* or eax, edx; test eax, eax */
     } else {
         E("85 C0");                                             /* test eax, eax */
     }
@@ -225,7 +229,7 @@ static void round_to_float(void) {
     sub_esp(4); E("D9 1C 24"); E("D9 04 24"); add_esp(4);     /* fstp dword [esp]; fld dword [esp] */
 }
 
-static void float_to_int(void) {
+static void float_to_int(int wide) {
     sub_esp(12);
     E("D9 3C 24");                                              /* fnstcw [esp] */
     E("66 8B 04 24");                                           /* mov ax, [esp] */
@@ -235,6 +239,7 @@ static void float_to_int(void) {
     E("DF 7C 24 04");                                           /* fistp qword [esp+4] */
     E("D9 2C 24");                                              /* fldcw [esp] */
     E("8B 44 24 04");                                           /* mov eax, [esp+4] */
+    if (wide) E("8B 54 24 08");                                 /* mov edx, [esp+8] */
     add_esp(12);
 }
 
@@ -261,8 +266,26 @@ static void gen_cast(Type *from, Type *to) {
     if (f == F32 || f == F64) {
         if (t == F64) return;
         if (t == F32) { round_to_float(); return; }
-        float_to_int();
-        int_truncate(t);
+        float_to_int(to->kind == TY_LONGLONG);
+        if (to->kind != TY_LONGLONG) int_truncate(t);
+        return;
+    }
+    if (from->kind == TY_LONGLONG) {
+        if (to->kind == TY_LONGLONG) return;
+        if (t == F64 || t == F32) {
+            sub_esp(8);
+            E("89 04 24 89 54 24 04 DF 2C 24");                 /* mov [esp], eax; mov [esp+4], edx; fild qword */
+            add_esp(8);
+            if (t == F32) round_to_float();
+            return;
+        }
+        if (to->kind == TY_BOOL) { cmp_zero(from); E("0F 95 C0 0F B6 C0"); return; }
+        if (to->size < 4) int_truncate(t);
+        return;
+    }
+    if (to->kind == TY_LONGLONG) {
+        if (from->is_unsigned || from->kind == TY_PTR || from->kind == TY_BOOL) E("31 D2");
+        else E("99");                                           /* cdq */
         return;
     }
     if (t == F32 || t == F64) {
@@ -341,6 +364,12 @@ static void gen_num(Node *node) {
         add_esp(8);
         return;
     }
+    if (node->ty->kind == TY_LONGLONG) {
+        mov_eax_imm((int)node->ival);
+        if ((unsigned)(node->ival >> 32) == 0) E("31 D2");
+        else { E("BA"); imm32((unsigned)(node->ival >> 32)); }
+        return;
+    }
     mov_eax_imm(node->val);
 }
 
@@ -367,6 +396,9 @@ static void gen_funcall(Node *node) {
             pushed += 4;
         } else if (ty->kind == TY_DOUBLE) {
             sub_esp(8); E("DD 1C 24");
+            pushed += 8;
+        } else if (ty->kind == TY_LONGLONG) {
+            E("52 50");                                         /* push edx; push eax — младшее слово ниже */
             pushed += 8;
         } else {
             E("50");
@@ -418,7 +450,7 @@ static void gen_cmp_double(Node *node) {
  * Самые частые случаи — локальная переменная и число — обходятся без push/pop. */
 
 static bool is_scalar_int(Type *ty) {
-    return is_integer(ty) || ty->kind == TY_PTR;
+    return (is_integer(ty) || ty->kind == TY_PTR) && ty->size <= 4;
 }
 
 /* локальная переменная целого типа или указатель */
@@ -464,6 +496,111 @@ static void gen_to_ecx(Node *n) {
 
 static void gen_branch(Node *node, int label, bool when);
 
+static void push_i64(void) { E("52 50"); depth += 8; }          /* push edx; push eax */
+static void pop_i64_rhs(void) { E("5B 59"); depth -= 8; }      /* pop ebx (lo); pop ecx (hi) */
+
+static void call_i64(const char *name) {
+    E("51 53 52 50");                                           /* push b_hi, b_lo, a_hi, a_lo */
+    E("E8"); sym_ref((char *)name, true);
+    add_esp(16);
+}
+
+static void shl64(void) {
+    int ge = new_label(), done = new_label();
+    E("83 E1 3F 83 F9 20");                                     /* and ecx, 63; cmp ecx, 32 */
+    E("0F 83"); add_fixup(ge);
+    E("0F A5 C2 D3 E0");                                        /* shld edx, eax, cl; shl eax, cl */
+    jmp(done);
+    label_here(ge);
+    E("89 C2 31 C0 83 E9 20 D3 E2");                            /* mov edx, eax; xor eax, eax; sub ecx, 32; shl edx, cl */
+    label_here(done);
+}
+
+static void shr64(int arith) {
+    int ge = new_label(), done = new_label();
+    E("83 E1 3F 83 F9 20");
+    E("0F 83"); add_fixup(ge);
+    E("0F AD D0");                                              /* shrd eax, edx, cl */
+    E(arith ? "D3 FA" : "D3 EA");                               /* sar/shr edx, cl */
+    jmp(done);
+    label_here(ge);
+    E("89 D0");                                                 /* mov eax, edx */
+    if (arith) E("C1 FA 1F"); else E("31 D2");                  /* sar edx, 31 / xor edx, edx */
+    E("83 E9 20");
+    E(arith ? "D3 F8" : "D3 E8");                               /* sar/shr eax, cl */
+    label_here(done);
+}
+
+/* a в edx:eax, b в ecx:ebx. Ответ — снова edx:eax. */
+static void gen_i64_bin(Node *node) {
+    if (node->kind == ND_SHL || node->kind == ND_SHR) {
+        gen_expr(node->rhs);
+        push_eax();
+        gen_expr(node->lhs);
+        pop_ecx();
+        if (node->kind == ND_SHL) shl64();
+        else shr64(!node->ty->is_unsigned);
+        return;
+    }
+    gen_expr(node->rhs);
+    push_i64();
+    gen_expr(node->lhs);
+    pop_i64_rhs();
+    int tru = new_label(), fal = new_label(), done = new_label();
+    bool uns = node->lhs->ty->is_unsigned;
+    switch (node->kind) {
+    case ND_ADD: E("01 D8 11 CA"); return;                      /* add eax, ebx; adc edx, ecx */
+    case ND_SUB: E("29 D8 19 CA"); return;                      /* sub eax, ebx; sbb edx, ecx */
+    case ND_BITAND: E("21 D8 21 CA"); return;
+    case ND_BITOR: E("09 D8 09 CA"); return;
+    case ND_BITXOR: E("31 D8 31 CA"); return;
+    case ND_MUL:
+        E("56 57 50 52");                                       /* push esi edi eax edx (a_lo a_hi) */
+        E("8B 44 24 04");                                       /* mov eax, [esp+4] a_lo */
+        E("F7 E3");                                             /* mul ebx */
+        E("89 C6 89 D7");                                       /* mov esi, eax; mov edi, edx */
+        E("8B 04 24");                                          /* mov eax, [esp] a_hi */
+        E("0F AF C3");                                          /* imul eax, ebx */
+        E("01 C7");                                             /* add edi, eax */
+        E("8B 44 24 04");                                       /* mov eax, [esp+4] a_lo */
+        E("0F AF C1");                                          /* imul eax, ecx */
+        E("01 C7 89 F0 89 FA");                                 /* add edi, eax; mov eax, esi; mov edx, edi */
+        E("83 C4 08 5F 5E");                                    /* add esp, 8; pop edi; pop esi */
+        return;
+    case ND_DIV: case ND_MOD:
+        call_i64(uns ? (node->kind == ND_DIV ? "__udivdi3" : "__umoddi3")
+                     : (node->kind == ND_DIV ? "__divdi3" : "__moddi3"));
+        return;
+    case ND_EQ: case ND_NE:
+        E("39 CA");                                             /* cmp edx, ecx */
+        E("0F 85"); add_fixup(fal);
+        E("39 D8");                                             /* cmp eax, ebx */
+        E("0F 85"); add_fixup(fal);
+        mov_eax_imm(1); jmp(done);
+        label_here(fal); mov_eax_imm(0);
+        label_here(done);
+        if (node->kind == ND_NE) E("83 F0 01");
+        E("31 D2");
+        return;
+    case ND_LT: case ND_LE:
+        E("39 CA");                                             /* cmp edx, ecx */
+        if (uns) {
+            E("0F 82"); add_fixup(tru);                         /* jb tru */
+            E("0F 87"); add_fixup(fal);                         /* ja fal */
+        } else {
+            E("0F 8C"); add_fixup(tru);                         /* jl tru */
+            E("0F 8F"); add_fixup(fal);                         /* jg fal */
+        }
+        E("39 D8");                                             /* cmp eax, ebx */
+        E(node->kind == ND_LT ? "0F 82" : "0F 86"); add_fixup(tru); /* jb / jbe */
+        label_here(fal); mov_eax_imm(0); jmp(done);
+        label_here(tru); mov_eax_imm(1);
+        label_here(done); E("31 D2");
+        return;
+    default: error_tok(node->tok, "invalid expression");
+    }
+}
+
 static void gen_expr(Node *node) {
     switch (node->kind) {
     case ND_NULL_EXPR: return;
@@ -471,6 +608,7 @@ static void gen_expr(Node *node) {
     case ND_NEG:
         gen_expr(node->lhs);
         if (is_flonum(node->ty)) E("D9 E0");                    /* fchs */
+        else if (node->ty->kind == TY_LONGLONG) E("F7 D8 83 D2 00 F7 DA"); /* neg eax; adc edx, 0; neg edx */
         else E("F7 D8");                                        /* neg eax */
         return;
     case ND_VAR:
@@ -547,6 +685,7 @@ static void gen_expr(Node *node) {
     case ND_BITNOT:
         gen_expr(node->lhs);
         E("F7 D0");
+        if (node->ty->kind == TY_LONGLONG) E("F7 D2");          /* not edx */
         return;
     case ND_LOGAND: {
         int lfalse = new_label(), lend = new_label();
@@ -584,6 +723,7 @@ static void gen_expr(Node *node) {
     }
 
     /* двухместные операции */
+    if (node->lhs->ty->kind == TY_LONGLONG) { gen_i64_bin(node); return; }
     if (is_flonum(node->lhs->ty)) {
         if (node->kind == ND_EQ || node->kind == ND_NE || node->kind == ND_LT || node->kind == ND_LE) {
             gen_cmp_double(node);
@@ -656,7 +796,7 @@ static void gen_branch(Node *node, int label, bool when) {
         else { int skip = new_label(); gen_branch(node->lhs, skip, true); gen_branch(node->rhs, label, false); label_here(skip); }
         return;
     case ND_EQ: case ND_NE: case ND_LT: case ND_LE:
-        if (is_flonum(node->lhs->ty)) break;
+        if (is_flonum(node->lhs->ty) || node->lhs->ty->kind == TY_LONGLONG) break;
         if (is_simple(node->rhs)) { gen_expr(node->lhs); gen_to_ecx(node->rhs); }
         else { gen_expr(node->rhs); push_eax(); gen_expr(node->lhs); pop_ecx(); }
         E("39 C8");                                             /* cmp eax, ecx */
@@ -720,6 +860,21 @@ static void gen_stmt(Node *node) {
     case ND_SWITCH:
         gen_expr(node->cond);
         if (is_flonum(node->cond->ty)) error_tok(node->tok, "switch on a floating value");
+        if (node->cond->ty->kind == TY_LONGLONG) {
+            for (Node *n = node->case_next; n; n = n->case_next) {
+                int skip = new_label();
+                E("3D"); imm32((unsigned)n->case_begin);        /* cmp eax, lo */
+                jne(skip);
+                E("81 FA"); imm32(n->case_begin < 0 ? ~0u : 0); /* cmp edx, hi */
+                je(n->case_label);
+                label_here(skip);
+            }
+            if (node->default_case) jmp(node->default_case->case_label);
+            jmp(node->brk_label);
+            gen_stmt(node->then);
+            label_here(node->brk_label);
+            return;
+        }
         for (Node *n = node->case_next; n; n = n->case_next) {
             if (n->case_begin == n->case_end) {
                 E("3D"); imm32(n->case_begin);                  /* cmp eax, imm */
@@ -875,8 +1030,14 @@ static void write_file(const char *path, Buf *b) {
 
 void codegen(Obj *prog, const char *out_path) {
     build_symtab(prog);
+    mark_live("__libc_start", NULL);
     mark_live("main", NULL);
     mark_live("exit", NULL);
+    /* Деление long long зовётся из генератора, до разметки живых функций этого не видно. */
+    if (sym_find("__divdi3")) mark_live("__divdi3", NULL);
+    if (sym_find("__udivdi3")) mark_live("__udivdi3", NULL);
+    if (sym_find("__moddi3")) mark_live("__moddi3", NULL);
+    if (sym_find("__umoddi3")) mark_live("__umoddi3", NULL);
 
     /* место под заголовки ELF: 52 + 2*32 = 116 байт, код с 0x80 */
     for (int i = 0; i < 0x80; i++) buf_byte(&text, 0);
@@ -886,8 +1047,7 @@ void codegen(Obj *prog, const char *out_path) {
     } else {
         E("FF 74 24 08 FF 74 24 08");                           /* ядро: _start(argc, argv) */
     }
-    E("E8"); sym_ref("main", true);
-    E("50 E8"); sym_ref("exit", true);
+    E("E8"); sym_ref("__libc_start", true);
     E("EB FE");
 
     /* код всех нужных функций */

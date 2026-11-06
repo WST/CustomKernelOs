@@ -250,7 +250,7 @@ int file_read(struct file *f, void *buf, u32 len) {
     case FILE_SOCKET:  return sock_read(f->sock, buf, len);
     case FILE_PTY_MASTER: case FILE_PTY_SLAVE: return pty_read(f, buf, len);
     case FILE_DISK: {
-        if (f->mode != 0) return -EBADF;
+        if (!(f->mode & FMODE_READ)) return -EBADF;
         int r = fs_read(f->ino, f->off, buf, len);
         if (r > 0) f->off += r;
         return r < 0 ? -EIO : r;
@@ -266,11 +266,28 @@ int file_write(struct file *f, const void *buf, u32 len, bool is_stderr) {
     case FILE_SOCKET:  return sock_write(f->sock, buf, len);
     case FILE_PTY_MASTER: case FILE_PTY_SLAVE: return pty_write(f, buf, len);
     case FILE_DISK: {
-        if (f->mode == 0) return -EBADF;
+        if (!(f->mode & FMODE_WRITE)) return -EBADF;
+        if (f->mode & FMODE_APPEND) {
+            struct fs_stat st;
+            if (fs_stat(f->ino, &st)) return -EIO;
+            f->off = st.size;
+        }
         int r = fs_write(f->ino, f->off, buf, len);
         if (r > 0) f->off += r;
         return r == FS_ENOSPC ? -ENOSPC : r == FS_EFBIG ? -EFBIG : r < 0 ? -EIO : r;
     }
     }
     return -EBADF;
+}
+
+int file_lseek(struct file *f, int off, int whence) {
+    if (f->type != FILE_DISK) return -ESPIPE;
+    struct fs_stat st;
+    if (fs_stat(f->ino, &st)) return -EIO;
+    int base = whence == 0 ? 0 : whence == 1 ? (int)f->off : whence == 2 ? (int)st.size : -1;
+    if (base < 0) return -EINVAL;
+    int next = base + off;
+    if (next < 0) return -EINVAL;
+    f->off = (u32)next;
+    return next;
 }

@@ -4,12 +4,21 @@
 int main(int argc, char **argv) {
     if (argc < 2) { dprintf(STDERR, "usage: time command [args...]\n"); return 2; }
     char path[128];
-    if (strchr(argv[1], '/')) snprintf(path, sizeof(path), "%s", argv[1]);
-    else snprintf(path, sizeof(path), "/bin/%s", argv[1]);
     unsigned start = ticks();
     int pid = fork();
     if (pid == 0) {
-        int r = exec(path, argv + 1);
+        int r;
+        if (strchr(argv[1], '/')) {
+            snprintf(path, sizeof(path), "%s", argv[1]);
+            r = exec(path, argv + 1);
+        } else {
+            snprintf(path, sizeof(path), "/bin/%s", argv[1]);
+            r = exec(path, argv + 1);
+            if (r == -ENOENT) {
+                snprintf(path, sizeof(path), "/ext/bin/%s", argv[1]);
+                r = exec(path, argv + 1);
+            }
+        }
         dprintf(STDERR, "time: %s: %s\n", argv[1], strerror(-r));
         exit(127);
     }

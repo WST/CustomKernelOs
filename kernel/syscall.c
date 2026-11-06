@@ -116,26 +116,36 @@ static int sys_read(u32 fd, u32 buf, u32 len) {
     return file_read(f, (void *)buf, len);
 }
 
-/* mode: 0 — чтение, 1 — запись (создать/обнулить), 2 — дозапись (создать) */
-static int sys_open_impl(u32 upath, u32 mode) {
+/* flags — как O_* в Linux i386: младшие 2 бита это доступ, дальше O_CREAT/EXCL/TRUNC/APPEND. */
+static int sys_open_impl(u32 upath, u32 flags) {
     struct task *t = task_current();
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
-    if (mode > 2) return -EINVAL;
+    u32 acc = flags & 3;
+    if (acc > 2) return -EINVAL;
+    bool want_write = acc != 0;
+    bool want_read = acc != 1;
+    bool creat = (flags & 0100) != 0;
+    bool excl = (flags & 0200) != 0;
+    bool trunc = (flags & 01000) != 0;
+    bool append = (flags & 02000) != 0;
 
     u32 ino;
     struct fs_stat st;
     int r = fs_resolve(t->cwd, path, &ino);
-    if (r == FS_ENOENT && mode != 0) r = fs_create(t->cwd, path, FS_TYPE_FILE, &ino);
+    bool existed = r == 0;
+    if (r == FS_ENOENT && creat && want_write) r = fs_create(t->cwd, path, FS_TYPE_FILE, &ino);
     if (r) return fs_errno(r);
     if (account_private(ino)) return -EPERM;
     if ((r = fs_stat(ino, &st))) return fs_errno(r);
-    if (st.type == FS_TYPE_BLOCK && (!t->authenticated || t->uid!=0)) return -EPERM;
+    if (st.type == FS_TYPE_BLOCK && (!t->authenticated || t->uid != 0)) return -EPERM;
     if (st.type == FS_TYPE_DIR) return -EISDIR;
-    if (st.type == FS_TYPE_BLOCK && mode != 0) return -30;
-    if (mode == 1 && (r = fs_truncate(ino))) return fs_errno(r);
+    if (st.type == FS_TYPE_BLOCK && want_write) return -EROFS;
+    if (excl && creat && existed) return -EEXIST;
+    if (trunc && want_write && (r = fs_truncate(ino))) return fs_errno(r);
 
-    struct file *f = file_open_disk(ino, mode, mode == 2 ? st.size : 0);
+    u8 mode = (want_read ? FMODE_READ : 0) | (want_write ? FMODE_WRITE : 0) | (append ? FMODE_APPEND : 0);
+    struct file *f = file_open_disk(ino, mode, 0);
     if (!f) return -ENOMEM;
     int fd = alloc_fd(f);
     if (fd < 0) file_close(f);
@@ -154,6 +164,31 @@ static int sys_close(u32 fd) {
     if (!f) return -EBADF;
     task_current()->fds[fd] = NULL;
     file_close(f);
+    return 0;
+}
+
+static int sys_lseek(u32 fd, u32 off, u32 whence) {
+    struct file *f = get_fd(fd);
+    if (!f) return -EBADF;
+    return file_lseek(f, (int)off, (int)whence);
+}
+
+static int sys_fstat(u32 fd, u32 ust) {
+    struct file *f = get_fd(fd);
+    if (!f) return -EBADF;
+    if (!user_buf_ok(ust, 8, true)) return -EFAULT;
+    u32 mode = 0, size = 0;
+    if (f->type == FILE_DISK) {
+        struct fs_stat st;
+        if (fs_stat(f->ino, &st)) return -EIO;
+        size = st.size;
+        if (st.type == FS_TYPE_DIR) mode = 0040000;
+        else if (st.type == FS_TYPE_FILE) mode = 0100000;
+    } else if (f->type == FILE_CONSOLE || f->type == FILE_PTY_SLAVE) {
+        mode = 0020000;                                 /* S_IFCHR: isatty */
+    }
+    ((u32 *)ust)[0] = mode;
+    ((u32 *)ust)[1] = size;
     return 0;
 }
 
@@ -283,6 +318,12 @@ static int sys_unlink(u32 upath) {
     u32 ino;
     if(!fs_resolve(task_current()->cwd,path,&ino) && account_private(ino)) return -EPERM;
     return fs_errno(fs_remove(task_current()->cwd, path));
+}
+
+static int sys_rename(u32 uold, u32 unew) {
+    char oldp[PATH_MAX], newp[PATH_MAX];
+    if (!user_str(uold, oldp, sizeof(oldp)) || !user_str(unew, newp, sizeof(newp))) return -EFAULT;
+    return fs_errno(fs_rename(task_current()->cwd, oldp, newp));
 }
 
 /* ---------------------------------------------------------------- процессы */
@@ -679,6 +720,8 @@ void syscall_dispatch(struct regs *r) {
         break;
     }
     case SYS_CLOSE:   ret = sys_close(a); break;
+    case SYS_LSEEK:   ret = sys_lseek(a, b, c); break;
+    case SYS_FSTAT:   ret = sys_fstat(a, b); break;
     case SYS_SBRK:    ret = (int)sys_sbrk((i32)a); break;
     case SYS_SLEEP:   sleep_ms(a); ret = 0; break;
     case SYS_GETPID:  ret = t->id; break;
@@ -702,6 +745,7 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_MKDIR:   ret = sys_mkdir(a); break;
     case SYS_UNLINK:  ret = sys_unlink(a); break;
+    case SYS_RENAME:  ret = sys_rename(a, b); break;
     case SYS_PS:      ret = sys_ps(a, b); break;
     case SYS_GETPPID: ret = t->parent; break;
     case SYS_TTYMODE: {

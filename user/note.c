@@ -11,7 +11,7 @@ int main(int argc, char **argv) {
         close(fd);
         return 0;
     }
-    int fd = open("/notes.txt", O_APPEND);
+    int fd = open("/notes.txt", O_WRONLY | O_CREAT | O_APPEND);
     if (fd < 0) { dprintf(STDERR, "note: cannot open /notes.txt\n"); return 1; }
     char line[256];
     line[0] = 0;

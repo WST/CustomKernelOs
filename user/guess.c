@@ -9,7 +9,7 @@ int main(void) {
     printf("I'm thinking of a number between 1 and 100. Ctrl+C to give up.\n");
     for (;;) {
         printf("Your guess: ");
-        if (getline(line, sizeof(line)) < 0) return 1;
+        if (getln(line, sizeof(line)) < 0) return 1;
         if (!isdigit(line[0])) { printf("  please type a number\n"); continue; }
         int g = atoi(line);
         tries++;

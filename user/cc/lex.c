@@ -154,6 +154,7 @@ static Token *read_char(char *start, int line) {
     if (*p != '\'') error("%s:%d: unclosed char literal", cur_file->name, line);
     Token *t = new_token(TK_NUM, start, p + 1, line);
     t->val = (signed char)c;
+    t->ival = (unsigned long long)(long long)t->val;
     t->ty = ty_int;
     return t;
 }
@@ -165,31 +166,33 @@ static bool convert_int(Token *tok) {
     if ((p[0] == '0') && (p[1] == 'x' || p[1] == 'X') && is_hex(p[2])) { p += 2; base = 16; }
     else if (p[0] == '0' && (p[1] == 'b' || p[1] == 'B') && (p[2] == '0' || p[2] == '1')) { p += 2; base = 2; }
     else if (p[0] == '0') base = 8;
-    unsigned v = 0;
-    bool overflow = false;
+    unsigned long long v = 0;
     for (;; p++) {
         int d;
         if (isdigit(*p)) d = *p - '0';
         else if (base == 16 && is_hex(*p)) d = from_hex(*p);
         else break;
         if (d >= (int)base) return false;
-        unsigned nv = v * base + d;
-        if (nv / base != v && base == 10) overflow = true;
-        v = nv;
+        v = v * base + (unsigned)d;
     }
-    bool u = false, l = false;
+    bool uns = false;
+    int nL = 0;
     for (;; p++) {
-        if (*p == 'u' || *p == 'U') u = true;
-        else if (*p == 'l' || *p == 'L') l = true;
+        if (*p == 'u' || *p == 'U') uns = true;
+        else if (*p == 'l' || *p == 'L') nL++;
         else break;
     }
     if (p != tok->loc + tok->len) return false;
-    (void)l; (void)overflow;
-    Type *ty = ty_int;
-    if (u || (v > 0x7FFFFFFFu && base != 10)) ty = ty_uint;
-    else if (v > 0x7FFFFFFFu) ty = ty_uint;
+    Type *ty;
+    if (nL >= 2) ty = uns || v > 0x7FFFFFFFFFFFFFFFull ? ty_ullong : ty_llong;
+    else if (uns) ty = v > 0xFFFFFFFFu ? ty_ullong : ty_uint;
+    else if (v > 0x7FFFFFFFFFFFFFFFull) ty = ty_ullong;
+    else if (v > 0xFFFFFFFFu) ty = ty_llong;
+    else if (v > 0x7FFFFFFFu) ty = base == 10 ? ty_llong : ty_uint;
+    else ty = ty_int;
     tok->kind = TK_NUM;
     tok->val = (int)v;
+    tok->ival = v;
     tok->ty = ty;
     return true;
 }
@@ -258,6 +261,14 @@ Token *tokenize(File *file) {
                 else break;
             }
             cur = cur->next = new_token(TK_PP_NUM, q, p, line);
+            continue;
+        }
+        if (*p == 'L' && p[1] == '\'') {
+            Token *t = read_char(p + 1, line);
+            t->len += 1;
+            t->loc = p;
+            cur = cur->next = t;
+            p += t->len;
             continue;
         }
         if (*p == '"') { cur = cur->next = read_string(p, line); p += cur->len; continue; }
