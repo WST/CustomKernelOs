@@ -43,7 +43,7 @@ int sockctl(int fd, int op, unsigned arg) { (void)fd; (void)op; (void)arg; retur
 const char *strerror(int e) { (void)e; return "error"; }
 
 /* файлы MyOS -> файлы Linux (только для file:/) */
-int stat(const char *path, struct dirent_info *out) {
+int dirstat(const char *path, struct dirent_info *out) {
     void *f = fopen(path, "rb");
     if (!f) return -ENOENT;
     fclose(f);
@@ -51,7 +51,7 @@ int stat(const char *path, struct dirent_info *out) {
     out->type = 1;
     return 0;
 }
-int readdir(const char *path, int index, struct dirent_info *out) { (void)path; (void)index; (void)out; return 0; }
+int dirread(const char *path, int index, struct dirent_info *out) { (void)path; (void)index; (void)out; return 0; }
 
 /* -------- рабочий стол: одно окно-буфер, сообщения — очередь */
 static struct msg q[64];

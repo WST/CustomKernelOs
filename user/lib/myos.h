@@ -44,7 +44,7 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_LSEEK, SYS_FSTAT
+    SYS_LSEEK, SYS_FSTAT, SYS_RENAME
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
@@ -76,6 +76,7 @@ extern int errno;
 #define EFBIG 27
 #define ENOSPC 28
 #define EPIPE 32
+#define ENAMETOOLONG 36
 #define ENOTEMPTY 39
 #define EMSGSIZE 90
 #define EADDRINUSE 98
@@ -154,11 +155,11 @@ int   pipe(int fds[2]);                   /* fds[0] — читать, fds[1] —
 int   dup2(int oldfd, int newfd);
 int   chdir(const char *path);
 int   getcwd(char *buf, size_t len);
-int   readdir(const char *path, int index, struct dirent_info *out);  /* 1 есть, 0 конец */
+int   dirread(const char *path, int index, struct dirent_info *out);  /* 1 есть, 0 конец */
 int   mkdir(const char *path);
 int   unlink(const char *path);
 int   ps(struct proc_info *buf, int max);
-int   stat(const char *path, struct dirent_info *out);   /* 0 или -errno */
+int   dirstat(const char *path, struct dirent_info *out);   /* 0 или -errno */
 
 /* ---- терминал ---- */
 int  term_cols(void);           /* размер терминала: 128x48 в графике, 80x25 в тексте */

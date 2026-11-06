@@ -26,7 +26,7 @@ static int cmp_ent(struct dirent_info *a, struct dirent_info *b) {
 static void read_dir(void) {
     n_ents = 0;
     struct dirent_info e;
-    for (int i = 0; n_ents < 256 && readdir(cwd, i, &e) == 1; i++) {
+    for (int i = 0; n_ents < 256 && dirread(cwd, i, &e) == 1; i++) {
         if (!strcmp(e.name, ".") || !strcmp(e.name, "..")) continue;
         int j = n_ents++;
         while (j > 0 && cmp_ent(&e, &ents[j - 1]) < 0) { ents[j] = ents[j - 1]; j--; }

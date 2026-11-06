@@ -5,6 +5,8 @@
 #include "unistd.h"
 #include "time.h"
 #include "sys/stat.h"
+#include "dirent.h"
+#include "libgen.h"
 #include "wchar.h"
 #include "util.h"
 
@@ -30,6 +32,56 @@ void _start(int argc, char **argv) {
 #if defined(__LINUX_TEST__)
 /* Только для проверки cc на Linux: те же вызовы, но в номерах Linux */
 static int linux_brk;
+
+/* Поиндексное чтение каталога через getdents64. Точки пропускаются, как в ядре. */
+static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
+    unsigned char buf[1024];
+    int fd = __syscall(5, (int)path, 0, 0);
+    int seen = 0;
+    if (fd < 0) return fd;
+    for (;;) {
+        int n = __syscall(220, fd, (int)buf, (int)sizeof(buf));
+        int off = 0;
+        if (n < 0) { __syscall(6, fd); return n; }
+        if (n == 0) { __syscall(6, fd); return 0; }
+        while (off + 19 < n) {
+            unsigned short reclen;
+            unsigned char typ;
+            char *name;
+            int i;
+            memcpy(&reclen, buf + off + 16, 2);
+            if (reclen < 19 || off + reclen > n) { __syscall(6, fd); return -EIO; }
+            typ = buf[off + 18];
+            name = (char *)(buf + off + 19);
+            off += reclen;
+            if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
+            if (seen++ != index) continue;
+            memset(o, 0, sizeof *o);
+            for (i = 0; i < 27 && name[i]; i++) o->name[i] = name[i];
+            if (typ == 4) o->type = 2;
+            else if (typ == 2) o->type = 4;
+            else if (typ == 6) o->type = 3;
+            else o->type = 1;
+            {
+                char full[192];
+                unsigned char st[64];
+                unsigned mode;
+                if (snprintf(full, sizeof full, "%s/%s", path, o->name) < (int)sizeof full &&
+                    __syscall(106, (int)full, (int)st, 0) == 0) {
+                    mode = *(unsigned short *)(st + 8);
+                    o->size = *(unsigned *)(st + 20);
+                    if ((mode & 0170000) == 0040000) o->type = 2;
+                    else if ((mode & 0170000) == 0020000) o->type = 4;
+                    else if ((mode & 0170000) == 0060000) o->type = 3;
+                    else o->type = 1;
+                }
+            }
+            __syscall(6, fd);
+            return 1;
+        }
+    }
+}
+
 static int syscall3(int n, int a, int b, int c) {
     switch (n) {
     case SYS_EXIT:  return __syscall(1, a);
@@ -48,7 +100,13 @@ static int syscall3(int n, int a, int b, int c) {
         return 0;
     }
     case SYS_GETPID: return __syscall(20);
-    case SYS_UNLINK: return __syscall(10, a);
+    case SYS_UNLINK: {
+        int r = __syscall(10, a);
+        if (r == -EISDIR) r = __syscall(40, a);   /* пустой каталог, как unlink в MyOS */
+        return r;
+    }
+    case SYS_MKDIR: return __syscall(39, a, 0755);
+    case SYS_RENAME: return __syscall(38, a, b);
     case SYS_SBRK: {
         if (!linux_brk) linux_brk = __syscall(45, 0);
         int old = linux_brk;
@@ -57,14 +115,23 @@ static int syscall3(int n, int a, int b, int c) {
         return old;
     }
     case SYS_TERMSIZE: return (80 << 16) | 25;
-    case SYS_STAT: {                                /* только «есть ли такой файл» */
-        int fd = __syscall(5, a, 0, 0);
-        if (fd < 0) return fd;
-        __syscall(6, fd);
-        struct dirent_info *o = (struct dirent_info *)b;
-        o->type = 1; o->size = 0;
+    case SYS_STAT: {
+        unsigned char st[64];
+        int r = __syscall(106, a, (int)st, 0);
+        unsigned mode;
+        struct dirent_info *o;
+        if (r < 0) return r;
+        mode = *(unsigned short *)(st + 8);
+        o = (struct dirent_info *)b;
+        memset(o, 0, sizeof *o);
+        o->size = *(unsigned *)(st + 20);
+        if ((mode & 0170000) == 0040000) o->type = 2;
+        else if ((mode & 0170000) == 0020000) o->type = 4;
+        else if ((mode & 0170000) == 0060000) o->type = 3;
+        else o->type = 1;
         return 0;
     }
+    case SYS_READDIR: return linux_dir_at((const char *)a, b, (struct dirent_info *)c);
     default: return -38;
     }
 }
@@ -120,11 +187,11 @@ int   pipe(int fds[2])                           { return syscall3(SYS_PIPE, (in
 int   dup2(int oldfd, int newfd)                 { return syscall3(SYS_DUP2, oldfd, newfd, 0); }
 int   chdir(const char *path)                    { return syscall3(SYS_CHDIR, (int)path, 0, 0); }
 int   getcwd(char *buf, size_t len)              { return syscall3(SYS_GETCWD, (int)buf, len, 0); }
-int   readdir(const char *p, int i, struct dirent_info *o) { return syscall3(SYS_READDIR, (int)p, i, (int)o); }
+int   dirread(const char *p, int i, struct dirent_info *o) { return syscall3(SYS_READDIR, (int)p, i, (int)o); }
 int   mkdir(const char *path)                    { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
 int   unlink(const char *path)                   { return syscall3(SYS_UNLINK, (int)path, 0, 0); }
 int   ps(struct proc_info *buf, int max)         { return syscall3(SYS_PS, (int)buf, max, 0); }
-int   stat(const char *p, struct dirent_info *o) { return syscall3(SYS_STAT, (int)p, (int)o, 0); }
+int   dirstat(const char *p, struct dirent_info *o) { return syscall3(SYS_STAT, (int)p, (int)o, 0); }
 
 /* размер не запоминаем: окно терминала могут растянуть в любой момент */
 int term_cols(void) { return syscall3(SYS_TERMSIZE, 0, 0, 0) >> 16; }
@@ -295,6 +362,7 @@ const char *strerror(int e) {
     case EFBIG:     return "file or filesystem too large";
     case ENOSPC:    return "no space left on disk";
     case EPIPE:     return "broken pipe";
+    case ENAMETOOLONG: return "file name too long";
     case ENOTEMPTY: return "directory not empty";
     case EMSGSIZE:  return "message too long";
     case EADDRINUSE:   return "address already in use";
@@ -1170,6 +1238,101 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
 }
 
 int fstat(int fd, struct stat *st) { return ioerr(syscall3(SYS_FSTAT, fd, (int)st, 0)); }
+
+int stat(const char *path, struct stat *st) {
+    struct dirent_info info;
+    int r = syscall3(SYS_STAT, (int)path, (int)&info, 0);
+    if (r < 0) { errno = -r; return -1; }
+    if (info.type == 2) st->st_mode = S_IFDIR;
+    else if (info.type == 4) st->st_mode = S_IFCHR;
+    else if (info.type == 3) st->st_mode = 0060000;
+    else st->st_mode = S_IFREG;
+    st->st_size = info.size;
+    return 0;
+}
+
+int rename(const char *old, const char *new) {
+    return ioerr(syscall3(SYS_RENAME, (int)old, (int)new, 0));
+}
+
+int remove(const char *path) {
+    return ioerr(syscall3(SYS_UNLINK, (int)path, 0, 0));
+}
+
+struct DIR {
+    char path[128];
+    int index;
+    struct dirent ent;
+};
+
+DIR *opendir(const char *name) {
+    struct dirent_info info;
+    DIR *d;
+    size_t n;
+    int r = syscall3(SYS_STAT, (int)name, (int)&info, 0);
+    if (r < 0) { errno = -r; return NULL; }
+    if (info.type != 2) { errno = ENOTDIR; return NULL; }
+    n = strlen(name);
+    if (n == 0 || n >= 128) { errno = n ? ENAMETOOLONG : ENOENT; return NULL; }
+    d = malloc(sizeof *d);
+    if (!d) { errno = ENOMEM; return NULL; }
+    memcpy(d->path, name, n + 1);
+    d->index = 0;
+    return d;
+}
+
+struct dirent *readdir(DIR *dir) {
+    struct dirent_info info;
+    int r, i;
+    if (!dir) { errno = EBADF; return NULL; }
+    r = syscall3(SYS_READDIR, (int)dir->path, dir->index, (int)&info);
+    if (r == 0) return NULL;
+    if (r < 0) { errno = -r; return NULL; }
+    dir->index++;
+    dir->ent.d_ino = 0;
+    if (info.type == 2) dir->ent.d_type = DT_DIR;
+    else if (info.type == 4) dir->ent.d_type = DT_CHR;
+    else if (info.type == 3) dir->ent.d_type = DT_BLK;
+    else dir->ent.d_type = DT_REG;
+    for (i = 0; i < 255 && info.name[i]; i++) dir->ent.d_name[i] = info.name[i];
+    dir->ent.d_name[i] = 0;
+    return &dir->ent;
+}
+
+int closedir(DIR *dir) {
+    if (!dir) { errno = EBADF; return -1; }
+    free(dir);
+    return 0;
+}
+
+static char *strip_slashes(char *path) {
+    size_t n = strlen(path);
+    while (n > 1 && path[n - 1] == '/') path[--n] = 0;
+    return path;
+}
+
+char *basename(char *path) {
+    char *s;
+    if (!path || !*path) return ".";
+    strip_slashes(path);
+    if (!path[0] || (path[0] == '/' && path[1] == 0)) return path[0] ? path : "/";
+    s = path + strlen(path);
+    while (s > path && s[-1] != '/') s--;
+    return s;
+}
+
+char *dirname(char *path) {
+    char *s;
+    if (!path || !*path) return ".";
+    strip_slashes(path);
+    if (!*path) return "/";
+    s = path + strlen(path);
+    while (s > path && s[-1] != '/') s--;
+    if (s == path) return ".";
+    if (s == path + 1 && path[0] == '/') return "/";
+    s[-1] = 0;
+    return path;
+}
 
 void abort(void) { exit(134); }
 

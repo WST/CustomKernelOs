@@ -139,7 +139,7 @@ static void not_found(int fd, const char *what) {
 
 static void files_page(int fd, const char *path) {     /* path — путь на диске, начинается с '/' */
     struct dirent_info st;
-    if (stat(path, &st) < 0) { not_found(fd, path); return; }
+    if (dirstat(path, &st) < 0) { not_found(fd, path); return; }
     if (st.type == 1) {                                  /* файл — отдаём содержимое */
         int f = open(path, O_READ);
         if (f < 0) { not_found(fd, path); return; }
@@ -160,7 +160,7 @@ static void files_page(int fd, const char *path) {     /* path — путь на
     sb_printf("</h1><table><tr><th>NAME</th><th>SIZE</th></tr>");
     if (strcmp(path, "/")) sb_printf("<tr><td><a href=\"../\">../</a></td><td></td></tr>");
     struct dirent_info e;
-    for (int i = 0; readdir(path, i, &e) == 1; i++) {
+    for (int i = 0; dirread(path, i, &e) == 1; i++) {
         sb_printf("<tr><td><a href=\"/files%s%s", path, slash ? "" : "/");
         sb_html(e.name);
         sb_printf("%s\">", e.type == 2 ? "/" : "");

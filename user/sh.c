@@ -115,7 +115,7 @@ static int glob(const char *word, char **out, int max) {
 
     int n = 0;
     struct dirent_info e;
-    for (int i = 0; n < max && readdir(dir, i, &e) == 1; i++) {
+    for (int i = 0; n < max && dirread(dir, i, &e) == 1; i++) {
         if (!match(pat, e.name)) continue;
         int need = dlen + strlen(e.name) + 1;
         if (glob_used + need > (int)sizeof(glob_pool)) break;
@@ -234,7 +234,7 @@ static int collect(const char *dir, const char *prefix, bool only_bin) {
         for (int i = 0; i < 5; i++)
             if (!strncmp(builtins[i], prefix, plen)) { cand[n] = (char *)builtins[i]; cand_dir[n++] = false; }
     struct dirent_info e;
-    for (int i = 0; n < 64 && readdir(dir, i, &e) == 1; i++) {
+    for (int i = 0; n < 64 && dirread(dir, i, &e) == 1; i++) {
         if (strncmp(e.name, prefix, plen)) continue;
         int l = strlen(e.name) + 1;
         if (used + l > (int)sizeof(cand_pool)) break;
@@ -244,7 +244,7 @@ static int collect(const char *dir, const char *prefix, bool only_bin) {
     }
     /* /ext/bin дополняет /bin, но не перекрывает одноимённую родную команду */
     if (only_bin) {
-        for (int i = 0; n < 64 && readdir("/ext/bin", i, &e) == 1; i++) {
+        for (int i = 0; n < 64 && dirread("/ext/bin", i, &e) == 1; i++) {
             if (strncmp(e.name, prefix, plen)) continue;
             bool seen = false;
             for (int k = 0; k < n; k++) if (!strcmp(cand[k], e.name)) { seen = true; break; }
@@ -437,10 +437,10 @@ static void help(void) {
     printf("Keys: arrows, Home/End, Up/Down = history, Tab = complete, Ctrl+L/U/K/W, Ctrl+D = exit\n");
     printf("Programs in /bin:");
     struct dirent_info e;
-    for (int i = 0; readdir("/bin", i, &e) == 1; i++) printf(" %s", e.name);
+    for (int i = 0; dirread("/bin", i, &e) == 1; i++) printf(" %s", e.name);
     printf("\nPrograms in /ext/bin:");
     int ext = 0;
-    for (int i = 0; readdir("/ext/bin", i, &e) == 1; i++) { printf(" %s", e.name); ext++; }
+    for (int i = 0; dirread("/ext/bin", i, &e) == 1; i++) { printf(" %s", e.name); ext++; }
     if (!ext) printf(" (none)");
     printf("\nSame name: /bin wins. Run the other copy as /ext/bin/name.\n");
 }
@@ -522,7 +522,7 @@ static void child(struct cmd *c, int in_fd, int out_fd, int pgid) {
         }
     }
     struct dirent_info st;
-    if (r == -ENOENT && !strchr(c->argv[0], '/') && stat(c->argv[0], &st) == 0 && st.type == 1)
+    if (r == -ENOENT && !strchr(c->argv[0], '/') && dirstat(c->argv[0], &st) == 0 && st.type == 1)
         dprintf(STDERR, "sh: %s: command not found (the file is here - run it as ./%s)\n", c->argv[0], c->argv[0]);
     else if (r == -ENOENT) dprintf(STDERR, "sh: %s: command not found\n", c->argv[0]);
     else dprintf(STDERR, "sh: %s: %s\n", c->argv[0], strerror(-r));

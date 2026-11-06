@@ -44,4 +44,6 @@ int vsprintf(char *buf, const char *fmt, va_list ap);
 ssize_t getline(char **line, size_t *n, FILE *stream);
 int setvbuf(FILE *f, char *buf, int mode, size_t size);
 void setbuf(FILE *f, char *buf);
+int rename(const char *old, const char *new);
+int remove(const char *path);
 #endif

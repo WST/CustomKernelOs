@@ -91,7 +91,7 @@ char *read_file(const char *path, int *out_len) {
     int fd = open(path, O_RDONLY);
 #else
     struct dirent_info st;
-    if (stat(path, &st) < 0 || st.type != 1) return NULL;
+    if (dirstat(path, &st) < 0 || st.type != 1) return NULL;
     int fd = open(path, O_READ);
 #endif
     if (fd < 0) return NULL;

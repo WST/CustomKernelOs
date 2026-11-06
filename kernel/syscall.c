@@ -320,6 +320,12 @@ static int sys_unlink(u32 upath) {
     return fs_errno(fs_remove(task_current()->cwd, path));
 }
 
+static int sys_rename(u32 uold, u32 unew) {
+    char oldp[PATH_MAX], newp[PATH_MAX];
+    if (!user_str(uold, oldp, sizeof(oldp)) || !user_str(unew, newp, sizeof(newp))) return -EFAULT;
+    return fs_errno(fs_rename(task_current()->cwd, oldp, newp));
+}
+
 /* ---------------------------------------------------------------- процессы */
 
 static int sys_exec(struct regs *r, u32 upath, u32 uargv) {
@@ -739,6 +745,7 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_MKDIR:   ret = sys_mkdir(a); break;
     case SYS_UNLINK:  ret = sys_unlink(a); break;
+    case SYS_RENAME:  ret = sys_rename(a, b); break;
     case SYS_PS:      ret = sys_ps(a, b); break;
     case SYS_GETPPID: ret = t->parent; break;
     case SYS_TTYMODE: {

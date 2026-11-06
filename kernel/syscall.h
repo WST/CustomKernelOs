@@ -72,6 +72,7 @@ enum {
     SYS_ACCOUNT,
     SYS_LSEEK,          /* lseek(fd, offset, whence) -> новое смещение */
     SYS_FSTAT,          /* fstat(fd, &{mode, size}) */
+    SYS_RENAME,         /* rename(old, new) */
     SYS_COUNT
 };
 

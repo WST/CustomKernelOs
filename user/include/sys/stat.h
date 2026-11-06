@@ -16,4 +16,5 @@ struct stat {
 #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 
 int fstat(int fd, struct stat *st);
+int stat(const char *path, struct stat *st);
 #endif

@@ -188,7 +188,7 @@ static void name_key(int k) {
         editing_name = false;
         if (path[0]) {
             struct dirent_info st;
-            if (stat(path, &st) == 0 && st.type == 1 && !modified) load(path);   /* существующий файл — открыть */
+            if (dirstat(path, &st) == 0 && st.type == 1 && !modified) load(path);   /* существующий файл — открыть */
             else save();
             set_title();
         }
@@ -310,7 +310,7 @@ int main(int argc, char **argv) {
         snprintf(path, sizeof(path), "%s", argv[1]);
         name_len = strlen(path);
         struct dirent_info st;
-        if (stat(path, &st) == 0) load(path);
+        if (dirstat(path, &st) == 0) load(path);
         else strcpy(status_msg, "new file");
     }
     set_title();
