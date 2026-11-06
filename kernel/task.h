@@ -40,6 +40,8 @@ struct task {
     u32   user_pages;               /* сколько страниц RAM занимает программа */
     u32   cwd;                      /* текущий каталог (inode) */
     struct file *fds[MAX_FDS];      /* открытые файлы (общие объекты, см. file.h) */
+    u32 uid;
+    bool authenticated;
     u32   parent;                   /* id родителя (0 — ядро/сирота) */
     u32   pgid;                     /* группа процессов: Ctrl+C убивает всю группу */
     int   exit_code;

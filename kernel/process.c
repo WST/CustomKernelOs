@@ -212,6 +212,8 @@ int proc_fork(struct regs *r) {
     t->brk_start  = parent->brk_start;
     t->brk        = parent->brk;
     t->user_pages = pages;
+    t->uid = parent->uid;
+    t->authenticated = parent->authenticated;
     t->cwd        = parent->cwd;
     t->parent     = parent->id;
     t->pgid       = parent->pgid;

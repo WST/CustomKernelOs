@@ -69,6 +69,7 @@ enum {
     SYS_BLOCKINFO,
     SYS_MKFS,
     SYS_PARTCTL,
+    SYS_ACCOUNT,
     SYS_COUNT
 };
 

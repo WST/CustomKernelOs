@@ -28,6 +28,7 @@
 #include "e1000.h"
 #include "display.h"
 #include "block.h"
+#include "account.h"
 
 #define SBRK_LIMIT SHM_BASE         /* выше — общая память (ipc.c) и стек */
 #define PATH_MAX   128
@@ -127,7 +128,9 @@ static int sys_open_impl(u32 upath, u32 mode) {
     int r = fs_resolve(t->cwd, path, &ino);
     if (r == FS_ENOENT && mode != 0) r = fs_create(t->cwd, path, FS_TYPE_FILE, &ino);
     if (r) return fs_errno(r);
+    if (account_private(ino)) return -EPERM;
     if ((r = fs_stat(ino, &st))) return fs_errno(r);
+    if (st.type == FS_TYPE_BLOCK && (!t->authenticated || t->uid!=0)) return -EPERM;
     if (st.type == FS_TYPE_DIR) return -EISDIR;
     if (st.type == FS_TYPE_BLOCK && mode != 0) return -30;
     if (mode == 1 && (r = fs_truncate(ino))) return fs_errno(r);
@@ -277,6 +280,8 @@ static int sys_mkdir(u32 upath) {
 static int sys_unlink(u32 upath) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    u32 ino;
+    if(!fs_resolve(task_current()->cwd,path,&ino) && account_private(ino)) return -EPERM;
     return fs_errno(fs_remove(task_current()->cwd, path));
 }
 
@@ -628,16 +633,19 @@ void syscall_dispatch(struct regs *r) {
     case SYS_READ:    ret = sys_read(a, b, c); break;
     case SYS_OPEN:    ret = sys_open(a, b); break;
     case SYS_MOUNT: {
+        if(!t->authenticated || t->uid!=0) {ret=-EPERM;break;}
         char device[128],target[128];
         ret = !user_str(a,device,sizeof(device)) || !user_str(b,target,sizeof(target)) ? -EFAULT : fs_errno(fs_mount(t->cwd,device,target));
         break;
     }
     case SYS_MKFS: {
+        if(!t->authenticated || t->uid!=0) {ret=-EPERM;break;}
         char device[128];
         ret=!user_str(a,device,sizeof(device)) ? -EFAULT : fs_errno(fs_mkfs(device));
         break;
     }
     case SYS_PARTCTL: {
+        if(!t->authenticated || t->uid!=0) {ret=-EPERM;break;}
         char device[128]; u32 args[3];
         if(!user_str(a,device,sizeof(device)) || !user_buf_ok(c,sizeof(args),false)) { ret=-EFAULT; break; }
         memcpy(args,(const void*)c,sizeof(args));
@@ -658,6 +666,16 @@ void syscall_dispatch(struct regs *r) {
         const struct block_device *dev=block_get(block_at(a));
         ret=0;
         if(dev) { memset(&info,0,sizeof(info)); memcpy(info.name,dev->name,12); info.start=dev->start; info.sectors=dev->sectors; info.partition=dev->partition; memcpy((void*)b,&info,sizeof(info)); ret=1; }
+        break;
+    }
+    case SYS_ACCOUNT: {
+        char name[24]={0}, password[128]={0};
+        if ((b && a!=5 && !user_str(b,name,sizeof(name))) || (c && !user_str(c,password,sizeof(password)))) ret=-EFAULT;
+        else if(a==5) {
+            if(!user_buf_ok(b,24,true)) ret=-EFAULT;
+            else ret=account_name((char *)b);
+        } else ret=account_ctl(a,name,password);
+        volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;
     }
     case SYS_CLOSE:   ret = sys_close(a); break;

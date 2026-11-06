@@ -743,3 +743,5 @@ int service_find(const char *name)              { return syscall3(SYS_SERVICE, 2
 int get_time(struct datetime *t)                { return syscall3(SYS_TIME, (int)t, 0, 0); }
 
 
+
+int account(int op,const char *name,const char *password) { return syscall3(SYS_ACCOUNT,op,(int)name,(int)password); }

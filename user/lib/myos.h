@@ -41,7 +41,7 @@ enum {
     SYS_SHM_UNMAP, SYS_MSG_SEND, SYS_MSG_RECV, SYS_SERVICE, SYS_TIME,
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
-    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL
+    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
@@ -108,6 +108,7 @@ int   read(int fd, void *buf, size_t len);
 int   open(const char *path, int mode);
 int   close(int fd);
 struct block_info { char name[12]; unsigned start,sectors,partition; };
+int account(int op, const char *name, const char *password);
 int mount(const char *device,const char *target);
 int mountinfo(unsigned index,char device[128],char target[128]);
 int blockinfo(unsigned index,struct block_info *info);

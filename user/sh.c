@@ -33,6 +33,7 @@ struct cmd {
 
 static int  last_status;
 static bool interactive = true;
+static bool term_mode;
 static char status_str[12];
 
 /* ------------------------------------------------------------ разбор строки */
@@ -372,8 +373,52 @@ static int edit_line(const char *prompt, char *buf, int max) {
 
 /* ------------------------------------------------------------ встроенные */
 
+
+/* Passwords bypass readline/history and are never echoed. */
+static char username[24];
+static int credential(const char *prompt,char *out,int max,bool secret) {
+    printf("%s",prompt);int old=ttymode(TTY_RAW|TTY_NOSIG),n=0,overflow=0;
+    for(;;) {
+        char c;int r=read(STDIN,&c,1);
+        if(r<=0 || c==3 || c==4) {ttymode(old);printf("\n");memset(out,0,max);return -1;}
+        if(c=='\n'||c=='\r') break;
+        if(c==8||c==127) {if(overflow) overflow--;else if(n) {n--;if(!secret) printf("\b \b");}continue;}
+        if((unsigned char)c<32 || c==127) continue;
+        if(n<max-1 && !overflow) {out[n++]=c;if(!secret) write(STDOUT,&c,1);} else overflow++;
+    }
+    ttymode(old);printf("\n");out[n]=0;
+    if(overflow) {memset(out,0,max);printf("Input too long.\n");return -1;}return n;
+}
+static void clear_password(char *p,int n) {volatile char *v=p;while(n--) *v++=0;}
+static int new_password(const char *name,int op) {
+    char a[128]={0},b[128]={0};int r=-1;
+    if(credential("New password: ",a,sizeof(a),true)>0 &&
+       credential("Confirm password: ",b,sizeof(b),true)>0) {
+        if(strcmp(a,b)) printf("Passwords do not match.\n");
+        else {r=account(op,name,a);if(r<0) printf("Account: %s\n",strerror(-r));}
+    } else printf("Password must not be empty.\n");
+    clear_password(a,sizeof(a));clear_password(b,sizeof(b));return r;
+}
+static int login_prompt(void) {
+    int r=account(0,0,0);
+    if(r<0) {printf("Cannot load accounts: %s\n",strerror(-r));return -1;}
+    while(r==1) {
+        printf("First boot: set the root password.\n");
+        if(new_password("root",3)==0) break;
+    }
+    for(;;) {
+        char pw[128]={0};
+        if(credential("Login [root]: ",username,sizeof(username),false)<0) return -1;
+        if(!username[0]) strcpy(username,"root");
+        if(credential("Password: ",pw,sizeof(pw),true)<0) return -1;
+        r=account(1,username,pw);clear_password(pw,sizeof(pw));
+        if(!r) {hist_n=0;memset(history,0,sizeof(history));chdir("/");return 0;}
+        printf("Login incorrect.\n");sleep_ms(1000);
+    }
+}
+
 static void help(void) {
-    printf("MyOS sh. Built-ins: cd [dir], pwd, exit [code], history, help\n");
+    printf("MyOS sh. Built-ins: cd [dir], pwd, exit [code], history, help, whoami, useradd NAME, passwd [NAME], logout\n");
     printf("Syntax: cmd args | cmd > file >> file < file &   \"quotes\"  * ?  $?  # comment\n");
     printf("Keys: arrows, Home/End, Up/Down = history, Tab = complete, Ctrl+L/U/K/W, Ctrl+D = exit\n");
     printf("Programs in /bin:");
@@ -385,6 +430,23 @@ static void help(void) {
 /* -> true, если команда встроенная (и уже выполнена) */
 static bool builtin(struct cmd *c) {
     char *n = c->argv[0];
+    if (!strcmp(n,"whoami")) { char name[24]={0};last_status=account(5,name,0)<0;if(!last_status) printf("%s\n",name);return true; }
+    if (!strcmp(n,"useradd") || !strcmp(n,"passwd")) {
+        bool add=!strcmp(n,"useradd");char name[24]={0};
+        if(c->argc>2 || (add && c->argc!=2)) {printf("Usage: %s %s\n",n,add?"NAME":"[NAME]");last_status=1;}
+        else if(!interactive && !term_mode) {printf("Requires interactive shell.\n");last_status=1;}
+        else {
+            if(c->argc==2) {if(strlen(c->argv[1])>=sizeof(name)) {printf("Name too long.\n");last_status=1;return true;}strcpy(name,c->argv[1]);}
+            else account(5,name,0);
+            if(add && account(4,0,0)!=0) {printf("useradd: root required.\n");last_status=1;}
+            else last_status=new_password(name,add?2:3)<0;
+        }
+        return true;
+    }
+    if(!strcmp(n,"logout")) {
+        if(!interactive && !term_mode) {last_status=1;return true;}
+        account(6,0,0);if(login_prompt()<0) exit(0);last_status=0;return true;
+    }
     if (!strcmp(n, "cd")) {
         int r = chdir(c->argc > 1 ? c->argv[1] : "/");
         if (r < 0) dprintf(STDERR, "cd: %s: %s\n", c->argv[1], strerror(-r));
@@ -486,7 +548,7 @@ static void reap_background(void) {
 
 int main(int argc, char **argv) {
     int in = STDIN;
-    bool term_mode = false;                  /* sh -t: строку редактирует окно терминала, мы только печатаем приглашение */
+    term_mode = false;                  /* sh -t: строку редактирует окно терминала, мы только печатаем приглашение */
     if (argc > 1 && !strcmp(argv[1], "-t")) { term_mode = true; argc = 1; }
     if (argc > 1) {                          /* sh script.sh */
         in = open(argv[1], O_READ);
@@ -494,6 +556,7 @@ int main(int argc, char **argv) {
         interactive = false;
     }
     setfg(0);
+    if (interactive && login_prompt()<0) return 1;
     if (term_mode) { interactive = false; printf("MyOS sh (pid %d). Type 'help'.\n", getpid()); }
     else if (interactive && ttyctl(STDIN, TTYCTL_GETSIZE, 0) >= 0)   /* в окне терминала (pty) */
         printf("MyOS sh (pid %d). Type 'help'.\n", getpid());
@@ -506,13 +569,13 @@ int main(int argc, char **argv) {
         if (interactive) {
             char prompt[160];
             getcwd(cwd, sizeof(cwd));
-            snprintf(prompt, sizeof(prompt), ANSI_GREEN ANSI_BOLD "sh" ANSI_RESET ":"
-                     ANSI_BLUE ANSI_BOLD "%s" ANSI_RESET "$ ", cwd);
+            snprintf(prompt, sizeof(prompt), ANSI_GREEN ANSI_BOLD "%s" ANSI_RESET ":"
+                     ANSI_BLUE ANSI_BOLD "%s" ANSI_RESET "$ ", username, cwd);
             if (edit_line(prompt, line, sizeof(line)) < 0) break;   /* Ctrl+D */
         } else {
             if (term_mode) {
                 getcwd(cwd, sizeof(cwd));
-                printf(ANSI_GREEN ANSI_BOLD "sh" ANSI_RESET ":" ANSI_BLUE ANSI_BOLD "%s" ANSI_RESET "$ ", cwd);
+                printf(ANSI_GREEN ANSI_BOLD "%s" ANSI_RESET ":" ANSI_BLUE ANSI_BOLD "%s" ANSI_RESET "$ ", username, cwd);
             }
             if (readln(in, line, sizeof(line)) < 0) break;          /* конец файла */
         }

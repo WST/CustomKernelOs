@@ -782,10 +782,10 @@ void shell_run(void) {
     if (fs_ready() && fs_resolve(FS_ROOT, "/bin/sh", &ino) == FS_OK) {
         static char sh_path[] = "/bin/sh";
         char *argv[] = { sh_path };
-        run_program(argv, 1);
-        vga_set_color(YELLOW, BLACK);
-        kprintf("Back in the kernel shell (ring 0). Type 'help', or 'sh' to start /bin/sh again.\n");
-        vga_set_color(text_color, BLACK);
+        for (;;) {
+            run_program(argv, 1);
+            kprintf("Session ended. Starting login again.\n");
+        }
     }
 
     for (;;) {

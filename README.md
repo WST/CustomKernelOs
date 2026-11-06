@@ -1038,3 +1038,10 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 4. Звук (PC speaker).
 5. Загрузка на настоящем компьютере с флешки.
 
+
+
+## Учётные записи
+
+Оболочка запрашивает логин и пароль. При первом входе задайте пароль root.
+Команды: `useradd NAME`, `passwd [NAME]`, `whoami`, `logout`.
+Подробности и текущие ограничения: [docs/users.md](docs/users.md).
