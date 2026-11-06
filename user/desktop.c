@@ -60,12 +60,13 @@ static const struct app apps[] = {
     { "Calculator", "calc", true, "калькулятор" },
     { "Paint", "draw", true, "рисование рисовать draw" },
     { "Minesweeper", "mines", true, "сапёр сапер мины игра game" },
+    { "Battleship", "battle", true, "морской бой корабли игра game" },
     { "Task Manager", "taskmgr", true, "диспетчер задач процессы process" },
     { "Display", "display", false, "экран дисплей разрешение settings настройки" },
     { "About MyOS", "about", false, "о системе версия" },
 };
 #define N_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
-enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_TASKMGR, APP_DISPLAY, APP_ABOUT };
+enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_ABOUT };
 
 static struct { int pid, app; } launched[32];
 static int n_launched;
@@ -263,6 +264,16 @@ static void draw_app_icon(int app, int x, int y, int size) {
         ln(69, 27, 27, 69, 3, RGB(30, 30, 30));
         ell(14, 14, 20, 20, RGB(30, 30, 30), 255);
         ell(18, 18, 6, 6, C_WHITE, 220);
+        break;
+    case APP_BATTLE:
+        rr_grad(4, 4, 40, 40, 7, RGB(80, 160, 230), RGB(25, 85, 170));
+        tri(18, 56, 78, 56, 70, 70, RGB(70, 70, 76));                           /* корпус */
+        tri(18, 56, 70, 70, 26, 70, RGB(70, 70, 76));
+        rr(17, 21, 12, 7, 1, RGB(110, 110, 118));                              /* рубка */
+        rr(22, 16, 3, 6, 1, RGB(110, 110, 118));
+        ell(29, 9, 10, 10, RGB(250, 205, 40), 255);                            /* взрыв */
+        ell(31, 11, 6, 6, RGB(239, 41, 41), 255);
+        ln(10, 78, 86, 78, 2, RGB(190, 220, 250));                             /* волна */
         break;
     case APP_TASKMGR:
         rr_grad(4, 6, 40, 36, 6, RGB(70, 70, 70), RGB(38, 38, 38));

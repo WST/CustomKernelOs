@@ -495,7 +495,9 @@ sh:/$ desktop
 - **Files** — проводник: двойной клик открывает папку, запускает программу или
   открывает текст в **Notepad** (Ctrl+S — сохранить, имя файла — в поле сверху).
 - **Calculator**, **Paint** (правая кнопка — ластик), **Minesweeper**,
-  **Task Manager** (процессы, загрузка процессора, «End task»), **About MyOS**.
+  **Battleship** («Морской бой» против компьютера: расставь флот мышью — правая кнопка
+  или R поворачивает корабль, Random — случайно; попал — стреляешь ещё раз; компьютер
+  добивает раненые корабли), **Task Manager** (процессы, загрузка процессора, «End task»), **About MyOS**.
 - **Display** — видеокарта и разрешение: щелчок по разрешению меняет его сразу
   (рабочий стол, консоль и мышь перестраиваются без перезагрузки) и запоминает.
   Галочка «Hardware mouse cursor» — стрелку рисует сама видеокарта. Если карта
@@ -964,7 +966,7 @@ tests/js/ tests/web/  тесты JavaScript, DOM и CSS (make jstest)
 tests/browser_host.c  весь браузер на Linux с AddressSanitizer (make browsertest)
 tests/img_test.c tests/img/   декодеры картинок против Pillow (make imgtest)
 tests/x509_test.c tests/x509/ сертификаты и подписи (make test, make x509test)
-user/terminal.c notepad.c files.c calc.c draw.c mines.c taskmgr.c about.c display.c hellowin.c
+user/terminal.c notepad.c files.c calc.c draw.c mines.c battle.c taskmgr.c about.c display.c hellowin.c
                    программы для рабочего стола
 user/cc/           компилятор Си для MyOS (lex, pp, parse, type, gen, main)
 tests/cc/          тесты компилятора (make cctest)
