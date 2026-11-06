@@ -1,0 +1,16 @@
+# sbase, коммит c546c3a с git.suckless.org. Сам suckless отдаёт HTML, поэтому адрес — байт-в-байт то же дерево на зеркале.
+name grep
+descr sbase grep
+workdir /tmp/ext/grep
+mkdir libutil
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/grep.c grep.c
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/queue.h queue.h
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/util.h util.h
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/arg.h arg.h
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/compat.h compat.h
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/libutil/ealloc.c libutil/ealloc.c
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/libutil/eprintf.c libutil/eprintf.c
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/libutil/eregcomp.c libutil/eregcomp.c
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/libutil/fshut.c libutil/fshut.c
+fetch https://raw.githubusercontent.com/xplshn/sbase-mirror/c546c3a5724c81cee9a11d816a38ccdf17472129/libutil/strcasestr.c libutil/strcasestr.c
+cc -o /ext/bin/grep grep.c libutil/ealloc.c libutil/eprintf.c libutil/eregcomp.c libutil/fshut.c libutil/strcasestr.c
