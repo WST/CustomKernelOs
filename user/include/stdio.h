@@ -13,12 +13,15 @@
 typedef struct FILE {
     int fd;
     int flags;
+    char *mem;          /* буфер fmemopen, иначе NULL */
+    int mem_pos, mem_len;
 } FILE;
 
 extern FILE *stdin, *stdout, *stderr;
 
 FILE *fopen(const char *path, const char *mode);
 FILE *fdopen(int fd, const char *mode);
+FILE *fmemopen(void *buf, size_t size, const char *mode);
 int fclose(FILE *f);
 int fflush(FILE *f);
 int fileno(FILE *f);

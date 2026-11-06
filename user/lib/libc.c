@@ -1038,6 +1038,7 @@ static FILE *file_new(int fd, int flags) {
         f = malloc(sizeof *f);
         if (!f) return NULL;
     }
+    memset(f, 0, sizeof *f);
     f->fd = fd;
     f->flags = flags;
     return f;
@@ -1072,10 +1073,28 @@ FILE *fdopen(int fd, const char *mode) {
 }
 
 int fclose(FILE *f) {
+    int r = 0;
     if (!f) return EOF;
-    int r = close(f->fd);
+    if (f->mem) { free(f->mem); f->mem = NULL; }
+    if (f->fd >= 0) r = close(f->fd);
     f->fd = -1;
     return r < 0 ? EOF : 0;
+}
+
+FILE *fmemopen(void *buf, size_t size, const char *mode) {
+    FILE *f;
+    char *m;
+    (void)mode;
+    if (size > 1024 * 1024) return NULL;
+    f = file_new(-1, FF_READ);
+    if (!f) return NULL;
+    m = malloc(size ? size : 1);
+    if (!m) return NULL;
+    if (size && buf) memcpy(m, buf, size);
+    f->mem = m;
+    f->mem_pos = 0;
+    f->mem_len = (int)size;
+    return f;
 }
 
 int fflush(FILE *f) { (void)f; return 0; }
@@ -1109,7 +1128,13 @@ size_t fread(void *ptr, size_t size, size_t nmemb, FILE *f) {
         f->flags &= ~FF_UNGET;
     }
     while (got < want) {
-        int r = read(f->fd, d + got, (size_t)(want - got));
+        int r;
+        if (f->mem) {
+            if (f->mem_pos >= f->mem_len) { f->flags |= FF_EOF; break; }
+            d[got++] = (unsigned char)f->mem[f->mem_pos++];
+            continue;
+        }
+        r = read(f->fd, d + got, (size_t)(want - got));
         if (r < 0) { f->flags |= FF_ERR; break; }
         if (r == 0) { f->flags |= FF_EOF; break; }
         got += r;
@@ -1481,6 +1506,43 @@ char *strdup(const char *s) {
     return p;
 }
 
+char *strndup(const char *s, size_t n) {
+    size_t i = 0;
+    char *p;
+    while (i < n && s[i]) i++;
+    p = malloc(i + 1);
+    if (!p) return NULL;
+    memcpy(p, s, i);
+    p[i] = 0;
+    return p;
+}
+
+static int fold_ascii(int ch) { return (ch >= 'A' && ch <= 'Z') ? ch - 'A' + 'a' : ch; }
+
+int strcasecmp(const char *a, const char *b) {
+    for (;;) {
+        int ca = fold_ascii((unsigned char)*a), cb = fold_ascii((unsigned char)*b);
+        if (ca != cb || !ca) return ca - cb;
+        a++; b++;
+    }
+}
+
+int strncasecmp(const char *a, const char *b, size_t n) {
+    while (n--) {
+        int ca = fold_ascii((unsigned char)*a), cb = fold_ascii((unsigned char)*b);
+        if (ca != cb || !ca) return ca - cb;
+        a++; b++;
+    }
+    return 0;
+}
+
+char *strcasestr(const char *h, const char *n) {
+    size_t l = strlen(n);
+    if (!l) return (char *)h;
+    for (; *h; h++) if (!strncasecmp(h, n, l)) return (char *)h;
+    return NULL;
+}
+
 long long strtonum(const char *nptr, long long minval, long long maxval, const char **errstr) {
     char *ep;
     int saved = errno;
@@ -1589,3 +1651,5 @@ time_t time(time_t *tloc) {
     if (tloc && t != (time_t)-1) *tloc = t;
     return t;
 }
+
+#include "regex.c"

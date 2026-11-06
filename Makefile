@@ -90,7 +90,7 @@ ULIB := $(BUILD)/user/libmyos.a
 $(ULIB): $(ULIB_OBJS)
 	rm -f $@ && $(AR) rcs $@ $^
 
-$(BUILD)/user/libc.o: user/lib/libc.c user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
@@ -186,7 +186,7 @@ $(DISK):
 
 # Установить программы в /bin (остальные файлы на диске не трогаются).
 # Сторонние утилиты — в /ext/bin под своими именами, чтобы не затереть /bin.
-install: $(UBINS) $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/user/ols $(BUILD)/myfs | $(DISK)
+install: $(UBINS) $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/user/ols $(BUILD)/user/ogrep $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@echo "==> сторонние программы в /ext/bin"
@@ -194,13 +194,14 @@ install: $(UBINS) $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/user/ols $(BUIL
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/owc /ext/bin/wc || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/ohead /ext/bin/head || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/ols /ext/bin/ls || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/ogrep /ext/bin/grep || exit 1
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
 	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run /ext /ext/bin; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in libc.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -304,7 +305,7 @@ cctest: $(BUILD)/cc-host
 	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@mkdir -p $(CCROOT)/include/sys
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
@@ -336,11 +337,36 @@ $(BUILD)/user/ols: third_party/ls/ls.c $(ULIB) user/user.ld | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c third_party/ls/ls.c -o $(BUILD)/user/ols.o
 	$(LD) $(ULDFLAGS) -o $@ $(BUILD)/user/ols.o $(ULIB)
 
-porttest: $(BUILD)/cc-host $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/user/ols
+SBASE := third_party/sbase
+OGREP_OBJS := $(BUILD)/user/ogrep_grep.o $(BUILD)/user/ogrep_ealloc.o $(BUILD)/user/ogrep_eprintf.o \
+	$(BUILD)/user/ogrep_eregcomp.o $(BUILD)/user/ogrep_fshut.o $(BUILD)/user/ogrep_strcasestr.o
+
+$(BUILD)/user/ogrep_grep.o: $(SBASE)/grep.c $(SBASE)/queue.h $(SBASE)/util.h $(SBASE)/arg.h $(SBASE)/compat.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $(SBASE)/grep.c -o $@
+
+$(BUILD)/user/ogrep_ealloc.o: $(SBASE)/libutil/ealloc.c $(SBASE)/util.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $(SBASE)/libutil/ealloc.c -o $@
+
+$(BUILD)/user/ogrep_eprintf.o: $(SBASE)/libutil/eprintf.c $(SBASE)/util.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $(SBASE)/libutil/eprintf.c -o $@
+
+$(BUILD)/user/ogrep_eregcomp.o: $(SBASE)/libutil/eregcomp.c $(SBASE)/util.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $(SBASE)/libutil/eregcomp.c -o $@
+
+$(BUILD)/user/ogrep_fshut.o: $(SBASE)/libutil/fshut.c $(SBASE)/util.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $(SBASE)/libutil/fshut.c -o $@
+
+$(BUILD)/user/ogrep_strcasestr.o: $(SBASE)/libutil/strcasestr.c $(SBASE)/util.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $(SBASE)/libutil/strcasestr.c -o $@
+
+$(BUILD)/user/ogrep: $(OGREP_OBJS) $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) -o $@ $(OGREP_OBJS) $(ULIB)
+
+porttest: $(BUILD)/cc-host $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/user/ols $(BUILD)/user/ogrep
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@printf 'hello world\n' > $(BUILD)/wc-in
 	@$(BUILD)/cc-host -B $(CCROOT) -linux third_party/openbsd/wc.c -o $(BUILD)/wc-linux
 	@$(BUILD)/wc-linux $(BUILD)/wc-in > $(BUILD)/wc-out
@@ -365,6 +391,24 @@ porttest: $(BUILD)/cc-host $(BUILD)/user/owc $(BUILD)/user/ohead $(BUILD)/user/o
 	@$(BUILD)/ls-linux $(BUILD)/ls-dir/a > $(BUILD)/ls-file
 	@printf '%s\n' $(BUILD)/ls-dir/a > $(BUILD)/ls-file-exp
 	@cmp $(BUILD)/ls-file $(BUILD)/ls-file-exp && echo "ls: file OK"
+	@$(BUILD)/cc-host -B $(CCROOT) -linux $(SBASE)/grep.c $(SBASE)/libutil/ealloc.c $(SBASE)/libutil/eprintf.c \
+	    $(SBASE)/libutil/eregcomp.c $(SBASE)/libutil/fshut.c $(SBASE)/libutil/strcasestr.c -o $(BUILD)/grep-linux
+	@printf 'a cat\nnope\nCat\n' > $(BUILD)/grep-in
+	@$(BUILD)/grep-linux cat $(BUILD)/grep-in > $(BUILD)/grep-out
+	@printf 'a cat\n' > $(BUILD)/grep-exp
+	@cmp $(BUILD)/grep-out $(BUILD)/grep-exp && echo "grep: literal OK"
+	@$(BUILD)/grep-linux 'c.t' $(BUILD)/grep-in > $(BUILD)/grep-out
+	@cmp $(BUILD)/grep-out $(BUILD)/grep-exp && echo "grep: dot OK"
+	@$(BUILD)/grep-linux '^a' $(BUILD)/grep-in > $(BUILD)/grep-out
+	@cmp $(BUILD)/grep-out $(BUILD)/grep-exp && echo "grep: anchor OK"
+	@$(BUILD)/grep-linux '[Cc]at' $(BUILD)/grep-in > $(BUILD)/grep-out
+	@printf 'a cat\nCat\n' > $(BUILD)/grep-exp2
+	@cmp $(BUILD)/grep-out $(BUILD)/grep-exp2 && echo "grep: class OK"
+	@$(BUILD)/grep-linux -i cat $(BUILD)/grep-in > $(BUILD)/grep-out
+	@cmp $(BUILD)/grep-out $(BUILD)/grep-exp2 && echo "grep -i: OK"
+	@$(BUILD)/grep-linux -E 'c(a|o)t' $(BUILD)/grep-in > $(BUILD)/grep-out
+	@cmp $(BUILD)/grep-out $(BUILD)/grep-exp && echo "grep -E: OK"
+	@$(BUILD)/grep-linux dog $(BUILD)/grep-in > $(BUILD)/grep-out; test $$? -eq 1 && echo "grep: no match OK"
 
 vfstest: all
 	python3 tests/vfs_smoke.py
