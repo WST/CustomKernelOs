@@ -1,6 +1,9 @@
 /* Мини-libc для программ MyOS. Всё общение с миром — через int 0x80. */
 #include "myos.h"
 #include "stdio.h"
+#include "stdlib.h"
+#include "unistd.h"
+#include "time.h"
 #include "sys/stat.h"
 #include "wchar.h"
 #include "util.h"
@@ -286,6 +289,7 @@ const char *strerror(int e) {
     case ENOTDIR:   return "not a directory";
     case EISDIR:    return "is a directory";
     case EINVAL:    return "invalid argument";
+    case ERANGE:    return "result out of range";
     case ESPIPE:    return "illegal seek";
     case EMFILE:    return "too many open files";
     case EFBIG:     return "file or filesystem too large";
@@ -1222,4 +1226,203 @@ int iswspace(wchar_t wc) { return isspace((unsigned char)wc); }
 int fmt_scaled(long long number, char *result) {
     snprintf(result, FMT_SCALED_STRSIZE, "%lld", number);
     return 0;
+}
+
+/* ================================================================ числа, сортировка, POSIX-мелочь */
+
+static int conv_digit(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'Z') return c - 'A' + 10;
+    return -1;
+}
+
+/* lim — наибольшее по модулю значение. Для знакового отрицательного это 2^63. */
+static unsigned long long parse_int(const char *nptr, char **end, int base, int *neg, int *ovf) {
+    const char *s = nptr;
+    while (isspace((unsigned char)*s)) s++;
+    *neg = 0;
+    if (*s == '+' || *s == '-') { *neg = *s == '-'; s++; }
+    if (base == 0) {
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && conv_digit((unsigned char)s[2]) >= 0 && conv_digit((unsigned char)s[2]) < 16) {
+            base = 16; s += 2;
+        } else if (s[0] == '0') base = 8;
+        else base = 10;
+    } else if (base == 16 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') && conv_digit((unsigned char)s[2]) >= 0 && conv_digit((unsigned char)s[2]) < 16)
+        s += 2;
+    *ovf = 0;
+    if (base < 2 || base > 36) { errno = EINVAL; if (end) *end = (char *)nptr; return 0; }
+    unsigned long long acc = 0;
+    int any = 0;
+    for (;;) {
+        int d = conv_digit((unsigned char)*s);
+        if (d < 0 || d >= base) break;
+        any = 1;
+        if (acc > (~0ULL - (unsigned)d) / (unsigned)base) *ovf = 1;
+        else acc = acc * (unsigned)base + (unsigned)d;
+        s++;
+    }
+    if (end) *end = (char *)(any ? s : nptr);
+    return any ? acc : 0;
+}
+
+long long strtoll(const char *nptr, char **end, int base) {
+    int neg, ovf;
+    unsigned long long lim, acc = parse_int(nptr, end, base, &neg, &ovf);
+    if (errno == EINVAL && end && *end == nptr && acc == 0) return 0;
+    lim = neg ? 9223372036854775808ULL : 9223372036854775807ULL;
+    if (ovf || acc > lim) {
+        errno = ERANGE;
+        return neg ? (-9223372036854775807LL - 1) : 9223372036854775807LL;
+    }
+    return neg ? -(long long)acc : (long long)acc;
+}
+
+long strtol(const char *nptr, char **end, int base) {
+    int saved = errno;
+    errno = 0;
+    long long v = strtoll(nptr, end, base);
+    if (errno == EINVAL) return 0;
+    if (errno == ERANGE || v > 2147483647LL || v < -2147483647LL - 1) {
+        errno = ERANGE;
+        return v < 0 ? (long)(-2147483647L - 1) : 2147483647L;
+    }
+    errno = saved;
+    return (long)v;
+}
+
+unsigned long long strtoull(const char *nptr, char **end, int base) {
+    int neg, ovf;
+    unsigned long long acc = parse_int(nptr, end, base, &neg, &ovf);
+    if (ovf) { errno = ERANGE; return ~0ULL; }
+    if (neg) acc = -acc;
+    return acc;
+}
+
+unsigned long strtoul(const char *nptr, char **end, int base) {
+    int neg, ovf, saved = errno;
+    unsigned long long acc;
+    errno = 0;
+    acc = parse_int(nptr, end, base, &neg, &ovf);
+    if (errno == EINVAL) return 0;
+    if (ovf || acc > 4294967295ULL) { errno = ERANGE; return 4294967295UL; }
+    errno = saved;
+    if (neg) return (unsigned long)(0UL - (unsigned long)acc);
+    return (unsigned long)acc;
+}
+
+char *strdup(const char *s) {
+    size_t n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+long long strtonum(const char *nptr, long long minval, long long maxval, const char **errstr) {
+    char *ep;
+    int saved = errno;
+    errno = 0;
+    long long v = strtoll(nptr, &ep, 10);
+    if (errstr) *errstr = NULL;
+    if (nptr == ep || *ep) {
+        errno = EINVAL;
+        if (errstr) *errstr = "invalid";
+        return 0;
+    }
+    if (errno == ERANGE || v < minval || v > maxval) {
+        errno = ERANGE;
+        if (errstr) *errstr = v < minval ? "too small" : "too large";
+        return 0;
+    }
+    errno = saved;
+    return v;
+}
+
+static void memswap(char *a, char *b, size_t n) {
+    while (n--) { char t = *a; *a++ = *b; *b++ = t; }
+}
+
+static void sift_down(char *b, size_t root, size_t count, size_t size, int (*cmp)(const void *, const void *)) {
+    while (root * 2 + 1 < count) {
+        size_t child = root * 2 + 1;
+        if (child + 1 < count && cmp(b + child * size, b + (child + 1) * size) < 0) child++;
+        if (cmp(b + root * size, b + child * size) >= 0) return;
+        memswap(b + root * size, b + child * size, size);
+        root = child;
+    }
+}
+
+void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)) {
+    char *b = base;
+    size_t start, end;
+    if (n < 2 || !size || !cmp) return;
+    for (start = n / 2; start > 0; start--) sift_down(b, start - 1, n, size, cmp);
+    for (end = n; end > 1; end--) {
+        memswap(b, b + (end - 1) * size, size);
+        sift_down(b, 0, end - 1, size, cmp);
+    }
+}
+
+char *getenv(const char *name) { (void)name; return NULL; }
+
+int setvbuf(FILE *f, char *buf, int mode, size_t size) {
+    (void)f; (void)buf; (void)mode; (void)size;
+    return 0;
+}
+void setbuf(FILE *f, char *buf) { setvbuf(f, buf, buf ? _IOFBF : _IONBF, BUFSIZ); }
+
+int isatty(int fd) {
+#if defined(__LINUX_TEST__)
+    struct { unsigned short row, col, xpixel, ypixel; } ws;
+    return __syscall(54, fd, 0x5413, (int)&ws) == 0;
+#else
+    struct stat st;
+    if (fstat(fd, &st) < 0) return 0;
+    return S_ISCHR(st.st_mode);
+#endif
+}
+
+unsigned sleep(unsigned seconds) {
+#if defined(__LINUX_TEST__)
+    struct { long sec, nsec; } req, rem;
+    req.sec = (long)seconds; req.nsec = 0; rem.sec = 0; rem.nsec = 0;
+    if (__syscall(162, (int)&req, (int)&rem) < 0) return seconds;
+    return (unsigned)rem.sec;
+#else
+    while (seconds) {
+        unsigned chunk = seconds > 1000u ? 1000u : seconds;
+        sleep_ms(chunk * 1000u);
+        seconds -= chunk;
+    }
+    return 0;
+#endif
+}
+
+uid_t getuid(void) { return 0; }
+uid_t geteuid(void) { return 0; }
+gid_t getgid(void) { return 0; }
+
+static int leap(unsigned y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
+
+time_t time(time_t *tloc) {
+    time_t t;
+#if defined(__LINUX_TEST__)
+    t = (time_t)__syscall(13, 0);
+#else
+    static const unsigned md[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    struct datetime d;
+    unsigned y;
+    long long days;
+    if (get_time(&d) < 0 || d.year < 1970 || d.month < 1 || d.month > 12) return (time_t)-1;
+    days = 0;
+    for (y = 1970; y < d.year; y++) days += leap(y) ? 366 : 365;
+    days += md[d.month - 1];
+    if (d.month > 2 && leap(d.year)) days++;
+    days += (long)d.day - 1;
+    days = days * 86400LL + (long long)d.hour * 3600 + (long long)d.min * 60 + d.sec;
+    if (days < 0 || days > 2147483647LL) return (time_t)-1;
+    t = (time_t)days;
+#endif
+    if (tloc && t != (time_t)-1) *tloc = t;
+    return t;
 }

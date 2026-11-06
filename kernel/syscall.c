@@ -184,6 +184,8 @@ static int sys_fstat(u32 fd, u32 ust) {
         size = st.size;
         if (st.type == FS_TYPE_DIR) mode = 0040000;
         else if (st.type == FS_TYPE_FILE) mode = 0100000;
+    } else if (f->type == FILE_CONSOLE || f->type == FILE_PTY_SLAVE) {
+        mode = 0020000;                                 /* S_IFCHR: isatty */
     }
     ((u32 *)ust)[0] = mode;
     ((u32 *)ust)[1] = size;

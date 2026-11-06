@@ -1,0 +1,69 @@
+/* strtol, qsort, getenv и соседние функции из issue #2. */
+#include <myos.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <time.h>
+#include <limits.h>
+#include <fcntl.h>
+
+static int fails;
+
+#define CHECK(cond) do { \
+    if (!(cond)) { fails++; printf("FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } \
+} while (0)
+
+static int cmp_int(const void *a, const void *b) {
+    int x = *(const int *)a, y = *(const int *)b;
+    return (x > y) - (x < y);
+}
+
+int main(void) {
+    char *end;
+    const char *err = NULL;
+    int nums[6] = { 4, 1, 4, -2, 9, 0 };
+    int i;
+    char *copy;
+    time_t now;
+    int fd;
+
+    CHECK(strtol("  -42", &end, 10) == -42 && *end == 0);
+    CHECK(strtol("0x10", NULL, 0) == 16);
+    CHECK(strtol("075", NULL, 0) == 61);
+    CHECK(strtol("99abc", &end, 10) == 99 && *end == 'a');
+    errno = 0;
+    CHECK(strtol("999999999999", NULL, 10) == LONG_MAX && errno == ERANGE);
+    CHECK(strtoll("10000000000", NULL, 10) == 10000000000LL);
+    CHECK(strtoul("-1", NULL, 10) == 4294967295UL);
+    CHECK(strtoull("ff", NULL, 16) == 255);
+
+    err = NULL;
+    CHECK(strtonum("2", 1, 10, &err) == 2 && err == NULL);
+    CHECK(strtonum("0", 1, 10, &err) == 0 && err && err[0] == 't');
+    CHECK(strtonum("12x", 0, 20, &err) == 0 && err && err[0] == 'i');
+
+    copy = strdup("myos");
+    CHECK(copy && strcmp(copy, "myos") == 0);
+    free(copy);
+
+    qsort(nums, 6, sizeof(int), cmp_int);
+    for (i = 1; i < 6; i++) CHECK(nums[i - 1] <= nums[i]);
+    CHECK(nums[0] == -2 && nums[5] == 9);
+
+    CHECK(getenv("HOME") == NULL);
+    CHECK(getenv("POSIXLY_CORRECT") == NULL);
+    CHECK(getuid() == 0 && geteuid() == 0 && getgid() == 0);
+    CHECK(setvbuf(stdout, NULL, _IONBF, 0) == 0);
+    CHECK(sleep(0) == 0);
+
+    now = time(NULL);
+    CHECK(now > 1700000000 && now < 2100000000);
+
+    fd = open("build/posix-notty.txt", O_WRONLY | O_CREAT | O_TRUNC);
+    CHECK(fd >= 0 && isatty(fd) == 0);
+    if (fd >= 0) close(fd);
+    unlink("build/posix-notty.txt");
+    CHECK(isatty(-1) == 0);
+
+    return fails != 0;
+}

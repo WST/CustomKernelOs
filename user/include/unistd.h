@@ -8,4 +8,10 @@
 extern char *optarg;
 extern int optind, opterr, optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
+int pledge(const char *promises, const char *execpromises);
+int isatty(int fd);
+unsigned sleep(unsigned seconds);
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
 #endif

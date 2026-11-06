@@ -322,7 +322,11 @@ $(BUILD)/user/owc: third_party/openbsd/wc.c $(ULIB) user/user.ld | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c third_party/openbsd/wc.c -o $(BUILD)/user/owc.o
 	$(LD) $(ULDFLAGS) -o $@ $(BUILD)/user/owc.o $(ULIB)
 
-porttest: $(BUILD)/cc-host $(BUILD)/user/owc
+$(BUILD)/user/ohead: third_party/openbsd/head.c $(ULIB) user/user.ld | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c third_party/openbsd/head.c -o $(BUILD)/user/ohead.o
+	$(LD) $(ULDFLAGS) -o $@ $(BUILD)/user/ohead.o $(ULIB)
+
+porttest: $(BUILD)/cc-host $(BUILD)/user/owc $(BUILD)/user/ohead
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
@@ -335,6 +339,13 @@ porttest: $(BUILD)/cc-host $(BUILD)/user/owc
 	@$(BUILD)/wc-linux -c $(BUILD)/wc-in > $(BUILD)/wc-c
 	@printf '      12 %s\n' $(BUILD)/wc-in > $(BUILD)/wc-cexp
 	@cmp $(BUILD)/wc-c $(BUILD)/wc-cexp && echo "wc -c: OK"
+	@$(BUILD)/cc-host -B $(CCROOT) -linux third_party/openbsd/head.c -o $(BUILD)/head-linux
+	@printf 'a\nb\nc\nd\n' > $(BUILD)/head-in
+	@$(BUILD)/head-linux -n 2 $(BUILD)/head-in > $(BUILD)/head-out
+	@printf 'a\nb\n' > $(BUILD)/head-exp
+	@cmp $(BUILD)/head-out $(BUILD)/head-exp && echo "head -n: OK"
+	@$(BUILD)/head-linux -2 $(BUILD)/head-in > $(BUILD)/head-out2
+	@cmp $(BUILD)/head-out2 $(BUILD)/head-exp && echo "head -count: OK"
 
 vfstest: all
 	python3 tests/vfs_smoke.py

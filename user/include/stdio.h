@@ -4,6 +4,11 @@
 
 #define EOF (-1)
 #define BUFSIZ 512
+#define _IOFBF 0
+#define _IOLBF 1
+#define _IONBF 2
+#define getc(f) fgetc(f)
+#define putc(c, f) fputc((c), (f))
 
 typedef struct FILE {
     int fd;
@@ -37,4 +42,6 @@ int vprintf(const char *fmt, va_list ap);
 int sprintf(char *buf, const char *fmt, ...);
 int vsprintf(char *buf, const char *fmt, va_list ap);
 ssize_t getline(char **line, size_t *n, FILE *stream);
+int setvbuf(FILE *f, char *buf, int mode, size_t size);
+void setbuf(FILE *f, char *buf);
 #endif
