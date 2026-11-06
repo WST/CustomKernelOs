@@ -12,13 +12,14 @@
  *   мы  -> Finished
  * Из общего секрета X25519 и хеша всех сообщений выводятся ключи (HKDF).
  * Finished сервера проверяется — значит, никто не подменил сообщения по пути.
- * Сертификат сервера пока НЕ проверяется (см. tls.h). */
+ * Сертификат сервера проверяет x509.c (см. tls.h). */
 #ifdef TLS_HOST                       /* сборка на Linux для тестов */
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
 #include <time.h>
+#include <errno.h>
 static unsigned ticks(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1000 + ts.tv_nsec / 1000000; }
 static unsigned get_seed_extra(void) { return (unsigned)time(NULL) ^ (unsigned)getpid(); }
 #else
@@ -30,6 +31,7 @@ static unsigned get_seed_extra(void) {
 }
 #endif
 #include "tls.h"
+#include "x509.h"
 
 typedef unsigned char u8;
 typedef unsigned int u32;
@@ -601,7 +603,12 @@ struct tls {
     u8 *hs; int hslen;                      /* сообщения рукопожатия (могут быть разбиты на записи) */
     sha256_ctx th;                          /* хеш всех сообщений рукопожатия */
     char info[48];
+    int cert_ok;                            /* 1 — сертификат проверен и годится */
+    char cert_err[128];                     /* иначе — почему нет */
+    char issuer[64];                        /* кто выдал (корневой центр) */
 };
+
+int tls_verify = 1;
 
 static int seterr(char *err, int max, const char *s) {
     if (err && max > 0) {
@@ -639,11 +646,14 @@ static int write_all(int fd, const u8 *p, int n) {
     return 0;
 }
 
+int (*tls_idle)(void);
+
 static int read_all(int fd, u8 *p, int n) {                /* 1 — прочитали, 0 — конец, -1 ошибка */
     int got = 0;
     while (got < n) {
         int r = read(fd, p + got, n - got);
         if (r == 0) return got ? -1 : 0;
+        if (r == -ETIMEDOUT && tls_idle && tls_idle()) continue;   /* сокет с тайм-аутом: спросить программу */
         if (r < 0) return -1;
         got += r;
     }
@@ -783,11 +793,12 @@ static int is_ip(const char *h) {
 
 #define P16(v) (b[n++] = (v) >> 8, b[n++] = (u8)(v))
 
-static int client_hello(u8 *b, const char *host, const u8 pub[32]) {
+/* group 0x001d — ключ X25519 (32 байта), 0x0017 — P-256 (65 байт, после HelloRetryRequest) */
+static int client_hello(u8 *b, const char *host, const u8 rnd[64], int group, const u8 *pub, const u8 *cookie, int clen) {
     int n = 4;                                              /* место под заголовок сообщения */
     P16(0x0303);
-    random_bytes(b + n, 32); n += 32;                       /* client random */
-    b[n++] = 32; random_bytes(b + n, 32); n += 32;          /* legacy session id (для «коробок» по пути) */
+    memcpy(b + n, rnd, 32); n += 32;                        /* client random */
+    b[n++] = 32; memcpy(b + n, rnd + 32, 32); n += 32;      /* legacy session id (для «коробок» по пути) */
     P16(4); P16(SUITE_CHACHA); P16(SUITE_AES128);
     b[n++] = 1; b[n++] = 0;                                 /* без сжатия */
     int ext = n; n += 2;
@@ -796,25 +807,29 @@ static int client_hello(u8 *b, const char *host, const u8 pub[32]) {
         P16(0); P16(hl + 5); P16(hl + 3); b[n++] = 0; P16(hl);
         memcpy(b + n, host, hl); n += hl;
     }
-    P16(10); P16(4); P16(2); P16(0x001d);                   /* supported_groups: x25519 */
-    static const unsigned short sig[] = { 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601, 0x0807 };
+    P16(10); P16(6); P16(4); P16(0x001d); P16(0x0017);      /* supported_groups: x25519, P-256 */
+    static const unsigned short sig[] = { 0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601 };
     int ns = sizeof(sig) / sizeof(sig[0]);
     P16(13); P16(2 + 2 * ns); P16(2 * ns);                  /* signature_algorithms */
     for (int i = 0; i < ns; i++) P16(sig[i]);
     P16(43); P16(3); b[n++] = 2; P16(0x0304);               /* supported_versions: только TLS 1.3 */
     P16(45); P16(2); b[n++] = 1; b[n++] = 1;                /* psk_key_exchange_modes */
-    P16(51); P16(38); P16(36); P16(0x001d); P16(32);        /* key_share: наш ключ X25519 */
-    memcpy(b + n, pub, 32); n += 32;
+    int kl = group == 0x0017 ? 65 : 32;
+    P16(51); P16(kl + 6); P16(kl + 4); P16(group); P16(kl); /* key_share: наш открытый ключ */
+    memcpy(b + n, pub, kl); n += kl;
+    if (cookie && clen > 0 && clen < 600) { P16(44); P16(clen); memcpy(b + n, cookie, clen); n += clen; }   /* cookie из HRR */
     b[ext] = (n - ext - 2) >> 8; b[ext + 1] = n - ext - 2;
     b[0] = 1; b[1] = 0; b[2] = (n - 4) >> 8; b[3] = n - 4;
     return n;
 }
 
 /* разобрать ServerHello: шифр и ключ сервера */
-static int server_hello(tls *t, const u8 *p, int len, u8 spub[32], char *err, int emax) {
+/* -> 0 обычный ServerHello (ключ сервера в spub, длина *sklen), 1 — HelloRetryRequest
+ * (*hrr_group — какую группу хочет сервер, cookie — что вернуть) */
+static int server_hello(tls *t, const u8 *p, int len, u8 spub[65], int *sklen, int group, int *hrr_group,
+                        u8 *cookie, int *clen, char *err, int emax) {
     if (len < 38) return seterr(err, emax, "short ServerHello");
-    if (!memcmp(p + 2, hrr_random, 32))
-        return seterr(err, emax, "server wants another key type (HelloRetryRequest)");
+    int hrr = !memcmp(p + 2, hrr_random, 32);
     int i = 34, sid = p[i++];
     i += sid;
     if (i + 3 > len) return seterr(err, emax, "bad ServerHello");
@@ -831,16 +846,21 @@ static int server_hello(tls *t, const u8 *p, int len, u8 spub[32], char *err, in
             const u8 *e = p + i + 4;
             if (i + 4 + el > end) return seterr(err, emax, "bad ServerHello extension");
             if (et == 43 && el == 2) ver = e[0] << 8 | e[1];
-            if (et == 51 && el >= 4) {
+            if (et == 51 && hrr && el == 2) *hrr_group = e[0] << 8 | e[1];
+            if (et == 44 && hrr && el >= 2 && el - 2 < 600) { *clen = e[0] << 8 | e[1]; if (*clen > el - 2) *clen = el - 2; memcpy(cookie, e + 2, *clen); }
+            if (et == 51 && !hrr && el >= 4) {
                 int g = e[0] << 8 | e[1], kl = e[2] << 8 | e[3];
-                if (g != 0x001d || kl != 32 || el < 36) return seterr(err, emax, "server sent an unsupported key");
-                memcpy(spub, e + 4, 32);
+                int want = group == 0x0017 ? 65 : 32;
+                if (g != group || kl != want || el < 4 + want) return seterr(err, emax, "server sent an unsupported key");
+                memcpy(spub, e + 4, want);
+                *sklen = want;
                 got_key = 1;
             }
             i += 4 + el;
         }
     }
     if (ver != 0x0304) return seterr(err, emax, "server does not speak TLS 1.3 (only TLS 1.2 or older)");
+    if (hrr) return 1;
     if (!got_key) return seterr(err, emax, "server sent no key share");
     return 0;
 }
@@ -848,18 +868,22 @@ static int server_hello(tls *t, const u8 *p, int len, u8 spub[32], char *err, in
 static void transcript(tls *t, u8 h[32]) { sha256_final(&t->th, h); }
 
 tls *tls_open(int fd, const char *host, char *err, int emax) {
+    u8 *certmsg = NULL;                                         /* копия сообщения Certificate */
+    int certlen = 0;
     tls *t = calloc(1, sizeof(tls));
-    u8 *hello = malloc(1024);
-    t->hs = malloc(HS_MAX);
+    u8 *hello = malloc(2048);
+    if (t) t->hs = malloc(HS_MAX);
     if (!t || !hello || !t->hs) { seterr(err, emax, "out of memory"); goto fail; }
     t->fd = fd;
     sha256_init(&t->th);
 
-    u8 priv[32], pub[32], spub[32], shared[32];
+    u8 priv[32], pub[65], spub[65], shared[32], rnd[64], cookie[600];
+    int sklen = 0, hrr_group = 0, clen = 0, group = 0x001d;
     static const u8 nine[32] = { 9 };
+    random_bytes(rnd, 64);
     random_bytes(priv, 32);
     x25519(pub, priv, nine);
-    int hn = client_hello(hello, host, pub);
+    int hn = client_hello(hello, host, rnd, group, pub, NULL, 0);
     sha256_update(&t->th, hello, hn);
     if (send_record(t, 22, hello, hn) < 0) { seterr(err, emax, "cannot send"); goto fail; }
 
@@ -867,11 +891,36 @@ tls *tls_open(int fd, const char *host, char *err, int emax) {
     u8 *m;
     if (next_hs(t, &type, &m, &len, &used, err, emax) < 0) goto fail;
     if (type != 2) { seterr(err, emax, "expected ServerHello"); goto fail; }
-    if (server_hello(t, m, len, spub, err, emax) < 0) goto fail;
+    int sh = server_hello(t, m, len, spub, &sklen, group, &hrr_group, cookie, &clen, err, emax);
+    if (sh < 0) goto fail;
+    if (sh == 1) {                                              /* HelloRetryRequest: серверу нужен P-256 */
+        if (hrr_group != 0x0017) { seterr(err, emax, "server wants a key type we do not have"); goto fail; }
+        u8 h1[32], mh[36] = { 254, 0, 0, 32 };
+        transcript(t, h1);                                      /* хеш первого ClientHello -> message_hash */
+        memcpy(mh + 4, h1, 32);
+        sha256_init(&t->th);
+        sha256_update(&t->th, mh, 36);
+        sha256_update(&t->th, t->hs, used);                     /* сам HelloRetryRequest */
+        if (t->hslen > used) { seterr(err, emax, "unexpected data after HelloRetryRequest"); goto fail; }
+        t->hslen = 0; used = 0;
+        group = 0x0017;
+        random_bytes(priv, 32);
+        priv[0] &= 0x7F;                                        /* меньше порядка группы */
+        if (p256_keygen(priv, pub) < 0) { seterr(err, emax, "P-256 key error"); goto fail; }
+        hn = client_hello(hello, host, rnd, group, pub, clen ? cookie : NULL, clen);
+        sha256_update(&t->th, hello, hn);
+        if (send_record(t, 22, hello, hn) < 0) { seterr(err, emax, "cannot send"); goto fail; }
+        if (next_hs(t, &type, &m, &len, &used, err, emax) < 0) goto fail;
+        if (type != 2) { seterr(err, emax, "expected ServerHello"); goto fail; }
+        sh = server_hello(t, m, len, spub, &sklen, group, &hrr_group, cookie, &clen, err, emax);
+        if (sh != 0) { if (sh > 0) seterr(err, emax, "second HelloRetryRequest"); goto fail; }
+    }
     sha256_update(&t->th, t->hs, used);
 
     /* ключи рукопожатия */
-    x25519(shared, priv, spub);
+    if (group == 0x0017) {
+        if (p256_shared(priv, spub, shared) < 0) { seterr(err, emax, "bad server key"); goto fail; }
+    } else x25519(shared, priv, spub);
     wipe(priv, 32);
     u8 zero[32], secret[32], derived[32], h[32], empty_h[32], c_hs[32], s_hs[32], fk[32], vd[32];
     int all0 = 1;
@@ -895,9 +944,31 @@ tls *tls_open(int fd, const char *host, char *err, int emax) {
     if (t->hslen > used) { seterr(err, emax, "unexpected data after ServerHello"); goto fail; }
     t->hslen = 0; used = 0;
 
-    int cert_req = 0;
+    int cert_req = 0, cv_ok = -1;
     for (;;) {
         if (next_hs(t, &type, &m, &len, &used, err, emax) < 0) goto fail;
+        if (type == 11 && !certmsg && tls_verify) {              /* сертификаты сервера — проверим после Finished */
+            certmsg = malloc(len > 0 ? len : 1);
+            if (certmsg) { memcpy(certmsg, m, len); certlen = len; }
+        }
+        if (type == 15 && certmsg && tls_verify) {               /* CertificateVerify: подпись ключом сайта */
+            u8 content[64 + 34 + 32];
+            memset(content, 0x20, 64);
+            memcpy(content + 64, "TLS 1.3, server CertificateVerify", 34);   /* с нулём в конце */
+            transcript(t, content + 98);
+            int scheme = len >= 4 ? m[0] << 8 | m[1] : 0, sl = len >= 4 ? m[2] << 8 | m[3] : 0;
+            const u8 *leaf = NULL;
+            int leaflen = 0;
+            if (certlen >= 7) {                                 /* context, длина списка, первый сертификат */
+                int ctx = certmsg[0];
+                if (1 + ctx + 6 <= certlen) {
+                    leaflen = certmsg[1 + ctx + 3] << 16 | certmsg[1 + ctx + 4] << 8 | certmsg[1 + ctx + 5];
+                    leaf = certmsg + 1 + ctx + 6;
+                    if (leaf + leaflen > certmsg + certlen) leaf = NULL;
+                }
+            }
+            cv_ok = leaf && sl <= len - 4 ? x509_verify_tls(leaf, leaflen, scheme, m + 4, sl, content, sizeof(content)) == 0 : 0;
+        }
         if (type == 20) {                                       /* Finished сервера */
             transcript(t, h);
             hkdf_label(s_hs, "finished", 0, 0, fk, 32);
@@ -912,6 +983,29 @@ tls *tls_open(int fd, const char *host, char *err, int emax) {
     }
     if (t->hslen > used) { seterr(err, emax, "unexpected data after Finished"); goto fail; }
     t->hslen = 0;
+
+    /* сертификаты: цепочка до корня, имя сайта, сроки */
+    if (!tls_verify) snprintf(t->cert_err, sizeof(t->cert_err), "certificate not checked");
+    else if (!certmsg) snprintf(t->cert_err, sizeof(t->cert_err), "server sent no certificate");
+    else if (cv_ok != 1) snprintf(t->cert_err, sizeof(t->cert_err), "server signature (CertificateVerify) is wrong");
+    else {
+        const u8 *cs[10];
+        int cl[10], nc = 0;
+        int ctx = certmsg[0], i = 1 + ctx + 3;
+        while (i + 3 <= certlen && nc < 10) {
+            int l = certmsg[i] << 16 | certmsg[i + 1] << 8 | certmsg[i + 2];
+            if (i + 3 + l + 2 > certlen) break;
+            cs[nc] = certmsg + i + 3; cl[nc] = l; nc++;
+            i += 3 + l;
+            i += 2 + (certmsg[i] << 8 | certmsg[i + 1]);         /* расширения записи */
+        }
+        if (x509_verify_chain(cs, cl, nc, host, t->cert_err, sizeof(t->cert_err), t->issuer, sizeof(t->issuer)) == 0) {
+            t->cert_ok = 1;
+            t->cert_err[0] = 0;
+        }
+    }
+    free(certmsg);
+    certmsg = NULL;
 
     /* ключи данных — от хеша по Finished сервера включительно */
     u8 c_ap[32], s_ap[32];
@@ -941,6 +1035,7 @@ tls *tls_open(int fd, const char *host, char *err, int emax) {
     snprintf(t->info, sizeof(t->info), "TLS 1.3, %s", t->suite == SUITE_CHACHA ? "ChaCha20-Poly1305" : "AES-128-GCM");
     return t;
 fail:
+    free(certmsg);
     if (t) {
         if (t->keys_on) { static const u8 a[2] = { 2, 40 }; send_record(t, 21, a, 2); }
         free(t->hs);
@@ -953,6 +1048,9 @@ fail:
 }
 
 const char *tls_info(tls *t) { return t->info; }
+int tls_cert_ok(tls *t) { return t->cert_ok; }
+const char *tls_cert_error(tls *t) { return t->cert_err; }
+const char *tls_cert_issuer(tls *t) { return t->issuer; }
 
 int tls_read(tls *t, void *buf, int len) {
     while (!t->eof) {

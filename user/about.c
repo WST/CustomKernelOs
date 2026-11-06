@@ -9,7 +9,7 @@ int main(void) {
     if (!win) { dprintf(STDERR, "about: the desktop is not running\n"); return 1; }
     gfx_gradient(0, 0, W, 96, RGB(119, 33, 111), RGB(233, 84, 32));    /* цвета Ubuntu */
     text_draw(FONT_UI_BOLD, 44, 24, 18, "MyOS", C_WHITE);
-    text_draw(FONT_UI, 15, 160, 44, "version 0.18", RGB(255, 228, 214));
+    text_draw(FONT_UI, 15, 160, 44, "version 0.19", RGB(255, 228, 214));
     gfx_fill_rect(0, 96, W, H - 96, UI_FACE);
     static const char *lines[] = {
         "An operating system written from scratch",

@@ -4,10 +4,10 @@
  * раскладывает текст по строкам: заголовки, абзацы, списки, ссылки, жирный,
  * <pre>, таблицы (упрощённо), горизонтальные линии, формы с полями ввода
  * (поиск работает). Переходы по ссылкам и редиректам, «Назад»/«Вперёд».
- * Картинки показываются рамкой с подписью.
+ * Картинки PNG/GIF/JPEG/BMP (user/lib/img.c) догружаются после показа страницы.
  *
  * HTTPS — свой, через user/lib/tls.c (TLS 1.3: X25519 + ChaCha20-Poly1305 или
- * AES-128-GCM). Сертификат сервера пока не проверяется. Если сайт не умеет
+ * AES-128-GCM), сертификат проверяется (user/lib/x509.c). Если сайт не умеет
  * TLS 1.3 (только 1.2 и старше), страница открывается через FrogFind — сервис
  * для старых компьютеров: он сам скачивает страницу и отдаёт её по HTTP.
  * Поиск — тоже через FrogFind.
@@ -28,6 +28,7 @@
 #include "win.h"
 #include "tls.h"
 #include "dom.h"
+#include "img.h"
 
 static int W = 800, H = 576;          /* окно можно растягивать */
 #define BAR_H 36
@@ -46,14 +47,29 @@ static window *win;
  * Всё, что нужно одной странице (слова, ссылки), берём из одного большого
  * куска и выбрасываем разом при переходе на другую. */
 
-static char *arena;
+static char *arena;                /* текущий кусок; arena_used = 0 — выбросить всё */
 static int arena_used, arena_cap;
+static char *arena_more[15];       /* большой странице — ещё куски по 1 МБ (до 16 МБ) */
+static int n_more, more_used;
 
 static void *aalloc(int n) {
     n = (n + 3) & ~3;
-    if (arena_used + n > arena_cap) return NULL;
-    void *p = arena + arena_used;
-    arena_used += n;
+    if (arena_used == 0 && n_more) {                 /* новая страница: лишние куски отдать */
+        for (int i = 0; i < n_more; i++) free(arena_more[i]);
+        n_more = 0;
+    }
+    if (n > arena_cap) return NULL;
+    if (!n_more && arena_used + n <= arena_cap) { void *p = arena + arena_used; arena_used += n; return p; }
+    if (!n_more || more_used + n > arena_cap) {
+        if (n_more == 15) return NULL;
+        char *c = malloc(arena_cap);
+        if (!c) return NULL;
+        arena_more[n_more++] = c;
+        more_used = 0;
+        if (!arena_used) arena_used = 4;              /* чтобы «arena_used = 0» значило сброс */
+    }
+    void *p = arena_more[n_more - 1] + more_used;
+    more_used += n;
     return p;
 }
 
@@ -67,7 +83,7 @@ static char *astrdup(const char *s, int n) {
 
 /* ------------------------------------------------------------ элементы на странице */
 
-enum { IT_TEXT, IT_HR, IT_BOX, IT_INPUT, IT_BUTTON, IT_BULLET, IT_FILL };
+enum { IT_TEXT, IT_HR, IT_BOX, IT_INPUT, IT_BUTTON, IT_BULLET, IT_FILL, IT_IMG };
 
 struct item {
     int  x, y, w, h;
@@ -78,13 +94,34 @@ struct item {
     int  link;                     /* номер ссылки или -1 */
     int  input;                    /* IT_INPUT / IT_BUTTON: номер поля */
     int  node;                     /* элемент DOM, которому принадлежит (для щелчков в JS) */
+    int  img;                      /* IT_IMG: номер в кэше картинок */
     char *text;
 };
 
-#define MAX_ITEMS 12000
-#define MAX_LINKS 1500
-#define MAX_INPUTS 64
-#define MAX_FORMS 16
+/* ------------------------------------------------------------ картинки
+ * Кэш по адресу: сначала «в очереди», после загрузки — пиксели (уже уменьшенные, если
+ * были огромными) и копия под размер на странице. Качаются после показа страницы,
+ * по одной между событиями окна — страница не ждёт картинок. */
+enum { IMG_QUEUED, IMG_OK, IMG_FAILED };
+struct imgent {
+    char *url;
+    int state, w, h, alpha;
+    unsigned *px;                  /* w x h, 0xAARRGGBB */
+    unsigned *sc;                  /* под размер на странице: sw x sh (или == px) */
+    int sw, sh;
+    unsigned used;                 /* для выбрасывания давно не нужных */
+    int page;                      /* номер страницы, на которой нужна */
+};
+#define IMG_N 400
+static struct imgent imgs[IMG_N];
+static int img_page;               /* растёт с каждой новой страницей */
+static unsigned img_clock;
+static int img_find(const char *u, bool create);
+
+#define MAX_ITEMS 60000
+#define MAX_LINKS 6000
+#define MAX_INPUTS 200
+#define MAX_FORMS 40
 
 static struct item *items;
 static int n_items;
@@ -101,6 +138,9 @@ static int form_node[MAX_FORMS];
 static int n_forms, cur_form = -1;
 
 static char page_title[80];
+static bool loading;               /* идёт загрузка — кнопка R превращается в X */
+static int nav_depth;              /* вложенность navigate (скрипт может перейти по адресу) */
+static bool page_is_dom;           /* страница построена через DOM (а не простой текст) */
 static char url[512];              /* адрес текущей страницы */
 static char status[160];
 static char hover_link[160];
@@ -237,7 +277,7 @@ static void init_styles(void) {
 
 /* прямоугольники фона и рамок блоков */
 struct box { int x, y, w, h; int bg; short bw[4]; int bc[4]; };
-#define MAX_BOXES 3000
+#define MAX_BOXES 12000
 static struct box *boxes;
 static int n_boxes;
 
@@ -434,9 +474,11 @@ static bool get_attr(const char *tag, int n, const char *name, char *out, int ma
         int o = 0;
         while (j < n && (q ? tag[j] != q : (!isspace(tag[j]) && tag[j] != '>')) && o < max - 1) out[o++] = tag[j++];
         out[o] = 0;
-        char tmp[512];
-        decode_text(out, o, tmp, sizeof(tmp));             /* &amp; в адресах */
-        snprintf(out, max, "%s", tmp);
+        if (strchr(out, '&')) {                           /* &amp; в адресах */
+            static char tmp[65536];
+            decode_text(out, o, tmp, sizeof(tmp));
+            snprintf(out, max, "%s", tmp);
+        }
         return true;
     }
     out[0] = 0;
@@ -501,6 +543,72 @@ static void tag_input(const char *t, int n, bool button_tag) {
     n_inputs++;
 }
 
+/* <img>: размер из width/height, CSS или самой картинки (если уже скачана) -> IT_IMG.
+ * false — картинку не показать (нет адреса, не скачалась): пусть будет подпись [alt] */
+static bool img_tag(const char *t, int n, const char *alt) {
+    static char src[65536];                                 /* data:-адреса бывают длинными */
+    if (!get_attr(t, n, "src", src, sizeof(src)) || !src[0] || (!strncmp(src, "data:", 5) && strlen(src) < 200) ||
+        strstr(src, "blank.gif") || strstr(src, "spacer.gif") || strstr(src, "pixel.gif")) {
+        /* «ленивые» картинки: настоящий адрес в data-src, в src заглушка */
+        char alt2[2048];
+        if (get_attr(t, n, "data-src", alt2, sizeof(alt2)) || get_attr(t, n, "data-original", alt2, sizeof(alt2)) ||
+            get_attr(t, n, "data-lazy-src", alt2, sizeof(alt2))) snprintf(src, sizeof(src), "%s", alt2);
+        else if (get_attr(t, n, "srcset", alt2, sizeof(alt2))) {           /* первый вариант из srcset */
+            int k = 0;
+            while (alt2[k] && alt2[k] != ' ' && alt2[k] != ',') k++;
+            alt2[k] = 0;
+            snprintf(src, sizeof(src), "%s", alt2);
+        }
+    }
+    if (!src[0]) return false;
+    char full[1024];
+    const char *u = src;
+    if (strncmp(src, "data:", 5)) { resolve_url(url, src, full, sizeof(full)); u = full; }
+    int k = img_find(u, true);
+    if (k < 0) return false;
+    struct imgent *e = &imgs[k];
+    e->page = img_page;
+    if (e->state == IMG_FAILED) return false;
+    char v[16];
+    int aw = get_attr(t, n, "width", v, sizeof(v)) && !strchr(v, '%') ? atoi(v) : 0;
+    int ah = get_attr(t, n, "height", v, sizeof(v)) && !strchr(v, '%') ? atoi(v) : 0;
+    if (aw <= 0 || aw > 8000) aw = 0;
+    if (ah <= 0 || ah > 8000) ah = 0;
+    int id = node_attr(t, n);
+    const struct dom_style *st = id >= 0 ? dom_style(id) : NULL;
+    int avail = right - left;
+    if (st && st->width > 0 && st->width < 8000) aw = st->width_pct ? avail * st->width / 100 : st->width;
+    int w, h;
+    if (aw && ah) { w = aw; h = ah; }
+    else if (e->state == IMG_OK) {
+        if (aw) { w = aw; h = aw * e->h / e->w; }
+        else if (ah) { h = ah; w = ah * e->w / e->h; }
+        else { w = e->w; h = e->h; }
+    } else if (aw || ah) { w = aw ? aw : ah; h = ah ? ah : aw; }       /* пока не скачалась — квадрат */
+    else { w = 24; h = 24; }                                           /* размер узнаем потом */
+    bool guess = e->state != IMG_OK && !(aw && ah);
+    if (w <= 2 && h <= 2) return true;                                 /* пиксель-счётчик: не показываем */
+    int maxw = avail;
+    if (st && st->max_width >= 0) { int mw = st->max_width_pct ? avail * st->max_width / 100 : st->max_width; if (mw > 0 && mw < maxw) maxw = mw; }
+    if (w > maxw && maxw > 16) { h = h * maxw / w; w = maxw; }        /* max-width: 100% и просто узкое окно */
+    if (h > 4000) h = 4000;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    apply_gap();
+    if (space_pending && lx > left) lx += 4;
+    if (lx + w > right && lx > left) finish_line();
+    struct item *it = add_item(IT_IMG, w, h);
+    if (!it) return true;
+    it->img = k;
+    it->scale = guess;                                     /* размер угадан — после загрузки разложить заново */
+    it->text = astrdup(alt, strlen(alt));
+    it->link = cur_link;
+    if (id >= 0) it->node = id;
+    lx += w;
+    space_pending = true;
+    return true;
+}
+
 static void handle_tag(const char *t, int n) {
     bool close = n > 0 && t[0] == '/';
     if (close) { t++; n--; }
@@ -558,6 +666,7 @@ static void handle_tag(const char *t, int n) {
         if (close) return;
         char alt[80];
         get_attr(t, n, "alt", alt, sizeof(alt));
+        if (img_tag(t, n, alt)) return;                     /* настоящая картинка */
         if (cs->notext && !alt[0]) return;
         char label[96];
         snprintf(label, sizeof(label), "[%s]", alt[0] ? alt : "image");
@@ -1003,7 +1112,7 @@ static void draw_toolbar(void) {
     gfx_fill_rect(0, BAR_H - 1, W, 1, RGB(200, 200, 200));
     ui_button(6, 6, 30, 24, "<", false);
     ui_button(40, 6, 30, 24, ">", false);
-    ui_button(74, 6, 30, 24, "R", false);
+    ui_button(74, 6, 30, 24, loading ? "X" : "R", false);       /* пока грузится — «остановить» */
     ui_button(108, 6, 30, 24, "H", false);
     ui_sunken(144, 6, W - 150, 24, C_WHITE);
     static char shown[1100];
@@ -1031,6 +1140,8 @@ static void draw_status(void) {
     snprintf(s, sizeof(s), "%.96s", hover_link[0] ? hover_link : status);
     gfx_text(6, H - STATUS_H + 2, s, UI_DARK, TRANSPARENT);
 }
+
+static void draw_img(struct item *it, int y);
 
 static void draw_page(void) {
     gfx_fill_rect(0, VIEW_Y, W, VIEW_H, page_bg >= 0 ? (color_t)page_bg : C_WHITE);
@@ -1088,6 +1199,9 @@ static void draw_page(void) {
             gfx_fill_rect(it->x, y + 4, it->w, 1, RGB(170, 170, 170));
             gfx_fill_rect(it->x, y + 5, it->w, 1, RGB(230, 230, 230));
             break;
+        case IT_IMG:
+            draw_img(it, y);
+            break;
         case IT_BOX:
             gfx_fill_rect(it->x, y, it->w, it->h, RGB(245, 245, 235));
             gfx_rect(it->x, y, it->w, it->h, it->link >= 0 ? RGB(0, 0, 238) : RGB(180, 180, 170));
@@ -1125,8 +1239,12 @@ static void redraw(void) {
     win_update(win);
 }
 
+static bool verbose;                /* browser -v: строки статуса ещё и в stdout (видно на COM1) */
+static unsigned t_start;
+
 static void set_status(const char *s) {
     snprintf(status, sizeof(status), "%s", s);
+    if (verbose) printf("[browser %u ms] %s\n", ticks() - t_start, s);
     hover_link[0] = 0;
     draw_status();
     win_update_rect(win, 0, H - STATUS_H, W, STATUS_H);
@@ -1138,14 +1256,25 @@ static char *body;                 /* содержимое последнего 
 static int body_len;
 static tls *conn;                  /* открытое HTTPS-соединение (иначе NULL) */
 static char tls_err[96];           /* почему не вышло HTTPS */
-static char secure[48];            /* "TLS 1.3, ChaCha20-Poly1305" для статуса */
+static char secure[120];           /* "TLS 1.3, ChaCha20-Poly1305, certificate OK (Let's Encrypt)" для статуса */
+static char cert_problem[160];     /* сертификат не прошёл проверку: почему (для страницы-предупреждения) */
+static char cert_host[128];        /* ...у какого сайта */
+static char trusted[16][128];      /* сайты, которые человек велел открыть, несмотря на сертификат */
+static int n_trusted;
 
+static bool host_trusted(const char *h) {
+    for (int i = 0; i < n_trusted; i++) if (!strcmp(trusted[i], h)) return true;
+    return false;
+}
+
+static unsigned req_total_ms = 60000, req_idle_lim = 20000;   /* сроки запроса (страница / скрипты) */
 static const char *req_method = "GET";   /* метод и тело следующего запроса (XMLHttpRequest/fetch из JS) */
+static const char *req_accept = "text/html, text/plain, */*";
 static const char *req_body;
 static int req_body_len;
 static char resp_ctype[96];        /* Content-Type последнего ответа */
 
-#define USER_AGENT "Mozilla/5.0 (MyOS; i386) MyOS-Browser/0.16"
+#define USER_AGENT "Mozilla/5.0 (MyOS; i386) MyOS-Browser/0.19"
 
 /* консоль JavaScript: последние строки console.log и ошибок (about:console, Ctrl+K) */
 static char console_buf[12288];
@@ -1179,8 +1308,115 @@ static int console_page(char *out, int max) {
     return o;
 }
 
-static int net_read(int fd, void *b, int n) { return conn ? tls_read(conn, b, n) : read(fd, b, n); }
+/* ---- ожидание сети без «зависания» окна ----
+ * У сокета тайм-аут чтения 100 мс (sockctl). Каждый раз, когда данных нет, зовётся
+ * net_idle(): она смотрит события окна (Esc и кнопка «X» — остановить, крестик — выйти,
+ * растягивание — запомнить размер) и следит за сроками: сервер молчит дольше idle_ms
+ * или весь запрос идёт дольше total — бросаем. */
+static bool stop_req;              /* Esc / «X»: остановить загрузку страницы */
+static bool resized_while_busy;    /* окно растянули, пока были заняты: потом разложить заново */
+static unsigned req_last_data, req_idle_ms, req_deadline;
+static char req_fail[64];          /* почему запрос оборвался */
+static void draw_toolbar(void);
+static void redraw(void);
+
+/* события, пришедшие, пока работал долгий скрипт (не во время загрузки): главный цикл их потом обработает */
+static struct event later[16];
+static int n_later;
+
+static void busy_events(void) {
+    static unsigned last;
+    if (ticks() - last < 50) return;
+    last = ticks();
+    struct event e;
+    for (int k = 0; k < 16 && win_event(&e, 0); k++) {
+        if (e.type == EV_TIMEOUT) break;
+        if (e.type == EV_CLOSE || e.type == EV_QUIT) { win_destroy(win); exit(0); }
+        if (e.type == EV_KEY && e.key == 27) stop_req = true;
+        else if (e.type == EV_MOUSE_DOWN && e.y < BAR_H && ui_inside(e.x, e.y, 74, 6, 30, 24) && loading) stop_req = true;
+        else if (!loading && e.type != EV_RESIZE && e.type != EV_MOUSE_MOVE && n_later < 16) later[n_later++] = e;
+        if (e.type == EV_RESIZE) {                            /* буфер уже новый — нарисовать, что есть */
+            W = e.x; H = e.y;
+            resized_while_busy = true;
+            redraw();
+        }
+    }
+}
+
+static int net_idle(void) {
+    busy_events();
+    unsigned now = ticks();
+    if (stop_req) { snprintf(req_fail, sizeof(req_fail), "stopped"); return 0; }
+    if (now - req_last_data > req_idle_ms) { snprintf(req_fail, sizeof(req_fail), "server does not answer"); return 0; }
+    if ((int)(now - req_deadline) > 0) { snprintf(req_fail, sizeof(req_fail), "took too long"); return 0; }
+    return 1;
+}
+
+/* JS-движок зовёт это примерно раз в 100 мс, пока работает скрипт: 1 — прервать скрипт */
+static int js_busy_poll(void) {
+    busy_events();
+    return stop_req;
+}
+
+static int net_read(int fd, void *b, int n) {
+    for (;;) {
+        int r = conn ? tls_read(conn, b, n) : read(fd, b, n);
+        if (r > 0) { req_last_data = ticks(); return r; }
+        if (r == -ETIMEDOUT && !conn) { if (net_idle()) continue; return -ETIMEDOUT; }
+        if (r < 0 && req_fail[0]) return -ETIMEDOUT;            /* tls_read: net_idle сказала «хватит» */
+        return r;
+    }
+}
 static int net_write(int fd, const void *b, int n) { return conn ? tls_write(conn, b, n) : write(fd, b, n); }
+
+/* реклама и счётчики: тяжёлые скрипты, которые ничего не показывают */
+static bool blocked_host(const char *u) {
+    static const char *bad[] = {
+        "google-analytics.com", "googletagmanager.com", "googletagservices.com", "doubleclick.net",
+        "googlesyndication.com", "googleadservices.com", "adservice.google.", "pagead2.", "connect.facebook.net",
+        "mc.yandex.ru", "an.yandex.ru", "yandex.ru/ads", "top-fwz1.mail.ru", "counter.yadro.ru", "ad.mail.ru",
+        "scorecardresearch.com", "quantserve.com", "chartbeat.", "hotjar.com", "criteo.", "taboola.com",
+        "outbrain.com", "amazon-adsystem.com", "adnxs.com", "moatads.com", "js-agent.newrelic.com",
+        "bam.nr-data.net", "cdn.segment.com", "mixpanel.com", "adfox.", "adriver.ru", "tns-counter.ru",
+        "smartadserver.", "pubmatic.com", "rubiconproject.com", "openx.net", "yieldmo.", "clarity.ms",
+        "static.cloudflareinsights.com", "sentry-cdn.com", "browser.sentry-cdn",
+    };
+    const char *h = strstr(u, "://");
+    if (!h) return false;
+    h += 3;
+    char host[160];
+    int n = 0;
+    while (h[n] && h[n] != '/' && h[n] != '?' && h[n] != '#' && n < 159) { host[n] = tolower(h[n]); n++; }
+    host[n] = 0;
+    for (unsigned i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) if (strstr(host, bad[i]) || (strchr(bad[i], '/') && strstr(u, bad[i]))) return true;
+    return false;
+}
+
+/* разобрать Transfer-Encoding: chunked на месте; -> новая длина */
+static int dechunk(char *b, int len) {
+    int r = 0, w = 0;
+    while (r < len) {
+        unsigned size = 0;
+        int digits = 0;
+        while (r < len) {
+            char c = tolower(b[r]);
+            int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (d < 0) break;
+            if (size > 0x0FFFFFFF) return w;                   /* чепуха вместо размера */
+            size = size * 16 + d; r++; digits++;
+        }
+        if (!digits) return w;                                  /* не похоже на кусок — что есть */
+        while (r < len && b[r] != '\n') r++;                    /* ";расширения" и \r\n */
+        r++;
+        if (size == 0 || r >= len) break;
+        if (size > (unsigned)(len - r)) size = len - r;         /* оборвалось на середине */
+        memmove(b + w, b + r, size);
+        w += size; r += size;
+        if (r < len && b[r] == '\r') r++;
+        if (r < len && b[r] == '\n') r++;
+    }
+    return w;
+}
 
 static const char *home_page =
     "<title>MyOS Browser</title>"
@@ -1258,6 +1494,15 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     resp_ctype[0] = 0;
     if (p.about) {
         if (!strcmp(p.path, "console")) { body_len = console_page(body, MAX_PAGE); return 200; }
+        if (!strncmp(p.path, "trust?", 6)) {                /* «всё равно открыть» сайт с плохим сертификатом */
+            struct url_parts t;
+            if (parse_url(p.path + 6, &t) && t.host[0] && !host_trusted(t.host)) {
+                snprintf(trusted[n_trusted % 16], sizeof(trusted[0]), "%s", t.host);
+                if (n_trusted < 16) n_trusted++;
+            }
+            snprintf(location, loc_max, "%s", p.path + 6);
+            return 302;
+        }
         const char *pg = !strcmp(p.path, "js") ? js_page : home_page;
         int n = strlen(pg);
         memcpy(body, pg, n);
@@ -1292,36 +1537,63 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
         return 200;
     }
     char msg[160];
+    if (stop_req) { set_status("Stopped"); return -1; }
     snprintf(msg, sizeof(msg), "Connecting to %s...", p.host);
     set_status(msg);
-    int fd = tcp_connect(p.host, p.port);
+    req_fail[0] = 0;
+    int fd = tcp_connect_timeout(p.host, p.port, 10000);
     if (fd < 0) {
-        snprintf(msg, sizeof(msg), "%s: %s", p.host, fd == -ENOENT ? "host not found" : strerror(-fd));
+        snprintf(msg, sizeof(msg), "%s: %s", p.host, fd == -ENOENT ? "host not found" :
+                 fd == -ETIMEDOUT ? "no answer (timed out)" : strerror(-fd));
         set_status(msg);
         return -1;
     }
+    sockctl(fd, SOCK_RCVTIMEO, 100);                        /* ждём по 100 мс, между ними — net_idle */
+    req_last_data = ticks();
+    req_deadline = ticks() + req_total_ms;
+    req_idle_ms = req_idle_lim;
+    tls_idle = net_idle;
     secure[0] = 0;
     if (p.https) {                                          /* HTTPS: рукопожатие TLS 1.3 */
         snprintf(msg, sizeof(msg), "TLS handshake with %s...", p.host);
         set_status(msg);
         conn = tls_open(fd, p.host, tls_err, sizeof(tls_err));
-        if (!conn) { close(fd); return -2; }
-        snprintf(secure, sizeof(secure), "%s", tls_info(conn));
+        if (!conn) {
+            close(fd);
+            if (req_fail[0]) { snprintf(msg, sizeof(msg), "%s: %s", p.host, req_fail); set_status(msg); return -1; }
+            return -2;
+        }
+        if (tls_cert_ok(conn)) snprintf(secure, sizeof(secure), "%s, certificate OK (%.40s)", tls_info(conn), tls_cert_issuer(conn));
+        else if (host_trusted(p.host)) snprintf(secure, sizeof(secure), "%s, CERTIFICATE NOT TRUSTED (opened anyway)", tls_info(conn));
+        else {                                              /* не проверен — не отдаём ни байта */
+            snprintf(cert_problem, sizeof(cert_problem), "%s", tls_cert_error(conn));
+            snprintf(cert_host, sizeof(cert_host), "%s", p.host);
+            tls_close(conn); conn = NULL; tls_idle = NULL;
+            close(fd);
+            snprintf(msg, sizeof(msg), "%s: certificate problem - %s", p.host, cert_problem);
+            set_status(msg);
+            return -3;
+        }
     }
     char cookies[2048], req[4096];
     cookie_get(p.host, cookies, sizeof(cookies));
     int rl = snprintf(req, sizeof(req),
         "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: " USER_AGENT "\r\n"
-        "Accept: text/html, text/plain, */*\r\nAccept-Language: ru, en\r\nConnection: close\r\n",
-        req_method, p.path, p.host);
-    if (cookies[0]) rl += snprintf(req + rl, sizeof(req) - rl, "Cookie: %s\r\n", cookies);
-    if (req_body) rl += snprintf(req + rl, sizeof(req) - rl, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n", req_body_len);
-    rl += snprintf(req + rl, sizeof(req) - rl, "\r\n");
+        "Accept: %s\r\nAccept-Language: ru, en\r\nConnection: close\r\n",
+        req_method, p.path, p.host, req_accept);
+    if (cookies[0] && rl < (int)sizeof(req)) rl += snprintf(req + rl, sizeof(req) - rl, "Cookie: %s\r\n", cookies);
+    if (req_body && rl < (int)sizeof(req)) rl += snprintf(req + rl, sizeof(req) - rl, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n", req_body_len);
+    if (rl < (int)sizeof(req)) rl += snprintf(req + rl, sizeof(req) - rl, "\r\n");
+    if (rl >= (int)sizeof(req)) rl = sizeof(req) - 1;
     net_write(fd, req, rl);
     if (req_body && req_body_len) net_write(fd, req_body, req_body_len);
     int n, total = 0, expect = -1;                       /* expect: где кончится ответ по Content-Length */
     unsigned last = ticks();
-    while (total < MAX_PAGE && (n = net_read(fd, body + total, MAX_PAGE - total)) > 0) {
+    bool cut = false;                                     /* оборвали по тайм-ауту или Esc */
+    while (total < MAX_PAGE) {
+        n = net_read(fd, body + total, MAX_PAGE - total);
+        if (n == -ETIMEDOUT) { cut = true; break; }
+        if (n <= 0) break;
         total += n;
         if (expect < 0) {                                   /* заголовки пришли? узнаем длину */
             body[total] = 0;
@@ -1331,29 +1603,39 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
                 for (char *p2 = body; p2 < he; p2++)
                     if ((*p2 == 'C' || *p2 == 'c') && !strncmp(p2 + 1, "ontent-", 7) &&
                         (p2[8] == 'L' || p2[8] == 'l') && !strncmp(p2 + 9, "ength:", 6)) {
-                        expect = (he - body) + 4 + atoi(p2 + 15);
+                        int cl = atoi(p2 + 15);
+                        expect = cl > 0 ? (he - body) + 4 + cl : cl == 0 ? (he - body) + 4 : 0;
+                        if (cl == 0) expect = -2;          /* пустое тело */
                         break;
                     }
+                if (expect == -2) break;
+                /* что-то пришло — дальше ждём не дольше, чем позволяет «молчание» сервера */
             }
         }
         if (expect > 0 && total >= expect) break;           /* всё получили — не ждём закрытия */
         if (ticks() - last > 300) {
             last = ticks();
-            snprintf(msg, sizeof(msg), "Reading %s... %d KB", p.host, total / 1024);
+            snprintf(msg, sizeof(msg), "Reading %s... %d KB%s", p.host, total / 1024, nav_depth ? " (Esc - stop)" : "");
             set_status(msg);
         }
     }
     if (conn) { tls_close(conn); conn = NULL; }
+    tls_idle = NULL;
     close(fd);
+    if (cut) {
+        snprintf(msg, sizeof(msg), "%s: %s", p.host, req_fail[0] ? req_fail : "timed out");
+        set_status(msg);
+    }
     /* заголовки */
     int hend = -1;
     for (int i = 0; i + 3 < total; i++)
         if (body[i] == '\r' && body[i + 1] == '\n' && body[i + 2] == '\r' && body[i + 3] == '\n') { hend = i; break; }
-    if (hend < 0) { set_status("bad response"); return -1; }
+    if (hend < 0) { if (!cut) set_status(total ? "bad response" : "empty response"); return -1; }
     body[hend] = 0;
     int code = 0;
     char *sp = strchr(body, ' ');
     if (sp) code = atoi(sp + 1);
+    if (code <= 0) code = 200;
     bool chunked = false;
     cp1251 = false;
     for (char *line = body; line && *line;) {
@@ -1379,28 +1661,12 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     int start = hend + 4;
     memmove(body, body + start, total - start);
     body_len = total - start;
-    if (chunked) {                                          /* склеить куски «размер\r\nданные\r\n» */
-        int r = 0, w = 0;
-        while (r < body_len) {
-            int size = 0;
-            while (r < body_len && isalnum(body[r])) {
-                char c = tolower(body[r++]);
-                size = size * 16 + (isdigit(c) ? c - '0' : c - 'a' + 10);
-            }
-            while (r < body_len && body[r] != '\n') r++;
-            r++;
-            if (size == 0) break;
-            if (r + size > body_len) size = body_len - r;
-            memmove(body + w, body + r, size);
-            w += size; r += size + 2;
-        }
-        body_len = w;
-    }
+    if (chunked) body_len = dechunk(body, body_len);
+    if (cut && (code < 200 || code >= 300 || !nav_depth || !body_len)) return -1;   /* обрывок годится только как страница */
     return code;
 }
 
 static void navigate(const char *target, bool add_history);
-static int nav_depth;
 static char page_status[160];
 
 /* windows-1251 -> UTF-8 (DOM и скрипты работают с UTF-8) */
@@ -1427,6 +1693,52 @@ static void cp1251_to_utf8(void) {
 }
 
 /* скачать адрес для скрипта (внешний <script>, XMLHttpRequest, fetch) */
+/* кэш скачанного для скриптов и стилей: одно и то же (jquery, общий CSS) не качаем заново */
+#define CACHE_N 48
+#define CACHE_BYTES (6 << 20)
+static struct { char *url, *data, ctype[64]; int len, status; unsigned used; } cache[CACHE_N];
+static unsigned cache_clock;
+
+static int cache_find(const char *u) {
+    for (int i = 0; i < CACHE_N; i++) if (cache[i].url && !strcmp(cache[i].url, u)) { cache[i].used = ++cache_clock; return i; }
+    return -1;
+}
+
+static void cache_put(const char *u, const char *data, int len, int status, const char *ctype) {
+    if (len > CACHE_BYTES / 4) return;
+    int total = len;
+    for (int i = 0; i < CACHE_N; i++) if (cache[i].url) total += cache[i].len;
+    for (;;) {                                            /* выбросить самые давние, пока не влезет */
+        int old = -1, empty = -1;
+        for (int i = 0; i < CACHE_N; i++) {
+            if (!cache[i].url) { if (empty < 0) empty = i; continue; }
+            if (old < 0 || cache[i].used < cache[old].used) old = i;
+        }
+        if (empty >= 0 && total <= CACHE_BYTES) {
+            char *d = malloc(len + 1), *k = malloc(strlen(u) + 1);
+            if (!d || !k) { free(d); free(k); return; }
+            memcpy(d, data, len); d[len] = 0;
+            strcpy(k, u);
+            cache[empty].url = k; cache[empty].data = d; cache[empty].len = len; cache[empty].status = status;
+            snprintf(cache[empty].ctype, sizeof(cache[empty].ctype), "%s", ctype);
+            cache[empty].used = ++cache_clock;
+            return;
+        }
+        if (old < 0) return;
+        total -= cache[old].len;
+        free(cache[old].url); free(cache[old].data);
+        cache[old].url = cache[old].data = NULL;
+    }
+}
+
+static unsigned page_t0;            /* когда начали грузить текущую страницу */
+#define SUBRES_BUDGET 25000         /* скрипты и стили страницы качаем не дольше 25 с в сумме */
+static int n_skipped;               /* сколько скриптов/стилей не стали качать */
+static bool painted_early;          /* страницу уже показали, не дожидаясь всех скриптов */
+static void early_paint(void);
+static void relayout(bool keep);
+
+/* скачать адрес для скрипта (внешний <script>, XMLHttpRequest, fetch) */
 static int js_fetch(const char *u, const char *method, const char *data, int dlen,
                     char **out, int *len, int *status, char *ctype, int cmax) {
     char cur[1024], loc[512];
@@ -1434,10 +1746,40 @@ static int js_fetch(const char *u, const char *method, const char *data, int dle
     *out = NULL;
     *len = 0;
     if (strncmp(u, "http://", 7) && strncmp(u, "https://", 8) && strncmp(u, "file:", 5)) return -1;
+    bool get = !method || !*method || !strcmp(method, "GET");
+    if (get && !data) {
+        int c = cache_find(u);
+        if (c >= 0) {
+            *out = malloc(cache[c].len + 1);
+            if (!*out) return -1;
+            memcpy(*out, cache[c].data, cache[c].len + 1);
+            *len = cache[c].len; *status = cache[c].status;
+            snprintf(ctype, cmax, "%s", cache[c].ctype);
+            return 0;
+        }
+    }
+    if (blocked_host(u)) {                                 /* счётчики и реклама — мимо */
+        char m[200]; int l = snprintf(m, sizeof(m), "blocked (ads/analytics): %.150s\n", u);
+        console_add(m, l);
+        return -1;
+    }
+    if (nav_depth && (stop_req || ticks() - page_t0 > SUBRES_BUDGET)) {   /* страница грузится слишком долго */
+        n_skipped++;
+        char m[200]; int l = snprintf(m, sizeof(m), "skipped (%s): %.150s\n", stop_req ? "stopped" : "page loads too long", u);
+        console_add(m, l);
+        return -1;
+    }
+    if (nav_depth) early_paint();                          /* пусть человек видит страницу, пока качаем */
     snprintf(cur, sizeof(cur), "%s", u);
     req_method = method && *method ? method : "GET";
     req_body = data;
     req_body_len = dlen;
+    unsigned save_total = req_total_ms, save_idle = req_idle_lim;
+    req_total_ms = 15000; req_idle_lim = 6000;
+    if (nav_depth) {                                       /* не дольше, чем осталось от бюджета страницы */
+        unsigned left = SUBRES_BUDGET - (ticks() - page_t0);
+        if (left < req_total_ms) req_total_ms = left < 2000 ? 2000 : left;
+    }
     int code = -1;
     for (int hop = 0; hop < 5; hop++) {
         code = http_get(cur, loc, sizeof(loc), &html);
@@ -1451,10 +1793,11 @@ static int js_fetch(const char *u, const char *method, const char *data, int dle
         }
         break;
     }
+    req_total_ms = save_total; req_idle_lim = save_idle;
     req_method = "GET";
     req_body = NULL;
     req_body_len = 0;
-    if (!nav_depth) set_status(page_status);              /* запрос из скрипта после загрузки — вернуть «Done» */
+    if (!nav_depth) { stop_req = false; set_status(page_status); }   /* запрос из скрипта после загрузки — вернуть «Done» */
     if (code < 0) return -1;
     *out = malloc(body_len + 1);
     if (!*out) return -1;
@@ -1463,14 +1806,240 @@ static int js_fetch(const char *u, const char *method, const char *data, int dle
     *len = body_len;
     *status = code;
     snprintf(ctype, cmax, "%s", resp_ctype);
+    if (get && !data && code == 200 && (strstr(resp_ctype, "javascript") || strstr(resp_ctype, "css") ||
+                                        strstr(resp_ctype, "ecmascript")))
+        cache_put(u, body, body_len, code, resp_ctype);
     return 0;
 }
 
 static void js_status(const char *m) { set_status(m); }
 
+/* ---- картинки: кэш, загрузка, рисование ---- */
+#define IMG_BUDGET (20 << 20)       /* байт пикселей на все картинки */
+static bool img_more;               /* на странице, может быть, есть нескачанные картинки */
+static unsigned img_last_relayout;
+
+static void img_drop(struct imgent *e) {
+    if (e->sc && e->sc != e->px) free(e->sc);
+    free(e->px);
+    e->px = e->sc = NULL;
+    e->sw = e->sh = 0;
+}
+
+static int img_bytes(void) {
+    int b = 0;
+    for (int i = 0; i < IMG_N; i++) {
+        struct imgent *e = &imgs[i];
+        if (e->px) b += e->w * e->h * 4;
+        if (e->sc && e->sc != e->px) b += e->sw * e->sh * 4;
+    }
+    return b;
+}
+
+/* памяти мало: выбросить давно не нужные картинки (сначала — не с этой страницы) */
+static void img_trim(int need) {
+    while (img_bytes() + need > IMG_BUDGET) {
+        int old = -1;
+        for (int pass = 0; pass < 2 && old < 0; pass++)
+            for (int i = 0; i < IMG_N; i++) {
+                struct imgent *e = &imgs[i];
+                if (!e->px || (pass == 0 && e->page == img_page)) continue;
+                if (old < 0 || e->used < imgs[old].used) old = i;
+            }
+        if (old < 0) return;
+        img_drop(&imgs[old]);
+        imgs[old].state = IMG_QUEUED;                       /* понадобится — скачаем снова */
+    }
+}
+
+static void img_store(struct imgent *e, const unsigned char *data, int len) {
+    img im;
+    int side = W > 1600 ? W : 1600;
+    int iw = 0, ih = 0;
+    if (img_size(data, len, &iw, &ih) == 0 && iw > 0 && ih > 0) {
+        int dw = iw, dh = ih, sd = iw > ih ? iw : ih;
+        if (sd > side) { dw = iw * side / sd; dh = ih * side / sd; }
+        if (dw > 0 && dh > 0 && dw < 20000 && dh < 20000) img_trim(dw * dh * 4);
+    }
+    if (img_decode(data, len, &im, side) < 0) { e->state = IMG_FAILED; return; }
+    e->px = im.px; e->w = im.w; e->h = im.h; e->alpha = im.has_alpha;
+    e->state = IMG_OK;
+}
+
+static int b64v(int c) {
+    return c >= 'A' && c <= 'Z' ? c - 'A' : c >= 'a' && c <= 'z' ? c - 'a' + 26 : c >= '0' && c <= '9' ? c - '0' + 52 :
+           c == '+' || c == '-' ? 62 : c == '/' || c == '_' ? 63 : -1;
+}
+
+/* data:image/png;base64,.... — картинка прямо в адресе */
+static void img_data_url(struct imgent *e) {
+    const char *c = strchr(e->url, ',');
+    if (!c || !strstr(e->url, ";base64")) { e->state = IMG_FAILED; return; }
+    c++;
+    int n = strlen(c);
+    unsigned char *d = malloc(n * 3 / 4 + 4);
+    if (!d) { e->state = IMG_FAILED; return; }
+    int o = 0, acc = 0, bits = 0;
+    for (; *c; c++) {
+        int v = b64v((unsigned char)*c);
+        if (v < 0) continue;
+        acc = ((acc << 6) | v) & 0xFFFFFF; bits += 6;
+        if (bits >= 8) { bits -= 8; d[o++] = (acc >> bits) & 255; }
+    }
+    img_store(e, d, o);
+    free(d);
+}
+
+static int img_find(const char *u, bool create) {
+    int empty = -1;
+    for (int i = 0; i < IMG_N; i++) {
+        if (!imgs[i].url) { if (empty < 0) empty = i; continue; }
+        if (!strcmp(imgs[i].url, u)) { imgs[i].used = ++img_clock; return i; }
+    }
+    if (!create) return -1;
+    if (empty < 0) {                                       /* место кончилось: самая давняя не с этой страницы */
+        for (int i = 0; i < IMG_N; i++)
+            if (imgs[i].page != img_page && (empty < 0 || imgs[i].used < imgs[empty].used)) empty = i;
+        if (empty < 0) return -1;
+        img_drop(&imgs[empty]);
+        free(imgs[empty].url);
+        imgs[empty].url = NULL;
+    }
+    struct imgent *e = &imgs[empty];
+    memset(e, 0, sizeof(*e));
+    e->url = malloc(strlen(u) + 1);
+    if (!e->url) return -1;
+    strcpy(e->url, u);
+    e->state = IMG_QUEUED;
+    e->used = ++img_clock;
+    e->page = img_page;
+    if (!strncmp(u, "data:", 5)) img_data_url(e);
+    else img_more = true;
+    return empty;
+}
+
+/* следующая нескачанная картинка этой страницы: сначала видимые; -1 — все готовы */
+static int img_next(void) {
+    int best = -1, best_d = 0x7fffffff;
+    for (int i = 0; i < n_items; i++) {
+        struct item *it = &items[i];
+        if (it->kind != IT_IMG || imgs[it->img].state != IMG_QUEUED || !imgs[it->img].url) continue;
+        int d = it->y + it->h < scroll ? scroll - it->y : it->y > scroll + VIEW_H ? it->y - scroll : 0;
+        if (d < best_d) { best_d = d; best = it->img; if (!d) break; }
+    }
+    return best;
+}
+
+/* скачать и показать одну картинку; false — больше нечего */
+static bool img_pump(void) {
+    if (!img_more || !page_is_dom) return false;
+    int k = img_next();
+    if (k < 0) {
+        img_more = false;
+        set_status(page_status);
+        return false;
+    }
+    struct imgent *e = &imgs[k];
+    int left = 0;
+    for (int i = 0; i < IMG_N; i++) if (imgs[i].url && imgs[i].state == IMG_QUEUED && imgs[i].page == img_page) left++;
+    char msg[160];
+    snprintf(msg, sizeof(msg), "Loading images: %d left (Esc - stop)", left);
+    set_status(msg);
+    stop_req = false;
+    unsigned save_total = req_total_ms, save_idle = req_idle_lim;
+    req_total_ms = 15000; req_idle_lim = 6000;
+    req_accept = "image/png, image/gif, image/jpeg, image/bmp, */*;q=0.5";
+    char cur[1024], loc[512];
+    bool html;
+    int code = -1;
+    snprintf(cur, sizeof(cur), "%s", e->url);
+    for (int hop = 0; hop < 5; hop++) {
+        code = http_get(cur, loc, sizeof(loc), &html);
+        if (code >= 300 && code < 400 && loc[0]) { char nx[1024]; resolve_url(cur, loc, nx, sizeof(nx)); snprintf(cur, sizeof(cur), "%s", nx); continue; }
+        break;
+    }
+    req_accept = "text/html, text/plain, */*";
+    req_total_ms = save_total; req_idle_lim = save_idle;
+    if (stop_req) {                                        /* Esc: остальные картинки не качать */
+        for (int i = 0; i < IMG_N; i++) if (imgs[i].url && imgs[i].state == IMG_QUEUED && imgs[i].page == img_page) imgs[i].state = IMG_FAILED;
+        stop_req = false;
+        img_more = false;
+        set_status(page_status);
+        redraw();
+        return false;
+    }
+    if (code != 200 || body_len <= 0) e->state = IMG_FAILED;
+    else img_store(e, (const unsigned char *)body, body_len);
+    bool guessed = false;                                  /* размер на странице угадывали — разложить заново */
+    for (int i = 0; i < n_items; i++) if (items[i].kind == IT_IMG && items[i].img == k && (items[i].scale || e->state != IMG_OK)) guessed = true;
+    if (guessed && (ticks() - img_last_relayout > 500 || img_next() < 0)) {
+        relayout(true);
+        img_last_relayout = ticks();
+        redraw();
+    } else if (guessed) {
+        redraw();
+        img_more = true;
+    } else redraw();
+    return true;
+}
+
+/* нарисовать картинку item на экране в (x, y), обрезав по области страницы */
+static void draw_img(struct item *it, int y) {
+    struct imgent *e = &imgs[it->img];
+    int x = it->x, w = it->w, h = it->h;
+    int cx0 = 0, cx1 = W - SB_W, cy0 = VIEW_Y, cy1 = VIEW_Y + VIEW_H;
+    if (e->state != IMG_OK || !e->px) {                    /* ещё качается или не вышло: рамка и подпись */
+        gfx_fill_rect(x, y, w, h, RGB(242, 242, 238));
+        gfx_rect(x, y, w, h, it->link >= 0 ? RGB(120, 120, 230) : RGB(200, 200, 195));
+        if (it->text && it->text[0] && w > 24 && h >= 18) {
+            char t[64];
+            int maxc = (w - 6) / 8;
+            snprintf(t, sizeof(t), "%.*s", maxc < 63 ? maxc : 63, it->text);
+            gfx_text(x + 3, y + 2, t, RGB(120, 120, 110), TRANSPARENT);
+        }
+        return;
+    }
+    e->used = ++img_clock;
+    if (!e->sc || e->sw != w || e->sh != h) {              /* копия под размер на странице */
+        if (e->sc && e->sc != e->px) free(e->sc);
+        e->sc = NULL;
+        if (w == e->w && h == e->h) e->sc = e->px;
+        else if (w * h <= 4 << 20) e->sc = img_scale(e->px, e->w, e->h, w, h);
+        if (!e->sc) return;
+        e->sw = w; e->sh = h;
+    }
+    int ys = y < cy0 ? cy0 - y : 0, ye = y + h > cy1 ? cy1 - y : h;
+    int xs = x < cx0 ? cx0 - x : 0, xe = x + w > cx1 ? cx1 - x : w;
+    if (xe > gfx_w - x) xe = gfx_w - x;
+    if (ye > gfx_h - y) ye = gfx_h - y;
+    for (int r = ys; r < ye; r++) {
+        const unsigned *s = e->sc + r * w;
+        color_t *d = gfx_buf + (y + r) * gfx_w + x;
+        if (!e->alpha) { for (int c = xs; c < xe; c++) d[c] = s[c] & 0xFFFFFF; continue; }
+        for (int c = xs; c < xe; c++) {
+            unsigned p = s[c], a = p >> 24;
+            if (a == 255) d[c] = p & 0xFFFFFF;
+            else if (a) {
+                unsigned q = d[c], ia = 255 - a;
+                unsigned rr = (((p >> 16) & 255) * a + ((q >> 16) & 255) * ia) / 255;
+                unsigned gg = (((p >> 8) & 255) * a + ((q >> 8) & 255) * ia) / 255;
+                unsigned bb = ((p & 255) * a + (q & 255) * ia) / 255;
+                d[c] = rr << 16 | gg << 8 | bb;
+            }
+        }
+    }
+}
+
+/* скрипты страницы ещё качаются, а прошло уже больше секунды: показать то, что разобрано */
+static void early_paint(void) {
+    if (painted_early || !page_is_dom || ticks() - page_t0 < 1000) return;
+    painted_early = true;
+    relayout(false);
+    redraw();
+}
+
 static struct dom_host dom_host = { js_fetch, js_status, console_add };
 
-static bool page_is_dom;            /* страница построена через DOM (а не простой текст) */
 static unsigned last_layout;
 
 /* дерево DOM -> раскладка; keep — сохранить прокрутку и поле ввода */
@@ -1537,6 +2106,11 @@ static void navigate(const char *target, bool add_history) {
     int code = -1;
     char fallback[160];
     fallback[0] = 0;
+    bool outer = !loading;                                /* не вложенный переход (location.href из скрипта) */
+    if (outer) { stop_req = false; page_t0 = ticks(); painted_early = false; n_skipped = 0; }
+    img_page++;                                           /* картинки прошлой страницы можно выбрасывать */
+    img_more = false;
+    loading = true;
     for (int hop = 0; hop < 6; hop++) {
         snprintf(url, sizeof(url), "%s", u);
         snprintf(addr, sizeof(addr), "%s", u);
@@ -1558,10 +2132,33 @@ static void navigate(const char *target, bool add_history) {
         break;
     }
     arena_used = 0;
+    char page_secure[120];                                 /* HTTPS самой страницы (скрипты перезапишут secure) */
+    snprintf(page_secure, sizeof(page_secure), "%s", code >= 0 ? secure : "");
+    if (code == -3) {                                     /* сертификат не годится: предупредить */
+        char esc_url[600];
+        int k = 0;
+        for (int i = 0; url[i] && k < 590; i++) { char c = url[i]; if (c == '"' || c == '<' || c == '>') c = '_'; esc_url[k++] = c; }
+        esc_url[k] = 0;
+        body_len = snprintf(body, MAX_PAGE, "<title>Certificate problem</title><h1>This site's certificate is not trusted</h1>"
+                            "<p><b>%s</b>: %s</p><p>Someone may be pretending to be this site, or its certificate is just "
+                            "set up wrong (or our list of root certificates in /etc/certs.der is old).</p>"
+                            "<p><a href=\"about:home\">Go home</a> &nbsp; | &nbsp; <a href=\"about:trust?%s\">Open the site anyway</a> "
+                            "(only until the browser is closed)</p>", cert_host, cert_problem, esc_url);
+        html = true;
+        code = 0;
+    }
     if (code < 0) {
-        body_len = snprintf(body, MAX_PAGE, "<title>Error</title><h1>Cannot open this page</h1><p>See the status line below. "
-                            "Check the address, or go <a href=\"about:home\">home</a>.</p>%s%s%s",
-                            fallback[0] ? "<p><b>HTTPS:</b> " : "", fallback, fallback[0] ? "</p>" : "");
+        char why[200];
+        int k = 0;
+        for (int i = 0; status[i] && k < 190; i++) {        /* причина из строки состояния, без < и & */
+            char c = status[i];
+            if (c == '<' || c == '>' || c == '&') c = ' ';
+            why[k++] = c;
+        }
+        why[k] = 0;
+        body_len = snprintf(body, MAX_PAGE, "<title>Error</title><h1>Cannot open this page</h1><p><b>%s</b></p>"
+                            "<p>Check the address and try again (R), or go <a href=\"about:home\">home</a>.</p>%s%s%s",
+                            why, fallback[0] ? "<p><b>HTTPS:</b> " : "", fallback, fallback[0] ? "</p>" : "");
         html = true;
     }
     if (strncmp(url, "about:console", 13)) console_len = 0;
@@ -1582,7 +2179,7 @@ static void navigate(const char *target, bool add_history) {
         nav_depth--;
     } else layout_html(body, body_len, true);
     scroll = 0;
-    if (code >= 0) {
+    if (code > 0) {                                       /* 0 — своя страница-предупреждение со своим статусом */
         if (code == 200) snprintf(status, sizeof(status), "Done: %d KB, %d links", body_kb, n_links);
         else snprintf(status, sizeof(status), "HTTP %d", code);
         int sl = strlen(status);
@@ -1591,9 +2188,14 @@ static void navigate(const char *target, bool add_history) {
             dom_stats(js, sizeof(js));
             sl += snprintf(status + sl, sizeof(status) - sl, " - %s%s", js, strstr(js, "error") ? " (Ctrl+K)" : "");
         }
-        if (secure[0]) snprintf(status + sl, sizeof(status) - sl, " - %s (certificate not checked)", secure);
+        if (n_skipped && sl < (int)sizeof(status)) sl += snprintf(status + sl, sizeof(status) - sl, ", %d not loaded", n_skipped);
+        if (stop_req && sl < (int)sizeof(status)) sl += snprintf(status + sl, sizeof(status) - sl, " - stopped");
+        if (sl >= (int)sizeof(status)) sl = sizeof(status) - 1;
+        if (page_secure[0]) snprintf(status + sl, sizeof(status) - sl, " - %s", page_secure);
         else if (fallback[0]) snprintf(status + sl, sizeof(status) - sl, " - %s", fallback);
     }
+    if (code == 0) snprintf(status, sizeof(status), "Certificate problem: %s", cert_problem);
+    if (outer) { loading = false; resized_while_busy = false; }
     hover_link[0] = 0;
     snprintf(page_status, sizeof(page_status), "%s", status);
     if (add_history) {
@@ -1850,19 +2452,26 @@ int main(int argc, char **argv) {
     arena = malloc(arena_cap);
     if (!items || !boxes || !body || !arena) { dprintf(STDERR, "browser: out of memory\n"); return 1; }
     dom_init(&dom_host);
+    js_poll_hook = js_busy_poll;
+    if (argc > 1 && !strcmp(argv[1], "-v")) { verbose = true; argc--; argv++; }
+    t_start = ticks();
     navigate(argc > 1 ? argv[1] : HOME, true);
+    if (verbose) printf("[browser %u ms] %s\n", ticks() - t_start, status);
     struct event e;
     for (;;) {
         int wait = page_is_dom ? dom_next_timer() : -1;
+        if (img_more && !n_later) wait = 0;                /* есть нескачанные картинки: только заглянуть в события */
         if (page_is_dom && dom_dirty) {                    /* отложенная перерисовка */
             int left = 100 - (int)(ticks() - last_layout);
             if (left < 0) left = 0;
             if (wait < 0 || left < wait) wait = left;
         }
-        if (!win_event(&e, wait)) break;
+        if (n_later) { e = later[0]; memmove(later, later + 1, sizeof(later[0]) * --n_later); }
+        else if (!win_event(&e, wait)) break;
+        stop_req = false;                                  /* Esc во время таймера касался только его */
         if (e.type == EV_TIMEOUT) {                        /* setTimeout / setInterval */
-            dom_run_timers();
-            after_js_ex(true);
+            if (page_is_dom) { if (dom_next_timer() == 0) dom_run_timers(); after_js_ex(true); }
+            if (img_more) img_pump();                      /* событий нет — следующая картинка */
             continue;
         }
         if (e.type == EV_CLOSE) break;

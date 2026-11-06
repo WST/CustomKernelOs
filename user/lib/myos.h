@@ -40,7 +40,7 @@ enum {
     SYS_NETINFO, SYS_PING, SYS_NETCONFIG, SYS_SHM_ALLOC, SYS_SHM_MAP,
     SYS_SHM_UNMAP, SYS_MSG_SEND, SYS_MSG_RECV, SYS_SERVICE, SYS_TIME,
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
-    SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT
+    SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
@@ -237,6 +237,14 @@ int  ip_parse(const char *s, unsigned *ip);             /* "10.0.2.2" -> 1, ин
 char *ip_str(unsigned ip, char *buf);                   /* buf минимум 16 байт */
 int  resolve(const char *name, unsigned *ip);           /* имя или IP -> 0 / -errno (DNS) */
 int  tcp_connect(const char *host, int port);           /* resolve + socket + connect -> fd */
+int  tcp_connect_timeout(const char *host, int port, unsigned ms);   /* то же, ждать ответа не дольше ms */
+/* настройки сокета: sockctl(fd, SOCK_RCVTIMEO, мс) — read() вернёт -ETIMEDOUT, если данных
+ * нет дольше мс (0 — ждать вечно); SOCK_CONNTIMEO — то же для connect(); SOCK_NREAD — сколько
+ * байт можно прочитать прямо сейчас, не ожидая */
+#define SOCK_RCVTIMEO  1
+#define SOCK_CONNTIMEO 2
+#define SOCK_NREAD     3
+int  sockctl(int fd, int op, unsigned arg);
 
 /* ---- общение процессов ----
  * Сообщение — 64 байта: кому-то в почтовый ящик (msg_send), из своего — msg_recv.

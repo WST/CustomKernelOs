@@ -60,7 +60,7 @@ enum tcp_state { TCP_CLOSED, TCP_LISTEN, TCP_SYN_SENT, TCP_SYN_RCVD, TCP_ESTABLI
                  TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_CLOSE_WAIT, TCP_CLOSING, TCP_LAST_ACK,
                  TCP_TIME_WAIT };
 
-#define SOCK_RXBUF 16384
+#define SOCK_RXBUF 32768              /* окно приёма: 22 сегмента — меньше кольца e1000 (32) */
 #define SOCK_TXBUF 16384
 #define UDP_QUEUE  8
 #define ACCEPT_MAX 8
@@ -89,6 +89,7 @@ struct sock {
     struct sock *parent;                   /* для ещё не принятых accept() соединений */
     struct sock *aq[ACCEPT_MAX];
     int  aq_n, backlog;
+    u32  rcv_timeout, conn_timeout;        /* мс, 0 — ждать сколько угодно (sockctl) */
 };
 
 #define MAX_SOCKS 32
@@ -115,6 +116,7 @@ int  sock_write(struct sock *s, const void *buf, u32 len);
 void sock_close(struct sock *s);
 void sock_reap(void);               /* сетевой поток: доделать отложенное */
 int  sock_connect(struct sock *s, u32 ip, u16 port);
+int  sock_ctl(struct sock *s, int op, u32 arg);
 int  sock_bind(struct sock *s, u16 port);
 int  sock_listen(struct sock *s, int backlog);
 struct sock *sock_accept(struct sock *s, int *err);

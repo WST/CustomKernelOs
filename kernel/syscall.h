@@ -63,6 +63,7 @@ enum {
     SYS_PTY_OPEN    = 54,   /* pty_open(int fds[2]): [0] ведущий, [1] ведомый */
     SYS_TTYCTL      = 55,   /* ttyctl(fd, op, arg): размер pty и т.п. (tty.h) */
     SYS_KBLAYOUT    = 56,   /* kblayout(-1 узнать | 0 US | 1 RU) -> текущая */
+    SYS_SOCKCTL     = 57,   /* sockctl(fd, op, arg): тайм-ауты сокета (net.h) */
     SYS_COUNT
 };
 

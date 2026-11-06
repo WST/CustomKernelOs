@@ -102,6 +102,7 @@ int term_rows(void) { return syscall3(SYS_TERMSIZE, 0, 0, 0) & 0xFFFF; }
 int pty_open(int fds[2]) { return syscall3(SYS_PTY_OPEN, (int)fds, 0, 0); }
 int ttyctl(int fd, int op, int arg) { return syscall3(SYS_TTYCTL, fd, op, arg); }
 int kblayout(int l) { return syscall3(SYS_KBLAYOUT, l, 0, 0); }
+int sockctl(int fd, int op, unsigned arg) { return syscall3(SYS_SOCKCTL, fd, op, (int)arg); }
 
 int utf8_put(char *o, int cp) {
     if (cp < 0x80) { o[0] = cp; return 1; }
@@ -304,6 +305,9 @@ static void emit_num(struct out *o, unsigned v, unsigned base, bool upper, bool 
 
 /* %d %i %u %x %X %c %s %p %%; флаги '-' и '0', ширина, точность для %s */
 int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
+    /* «o += snprintf(buf + o, max - o, ...)» после переполнения даёт отрицательный размер,
+     * который превращается в огромный size_t: считаем его нулём, а не «писать сколько угодно» */
+    if ((int)cap < 0) cap = 0;
     struct out o = { buf, cap, 0 };
     for (; *fmt; fmt++) {
         if (*fmt != '%') { emit(&o, *fmt); continue; }
@@ -495,9 +499,21 @@ void *malloc(size_t n) {
     if ((size_t)(wild_end - wild) < need) {
         size_t chunk = need > 65536 ? need : 65536;
         char *p = sbrk(chunk);
-        if (p == (void *)-1) return NULL;
-        if (p != wild_end) wild = p;                /* новый кусок не впритык к старому */
-        wild_end = p + chunk;
+        if (p == (void *)-1 && chunk > need) { chunk = need; p = sbrk(need); }   /* хоть сколько-нибудь */
+        if (p == (void *)-1) {
+            /* память у ядра кончилась: разрезать свободный блок побольше — он станет новым
+             * «неразрезанным куском» (остаток старого куска пропадёт, он маленький) */
+            int j = k + 1;
+            while (j < N_CLASSES && !free_list[j]) j++;
+            if (j == N_CLASSES) return NULL;
+            struct hdr *big = free_list[j];
+            free_list[j] = big->next;
+            wild = (char *)big;
+            wild_end = (char *)(big + 1) + big->size;
+        } else {
+            if (p != wild_end) wild = p;            /* новый кусок не впритык к старому */
+            wild_end = p + chunk;
+        }
     }
     h = (struct hdr *)wild;
     wild += need;
@@ -586,9 +602,39 @@ static int dns_skip_name(const unsigned char *p, int pos, int len) {
     return -1;
 }
 
+/* кэш DNS: браузер спрашивает одно и то же имя на каждую картинку и скрипт */
+#define DNS_CACHE 32
+static struct { char name[64]; unsigned ip, until; int err; } dns_cache[DNS_CACHE];
+static int dns_next;
+
+static int dns_resolve(const char *name, unsigned *ip);
+
 int resolve(const char *name, unsigned *ip) {
     if (ip_parse(name, ip)) return 0;
     if (!strcmp(name, "localhost")) { *ip = IP(127, 0, 0, 1); return 0; }
+    char low[64];
+    int n = 0;
+    for (; name[n] && n < 63; n++) low[n] = tolower(name[n]);
+    low[n] = 0;
+    unsigned now = ticks();
+    if (!name[n])
+        for (int i = 0; i < DNS_CACHE; i++)
+            if (dns_cache[i].name[0] && !strcmp(dns_cache[i].name, low) && (int)(dns_cache[i].until - now) > 0) {
+                *ip = dns_cache[i].ip;
+                return dns_cache[i].err;
+            }
+    int r = dns_resolve(name, ip);
+    if (!name[n] && (r == 0 || r == -ENOENT)) {           /* ответ (или «нет такого имени») запомним */
+        int k = dns_next++ % DNS_CACHE;
+        strcpy(dns_cache[k].name, low);
+        dns_cache[k].ip = r ? 0 : *ip;
+        dns_cache[k].err = r;
+        dns_cache[k].until = now + (r ? 30000 : 300000);  /* 30 с для ошибки, 5 минут для адреса */
+    }
+    return r;
+}
+
+static int dns_resolve(const char *name, unsigned *ip) {
     struct net_info ni;
     if (netinfo(&ni) < 0 || !ni.up) return -ENETDOWN;
     if (!ni.dns) return -EHOSTUNREACH;
@@ -651,12 +697,15 @@ int resolve(const char *name, unsigned *ip) {
     return err;
 }
 
-int tcp_connect(const char *host, int port) {
+int tcp_connect(const char *host, int port) { return tcp_connect_timeout(host, port, 0); }
+
+int tcp_connect_timeout(const char *host, int port, unsigned ms) {
     unsigned ip;
     int r = resolve(host, &ip);
     if (r < 0) return r;
     int fd = socket(SOCK_TCP);
     if (fd < 0) return fd;
+    if (ms) sockctl(fd, SOCK_CONNTIMEO, ms);
     for (int attempt = 0; ; attempt++) {
         r = connect(fd, ip, port);
         if (r != -EHOSTUNREACH || attempt == 2) break;   /* ARP ещё не ответил — чуть подождём */

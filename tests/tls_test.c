@@ -2,6 +2,7 @@
  * (RFC 4231, 7748, 8439, 8448, тест-вектор GCM из NIST). Запускается на хосте: make test */
 #define TLS_HOST
 #include "../user/lib/tls.c"
+#include "../user/lib/x509.c"
 
 static int fails;
 static void unhex(const char *s, u8 *o) { for (; s[0] && s[1]; s += 2) { unsigned v; sscanf(s, "%2x", &v); *o++ = v; } }

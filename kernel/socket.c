@@ -122,6 +122,7 @@ void sock_reap(void) {
 /* ------------------------------------------------------------ чтение и запись */
 
 int sock_read(struct sock *s, void *buf, u32 len) {
+    u32 deadline = s->rcv_timeout ? timer_ticks() + (s->rcv_timeout + 9) / 10 : 0;
     for (;;) {
         mutex_lock(&net_lock);
         if (s->type == SOCK_UDP) {
@@ -147,8 +148,11 @@ int sock_read(struct sock *s, void *buf, u32 len) {
         }
         mutex_unlock(&net_lock);
         u32 f = irq_save();
-        if (s->type == SOCK_UDP ? !s->qn : (!s->rx_len && !s->peer_fin && s->state != TCP_CLOSED))
-            task_wait(s);
+        if (s->type == SOCK_UDP ? !s->qn : (!s->rx_len && !s->peer_fin && s->state != TCP_CLOSED)) {
+            if (!deadline) task_wait(s);
+            else if ((i32)(timer_ticks() - deadline) >= 0) { irq_restore(f); return -ETIMEDOUT; }
+            else task_wait_timeout(s, deadline - timer_ticks());
+        }
         irq_restore(f);
         if (task_current()->kill_pending) return -EINTR;
     }
@@ -200,14 +204,35 @@ int sock_connect(struct sock *s, u32 ip, u16 port) {
     int r = tcp_connect(s, ip, port);
     mutex_unlock(&net_lock);
     if (r) return r;
+    u32 deadline = s->conn_timeout ? timer_ticks() + (s->conn_timeout + 9) / 10 : 0;
     for (;;) {                                           /* ждём SYN+ACK (или отказа, или тайм-аута) */
         u32 f = irq_save();
-        if (s->state == TCP_SYN_SENT) task_wait(s);
+        if (s->state == TCP_SYN_SENT) {
+            if (!deadline) task_wait(s);
+            else if ((i32)(timer_ticks() - deadline) < 0) task_wait_timeout(s, deadline - timer_ticks());
+        }
         irq_restore(f);
         if (task_current()->kill_pending) return -EINTR;
         if (s->state != TCP_SYN_SENT) break;
+        if (deadline && (i32)(timer_ticks() - deadline) >= 0) {   /* сдаёмся: сокет снова «закрыт» */
+            mutex_lock(&net_lock);
+            if (s->state == TCP_SYN_SENT) { s->state = TCP_CLOSED; s->rtx_deadline = 0; }
+            mutex_unlock(&net_lock);
+            return -ETIMEDOUT;
+        }
     }
     return s->state == TCP_ESTABLISHED ? 0 : (s->err ? s->err : -ECONNREFUSED);
+}
+
+/* настройки сокета: SOCK_RCVTIMEO (1) — сколько мс ждать данных в read (0 — вечно),
+ * SOCK_CONNTIMEO (2) — сколько мс ждать ответа на connect */
+int sock_ctl(struct sock *s, int op, u32 arg) {
+    switch (op) {
+    case 1: s->rcv_timeout = arg; return 0;
+    case 2: s->conn_timeout = arg; return 0;
+    case 3: return s->type == SOCK_TCP ? (int)s->rx_len : s->qn;   /* сколько можно прочитать без ожидания */
+    }
+    return -EINVAL;
 }
 
 int sock_bind(struct sock *s, u16 port) {

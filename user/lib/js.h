@@ -112,6 +112,7 @@ struct jsenv {
 extern jsobj *js_global;            /* глобальный объект (window) */
 extern jsval js_exc;                /* брошенное исключение (когда функция вернула -1) */
 extern int js_steps_limit;          /* защита от вечных циклов: 0 — без ограничения */
+extern int (*js_poll_hook)(void);   /* ~раз в 100 мс работы скрипта (окну — обработать события); не 0 — прервать скрипт */
 
 void   js_init(void);
 void   js_reset(void);              /* выбросить всё и начать заново */

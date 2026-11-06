@@ -1782,13 +1782,36 @@ static int js_type_ok(dnode *e) {
 static unsigned total_js_bytes;
 
 static int script_nesting;
+int dom_load_budget_ms = 20000;
+static double load_until;                 /* пока грузится страница: после этого скрипты не запускаем */
+static int n_skipped_scripts;
 
 void domjs_run_script(const char *src, int len, const char *name, dnode *script) {
     dnode *save = current_script;
     current_script = script;
     n_scripts++;
     double save_deadline = js_deadline_ms;
-    if (!save_deadline) js_deadline_ms = js_now_ms() + 8000;
+    extern int js_low_memory;
+    if (js_low_memory) {                                      /* памяти нет — новые скрипты не запускаем */
+        n_skipped_scripts++;
+        char line[200];
+        int l = snprintf(line, sizeof(line), "script skipped (out of memory): %.120s\n", name);
+        if (d_host && d_host->console) d_host->console(line, l);
+        current_script = save;
+        return;
+    }
+    if (load_until > 0 && !save_deadline) {                   /* загрузка страницы: общий бюджет */
+        double now = js_now_ms();
+        if (now > load_until) {
+            n_skipped_scripts++;
+            char line[200];
+            int l = snprintf(line, sizeof(line), "script skipped (page scripts take too long): %.120s\n", name);
+            if (d_host && d_host->console) d_host->console(line, l);
+            current_script = save;
+            return;
+        }
+        js_deadline_ms = now + 8000 < load_until ? now + 8000 : load_until;
+    } else if (!save_deadline) js_deadline_ms = js_now_ms() + 8000;
     jsval r;
     script_nesting++;
     if (js_eval(src, len, name, &r) < 0) report_error(name);
@@ -1797,7 +1820,8 @@ void domjs_run_script(const char *src, int len, const char *name, dnode *script)
     js_deadline_ms = save_deadline;
     current_script = save;
     /* между скриптами страницы JS не выполняется — можно собрать мусор */
-    if (!script_nesting && js_call_depth_check() == 0 && js_alloc_since_gc > (8u << 20)) js_gc();
+    extern int js_low_memory;
+    if (!script_nesting && js_call_depth_check() == 0 && (js_alloc_since_gc > (8u << 20) || js_low_memory)) js_gc();
 }
 
 /* внешний скрипт: скачать и выполнить */
@@ -2277,7 +2301,7 @@ void domjs_reset(void) {
 void dom_init(struct dom_host *h) {
     d_host = h;
     js_max_depth = 500;
-    js_heap_limit = 24u << 20;
+    js_heap_limit = 40u << 20;
 }
 
 struct load_args { const char *html; int len; };
@@ -2306,7 +2330,10 @@ void dom_load(const char *html, int len, const char *url) {
     snprintf(d_url, sizeof(d_url), "%s", url);
     d_window = dn_new(DN_WINDOW, NULL);
     struct load_args a = { html, len };
+    n_skipped_scripts = 0;
+    load_until = js_now_ms() + dom_load_budget_ms;
     big_call(load_body, &a);
+    load_until = 0;
     js_gc();
     dom_dirty = 1; dom_mut++;
 }
@@ -2411,8 +2438,10 @@ int dom_url_changed(void) { return url_changed; }
 
 void dom_stats(char *out, int max) {
     if (!dom_scripting) { snprintf(out, max, "JS off"); return; }
-    if (n_errors) snprintf(out, max, "JS: %d script%s, %d error%s", n_scripts, n_scripts == 1 ? "" : "s", n_errors, n_errors == 1 ? "" : "s");
-    else snprintf(out, max, "JS: %d script%s", n_scripts, n_scripts == 1 ? "" : "s");
+    int o;
+    if (n_errors) o = snprintf(out, max, "JS: %d script%s, %d error%s", n_scripts, n_scripts == 1 ? "" : "s", n_errors, n_errors == 1 ? "" : "s");
+    else o = snprintf(out, max, "JS: %d script%s", n_scripts, n_scripts == 1 ? "" : "s");
+    if (n_skipped_scripts && o < max) snprintf(out + o, max - o, ", %d skipped", n_skipped_scripts);
 }
 
 const char *dom_last_error(void) { return last_error; }

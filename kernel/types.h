@@ -25,6 +25,7 @@ typedef __builtin_va_list va_list;
 #define va_arg(v, t)   __builtin_va_arg(v, t)
 
 /* Порты ввода-вывода */
+#if defined(__i386__) || defined(__x86_64__)
 static inline void outb(u16 port, u8 val) {
     __asm__ volatile ("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -41,6 +42,12 @@ static inline u16 inw(u16 port) {
     __asm__ volatile ("inw %1, %0" : "=a"(r) : "Nd"(port));
     return r;
 }
+#else   /* хост не x86 (например, Mac на Apple Silicon): утилиты и тесты портов не трогают */
+static inline void outb(u16 port, u8 val) { (void)port; (void)val; }
+static inline u8 inb(u16 port) { (void)port; return 0; }
+static inline void outw(u16 port, u16 val) { (void)port; (void)val; }
+static inline u16 inw(u16 port) { (void)port; return 0; }
+#endif
 /* Простейшая защита общих данных на одном процессоре: запретить прерывания
  * (а значит и переключение задач) и потом вернуть флаг IF как было. */
 #ifdef HOST_TEST                    /* юнит-тесты на хосте: cli там недоступен */

@@ -11,8 +11,8 @@
  * Обмен ключами X25519, шифры ChaCha20-Poly1305 и AES-128-GCM, хеш SHA-256.
  * Всё написано с нуля (user/lib/tls.c), собирается gcc (нужны 64-битные числа).
  *
- * ВАЖНО: сертификат сервера пока НЕ проверяется (нет списка корневых центров
- * и RSA/ECDSA). Канал зашифрован, но подменённый сервер мы не распознаем. */
+ * Сертификат сервера проверяется (x509.c): цепочка до корней из /etc/certs.der,
+ * имя сайта, сроки, подписи RSA/ECDSA. Если сервер не умеет X25519 — P-256. */
 #ifndef TLS_H
 #define TLS_H
 
@@ -23,6 +23,19 @@ int   tls_read(tls *t, void *buf, int len);         /* >0 байт, 0 — кон
 int   tls_write(tls *t, const void *buf, int len);  /* -> len или <0 */
 void  tls_close(tls *t);                            /* close_notify и освободить; fd не закрывает */
 const char *tls_info(tls *t);                       /* "TLS 1.3, ChaCha20-Poly1305" */
+
+/* Сертификат сервера проверяется при tls_open (x509.c): цепочка до корневого центра из
+ * /etc/certs.der, имя сайта, сроки, подпись CertificateVerify. Соединение открывается в
+ * любом случае — что делать с непроверенным, решает программа: */
+int   tls_cert_ok(tls *t);                          /* 1 — всё в порядке */
+const char *tls_cert_error(tls *t);                 /* иначе — почему ("issuer is not trusted: ...") */
+const char *tls_cert_issuer(tls *t);                /* кто выдал (имя корневого центра) */
+extern int tls_verify;                              /* 0 — не проверять вовсе (быстрее) */
+
+/* Если на сокете стоит тайм-аут чтения (sockctl SOCK_RCVTIMEO), то при каждом тайм-ауте
+ * зовётся tls_idle(): вернёт не 0 — ждём дальше, 0 — tls_read/tls_open вернут ошибку.
+ * Так программа может, пока ждёт сервер, обрабатывать свои события. */
+extern int (*tls_idle)(void);
 
 /* примитивы — для тестов и других программ */
 void sha256(const void *data, int n, unsigned char out[32]);

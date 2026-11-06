@@ -95,8 +95,20 @@ static inline jsenv *env_at(jsenv *e, int depth) {
     return e;
 }
 
+int (*js_poll_hook)(void);              /* зовётся ~раз в 100 мс во время работы скрипта; не 0 — прервать */
+static double last_poll;
+
 static int check_limits(void) {
     if (++steps & 4095) return 0;
+    if (js_poll_hook) {
+        double now = js_now_ms();
+        if (now - last_poll > 100 || now < last_poll) {
+            last_poll = now;
+            if (js_poll_hook()) return js_throw("Error", "stopped by the user");
+        }
+    }
+    extern int js_low_memory;
+    if (js_low_memory) return js_throw("RangeError", "out of memory");
     if (js_alloc_since_gc > js_heap_limit) return js_throw("RangeError", "out of memory (script uses too much)");
     if (js_deadline_ms > 0 && js_now_ms() > js_deadline_ms) return js_throw("Error", "script takes too long - stopped");
     return 0;

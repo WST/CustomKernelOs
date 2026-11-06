@@ -1262,7 +1262,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     check_rules(&c, buckets[khash(n->tag, strlen(n->tag)) % BUCKETS], n);
     char key[96];
     const char *id = dn_get_attr(n, "id");
-    if (id && *id) { int l = snprintf(key, sizeof(key), "#%s", id); check_rules(&c, buckets[khash(key, l) % BUCKETS], n); }
+    if (id && *id && strlen(id) < sizeof(key) - 2) { int l = snprintf(key, sizeof(key), "#%s", id); check_rules(&c, buckets[khash(key, l) % BUCKETS], n); }
     const char *cl = dn_get_attr(n, "class");
     unsigned seen[16];
     int nseen = 0;

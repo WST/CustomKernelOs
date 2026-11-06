@@ -1,7 +1,8 @@
-/* wget [-O file] [-q] http(s)://host[:port]/path — скачать файл по HTTP или HTTPS
+/* wget [-O file] [-q] [-k] http(s)://host[:port]/path — скачать файл по HTTP или HTTPS
  *   -O file   куда сохранить (-O - = на экран); по умолчанию — имя из адреса
  *   -q        молча (без строки прогресса)
- * HTTPS — через tls.c (TLS 1.3); сертификат сервера пока не проверяется. */
+ *   -k        не проверять сертификат HTTPS (как --no-check-certificate)
+ * HTTPS — через tls.c (TLS 1.3); сертификат проверяется по /etc/certs.der (x509.c). */
 #include "myos.h"
 #include "tls.h"
 
@@ -68,13 +69,14 @@ static bool header(const char *name, char *out, int max) {
 
 int main(int argc, char **argv) {
     const char *out = NULL, *url = NULL;
-    bool quiet = false;
+    bool quiet = false, insecure = false;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-O") && i + 1 < argc) out = argv[++i];
         else if (!strcmp(argv[i], "-q")) quiet = true;
+        else if (!strcmp(argv[i], "-k")) insecure = true;
         else url = argv[i];
     }
-    if (!url || parse_url(url) < 0) { dprintf(STDERR, "usage: wget [-q] [-O file|-] http[s]://host[:port]/path\n"); return 2; }
+    if (!url || parse_url(url) < 0) { dprintf(STDERR, "usage: wget [-q] [-k] [-O file|-] http[s]://host[:port]/path\n"); return 2; }
 
     char name[32];
     if (!out) {                                             /* имя файла — последний кусок пути */
@@ -101,7 +103,12 @@ int main(int argc, char **argv) {
         if (!quiet) dprintf(STDERR, "TLS handshake... ");
         conn = tls_open(fd, host, err, sizeof(err));
         if (!conn) { dprintf(STDERR, "%swget: TLS: %s\n", quiet ? "" : "\n", err); close(fd); return 1; }
-        if (!quiet) dprintf(STDERR, "%s (certificate not verified)\n", tls_info(conn));
+        if (!tls_cert_ok(conn) && !insecure) {
+            dprintf(STDERR, "%swget: certificate problem: %s\n(use -k to download anyway)\n", quiet ? "" : "\n", tls_cert_error(conn));
+            tls_close(conn); close(fd); return 1;
+        }
+        if (!quiet) dprintf(STDERR, "%s, %s%s\n", tls_info(conn), tls_cert_ok(conn) ? "certificate OK: " : "certificate NOT checked (-k)",
+                            tls_cert_ok(conn) ? tls_cert_issuer(conn) : "");
     }
 
     char req[512];

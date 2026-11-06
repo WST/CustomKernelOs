@@ -441,6 +441,9 @@ static void nl_store(nlist *l, node *dst) {
 
 static node *parse_assign(void);
 static node *parse_expr(void);
+/* вложенность выражений и операторов: «((((...» глубиной в тысячи переполнил бы стек */
+#define MAX_NEST 500
+static int pdepth;
 static node *parse_stmt(void);
 static node *parse_function(int flags, int is_decl);
 static node *parse_class(int is_decl);
@@ -792,7 +795,16 @@ static node *parse_lhs(void) {
     return e;
 }
 
-static node *parse_unary(void) {
+static node *parse_unary_(void);
+static node *parse_unary(void) {                 /* «!!!!!!x» тоже рекурсия */
+    if (pdepth >= MAX_NEST || failed) { perror_at("expression is nested too deeply"); return mk(N_NUM); }
+    pdepth++;
+    node *n = parse_unary_();
+    pdepth--;
+    return n;
+}
+
+static node *parse_unary_(void) {
     struct tok *t = CUR;
     int op = 0;
     if (t->type == T_PUNCT) {
@@ -942,7 +954,26 @@ static node *to_pattern(node *e) {
     return e;
 }
 
+static node *parse_assign_(void);
+static node *parse_stmt_(void);
+
 static node *parse_assign(void) {
+    if (pdepth >= MAX_NEST || failed) { perror_at("expression is nested too deeply"); return mk(N_NUM); }
+    pdepth++;
+    node *n = parse_assign_();
+    pdepth--;
+    return n;
+}
+
+static node *parse_stmt(void) {
+    if (pdepth >= MAX_NEST) { perror_at("code is nested too deeply"); return mk(N_EMPTY); }
+    pdepth++;
+    node *n = parse_stmt_();
+    pdepth--;
+    return n;
+}
+
+static node *parse_assign_(void) {
     struct tok *t = CUR;
     if (t->type == T_NAME && t->kw == KW_ASYNC && !PEEK(1)->nl) {
         struct tok *t1 = PEEK(1);
@@ -1287,7 +1318,7 @@ static node *parse_for(void) {
     return n;
 }
 
-static node *parse_stmt(void) {
+static node *parse_stmt_(void) {
     struct tok *t = CUR;
     node *n;
     if (failed) return mk(N_EMPTY);
@@ -1806,6 +1837,7 @@ node *js_parse(const char *s, int len, const char *file, int as_function, char *
     sline = 1;
     ntok = 0;
     failed = 0;
+    pdepth = 0;
     perr = err;
     perrmax = errmax;
     err[0] = 0;

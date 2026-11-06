@@ -274,6 +274,7 @@ static bool ansi(char c) {
 }
 
 static void putc_nolock(char c) {
+    outb(0x3F8, (u8)c);                          /* копия на COM1: в QEMU видно с -serial stdio/file */
     if (ansi(c)) return;
     switch (c) {
     case '\n': col = 0; row++; break;

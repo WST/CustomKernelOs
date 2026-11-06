@@ -680,6 +680,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_GFX_CURSOR:  ret = sys_gfx_cursor(a, b); break;
     case SYS_PTY_OPEN:    ret = sys_pty_open(a); break;
     case SYS_TTYCTL:      ret = tty_ctl(get_fd(a), b, c); break;
+    case SYS_SOCKCTL:     { struct sock *s = get_sock(a); ret = s ? sock_ctl(s, (int)b, c) : -EBADF; break; }
     case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
     }
     r->eax = (u32)ret;

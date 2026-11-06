@@ -53,6 +53,12 @@
   сайты, которые просят «включите JavaScript», теперь работают. Проверено на jQuery,
   React 18, Vue 3, Alpine, Preact, htmx, lodash, moment, axios. Есть и программа **`js`**
   для терминала.
+- **Картинки** в браузере: свои декодеры **PNG, GIF, JPEG (и прогрессивный), BMP**
+  (`user/lib/img.c`: inflate, LZW, Хаффман, обратное ДКП) — страница показывается сразу,
+  картинки догружаются по одной, не мешая щёлкать и листать.
+- **HTTPS с проверкой сертификатов**: цепочка до корневого центра (список Mozilla в
+  `/etc/certs.der`), имя сайта, сроки; подписи RSA (PKCS#1 и PSS) и ECDSA P-256/P-384
+  (`user/lib/x509.c`); обмен ключами X25519 или P-256.
 - **Стили CSS** в браузере (`user/lib/css.c`): `<style>`, `<link rel=stylesheet>`,
   `@import`, каскад, `var(--x)`, `calc()`, `@media` — сайты на Bootstrap и с тёмными
   шапками выглядят похоже на себя: цвета, фон, рамки, отступы, колонка по центру,
@@ -162,7 +168,7 @@ BIOS ──> сектор 0 (boot.bin) по адресу 0x7C00, 16-битный
 - Ограничение: RAM используется только до 1 ГБ. Адреса 1–3 ГБ отданы программам.
 
 Попробуй: `mem`, `heaptest 5000`, `peek 0xB8000 64`, `peek 0xD0000000`, `panic pf`.
-Запуск с другим объёмом RAM: `make run QEMU_MEM=512M`.
+Запуск с другим объёмом RAM: `make run QEMU_MEM=512M` (по умолчанию 256 МБ).
 
 ## Многозадачность
 
@@ -558,11 +564,42 @@ sh:/$ mode cursor hw          # аппаратный курсор на рабо�
   MyOS, или просто слова — это поиск. Кнопки `<` `>` — назад/вперёд, `R` — обновить,
   `H` — домашняя страница со ссылками. Backspace — назад, PgUp/PgDn — листать.
 - **HTTPS** — свой: `https://` адреса браузер открывает сам, через TLS 1.3
-  (см. ниже «HTTPS»). В строке состояния видно шифр: `TLS 1.3, ChaCha20-Poly1305`.
+  (см. ниже «HTTPS»). В строке состояния видно шифр и кто выдал сертификат:
+  `TLS 1.3, ChaCha20-Poly1305, certificate OK (Let's Encrypt)`. Если сертификат не
+  годится (чужое имя, просрочен, выдан неизвестно кем), вместо сайта — предупреждение
+  со ссылкой «Open the site anyway» (до закрытия браузера).
+
+  ![Предупреждение о сертификате](docs/screenshot-cert.png)
+
   Если сайт умеет только старый TLS 1.2, страница открывается через
   [FrogFind](http://frogfind.com) — бесплатный сервис для старых компьютеров: он сам
   качает сайт и отдаёт упрощённую страницу по HTTP. Поиск — тоже через FrogFind.
-- Картинки показываются рамкой с подписью. Шрифт без кириллицы, поэтому русский
+- **Картинки** `<img>`: PNG (все виды цвета, прозрачность, черезстрочные), GIF (первый
+  кадр, прозрачность), JPEG (обычные и прогрессивные, серые, CMYK), BMP, а ещё
+  `data:image/...;base64`. Размер — из `width`/`height`, CSS (`width`, `max-width: 100%`)
+  или из самой картинки; огромные фото уменьшаются ещё при распаковке (JPEG — сразу
+  в 2/4/8 раз). «Ленивые» картинки (`data-src`, `srcset`) тоже видны. Качаются после
+  показа страницы, сначала те, что на экране; пока качаются — серая рамка с подписью.
+  Кэш картинок — до 20 МБ пикселей. Esc — больше не качать.
+
+  ![Картинки в браузере](docs/screenshot-images.png)
+
+- **Не зависает**: у каждого запроса есть сроки (сервер молчит 6–20 с или запрос длится
+  больше 15–60 с — бросаем), скрипты и стили страницы качаются не дольше 25 с в сумме,
+  скрипты страницы работают не дольше 20 с в сумме — остальное пропускается (видно в
+  Ctrl+K). Пока страница грузится, окно отвечает: **Esc** или кнопка **X** (на месте R) —
+  остановить, крестик окна — закрыть, окно можно растягивать; через секунду загрузки
+  показывается то, что уже разобрано. Долгий скрипт прерывается по Esc. Счётчики и
+  реклама (Google Analytics, Яндекс.Метрика, DoubleClick и т. п.) не качаются вовсе;
+  скачанные скрипты и стили кэшируются (jQuery с CDN — один раз на сеанс).
+- **Не падает**: слишком глубокие страницы и скрипты (`((((...` в тысячи уровней) дают
+  ошибку, а не переполнение стека; кончилась память — скрипты останавливаются, браузер
+  живёт. Проверено AddressSanitizer на настоящих страницах (Википедия, BBC, Yahoo,
+  Google, HN, спецификация HTML) и тысячах случайных «сломанных» страниц и картинок:
+  `make browsertest` запускает весь браузер на Linux.
+- `browser -v адрес` — строки статуса со временем пишутся ещё и в консоль (и на COM1:
+  `make run` сохраняет их в `build/serial.log`).
+- Шрифт без кириллицы, поэтому русский
   текст показывается латиницей (транслит): «Привет» → «Privet».
 - `http://localhost/` — страница самой MyOS: запусти в Терминале `httpd &`.
 - **CSS**: таблицы стилей страницы (`<style>`, `<link rel=stylesheet>` — скачиваются,
@@ -658,7 +695,7 @@ sh:/$ httpd &                       # веб-сервер в фоне
 - **ping во внешний интернет** через NAT QEMU обычно не проходит (ему нужны права
   администратора); `ping 10.0.2.2` и `ping 127.0.0.1` работают всегда.
 - **HTTPS** — только TLS 1.3 (почти все современные сайты); серверы, которые умеют
-  лишь TLS 1.2, отвечают ошибкой `protocol_version`. Сертификат пока не проверяется.
+  лишь TLS 1.2, отвечают ошибкой `protocol_version`. Сертификат проверяется (см. «HTTPS»).
 - Сменить DNS-сервер: `ifconfig dns 1.1.1.1`.
 
 Как устроено:
@@ -668,7 +705,12 @@ sh:/$ httpd &                       # веб-сервер в фоне
 - `kernel/tcp.c` — TCP: номера байтов, подтверждения, окно, таймер повторной отправки.
 - `kernel/socket.c` — сокеты для программ; `read`/`write`/`close` работают как с файлами.
 - Новые системные вызовы: `socket`, `connect`, `bind`, `listen`, `accept`, `sendto`,
-  `recvfrom`, `netinfo`, `ping`, `netconfig`. DNS-клиент (`resolve`) — прямо в libc.
+  `recvfrom`, `netinfo`, `ping`, `netconfig`. DNS-клиент (`resolve`) — прямо в libc,
+  с кэшем на 32 имени (5 минут; «нет такого имени» — 30 секунд).
+- `sockctl(fd, SOCK_RCVTIMEO, мс)` — `read` из сокета вернёт `-ETIMEDOUT`, если данных
+  нет дольше; `SOCK_CONNTIMEO` — то же для `connect`, `tcp_connect_timeout(host, port, мс)`;
+  `SOCK_NREAD` — сколько байт уже пришло. Так программа может ждать сеть и при этом
+  обрабатывать свои события (браузер так и делает). Окно приёма TCP — 32 КБ.
 
 Своя сетевая программа:
 
@@ -696,6 +738,9 @@ int main(void) {
 | SHA-256, HMAC, HKDF | из секрета и хеша всех сообщений выводятся ключи |
 | ChaCha20-Poly1305 (RFC 8439) | шифр записей — быстрый на процессоре без AES-инструкций |
 | AES-128-GCM | второй шифр, если сервер не умеет ChaCha20 |
+| P-256 (ECDH) | обмен ключами с сервером, который не умеет X25519 (после HelloRetryRequest) |
+| RSA, RSA-PSS, ECDSA P-256/P-384, SHA-384/512 | проверка подписей сертификатов и CertificateVerify |
+| ASN.1 DER, X.509 | разбор сертификатов: кто выдал, кому, сроки, ключ, subjectAltName |
 
 Рукопожатие (RFC 8446): мы шлём ClientHello с нашим ключом X25519 и именем сайта (SNI),
 сервер отвечает ServerHello со своим ключом — дальше всё зашифровано. Сервер присылает
@@ -703,26 +748,46 @@ int main(void) {
 отвечаем своим Finished — и идут данные. Случайные числа — из счётчика тактов
 процессора (`rdtsc`), времени и pid, перемешанных SHA-256.
 
+**Проверка сертификата** (`user/lib/x509.c`, ~900 строк). Сервер присылает свой
+сертификат и промежуточные; мы:
+1. проверяем подпись **CertificateVerify** — сервер подписал хеш рукопожатия ключом из
+   своего сертификата (значит, ключ действительно у него);
+2. проверяем **имя**: `subjectAltName` (с `*.example.com` — ровно одна метка) или CN;
+3. идём по цепочке вверх: у каждого сертификата ищем выдавшего — сначала среди
+   корневых центров из `/etc/certs.der`, потом среди присланных — и проверяем его подпись
+   (RSA PKCS#1 v1.5 с SHA-256/384/512 или ECDSA P-256/P-384), сроки (часы MyOS — местные,
+   поэтому с запасом в сутки) и что промежуточный — действительно центр (`basicConstraints`).
+
+`/etc/certs.der` — 118 корневых сертификатов из списка Mozilla (через пакет certifi),
+просто DER подряд; `make install` кладёт его из `certs/roots.der`. Большие числа —
+32-битные «цифры» и умножение Монтгомери (RSA до 4096 бит: s^65537 — 17 умножений);
+кривые — якобиевы координаты, `u1·G + u2·Q` одним проходом. Проверка цепочки
+RSA-4096 → ECDSA P-384 → P-256 в QEMU занимает доли секунды.
+
 ```
-sh:/$ wget https://10.0.2.2:4433/big.html
-Connecting to 10.0.2.2:4433... connected.
-TLS handshake... TLS 1.3, ChaCha20-Poly1305 (certificate not verified)
-HTTP/1.0 200 ok
-'big.html' saved: 1208903 bytes in 1.49 s (811 KB/s)
+sh:/$ wget https://example.com/
+Connecting to example.com:443... connected.
+TLS handshake... TLS 1.3, ChaCha20-Poly1305, certificate OK: DigiCert Inc
+HTTP/1.1 200 OK
+sh:/$ wget https://self-signed.badssl.com/
+wget: certificate problem: issuer is not trusted: *.badssl.com
+(use -k to download anyway)
 ```
 
 ![HTTPS в браузере](docs/screenshot-https.png)
 
-Чего пока нет: **проверки сертификата** (нужны RSA/ECDSA и список корневых центров —
-так что канал зашифрован, но поддельный сервер мы не отличим), TLS 1.2, обмена ключами
-P-256 (сервер, который не умеет X25519, ответит `handshake_failure`). Проверить у себя:
-`openssl s_server -accept 4433 -cert c.pem -key k.pem -WWW` на Windows/WSL и в MyOS
-`wget https://10.0.2.2:4433/файл`. Тесты криптографии на известных ответах из RFC:
-`make test`.
+Чего пока нет: TLS 1.2, отзыва сертификатов (OCSP/CRL), кривой P-521 и Ed25519 (таких
+корней и сайтов единицы), защиты от атак по времени в P-256 (наш ключ одноразовый).
+Проверить у себя: `openssl s_server -accept 4433 -cert c.pem -key k.pem -WWW` и в MyOS
+`wget -k https://10.0.2.2:4433/файл` (свой самоподписанный сертификат — с `-k`).
+Тесты: `make test` (известные ответы из RFC и FIPS, корни Mozilla читаются) и
+`make x509test` (свои цепочки RSA/ECDSA, просроченный, чужое имя, самоподписанный,
+подписи PSS/PKCS#1/ECDSA — нужен `pip install cryptography`).
 
-`tls.c` собирается gcc (там 64-битная арифметика, которой нет в `cc` внутри MyOS)
-и подключается только к `browser` и `wget`. Своей программе:
-`#include "tls.h"`, `tls_open(fd, host, err, n)`, `tls_read`, `tls_write`, `tls_close`.
+`tls.c` и `x509.c` собираются gcc (там 64-битная арифметика, которой нет в `cc` внутри
+MyOS) и подключаются только к `browser` и `wget`. Своей программе:
+`#include "tls.h"`, `tls_open(fd, host, err, n)`, `tls_cert_ok(t)` / `tls_cert_error(t)`,
+`tls_read`, `tls_write`, `tls_close`.
 
 ### JavaScript
 
@@ -879,12 +944,18 @@ user/lib/vec.c     сглаженная векторная графика: ко�
 user/lib/font.c    шрифты TrueType (Ubuntu, Ubuntu Mono): разбор .ttf, кэш глифов, UTF-8
 fonts/             шрифты Ubuntu (урезанные) и их лицензия -> /lib/fonts на диске
 user/lib/win.c     библиотека окон для программ (win.h)
-user/lib/tls.c     HTTPS: TLS 1.3, X25519, ChaCha20-Poly1305, AES-GCM, SHA-256 (tls.h)
+user/lib/tls.c     HTTPS: TLS 1.3, X25519, P-256, ChaCha20-Poly1305, AES-GCM, SHA-256 (tls.h)
+user/lib/x509.c    сертификаты: ASN.1, X.509, RSA, ECDSA P-256/P-384, SHA-384/512 (x509.h)
+certs/roots.der    корневые сертификаты (Mozilla, через certifi) -> /etc/certs.der
+user/lib/img.c     картинки: PNG (inflate), GIF (LZW), JPEG (baseline и progressive), BMP (img.h)
 user/browser.c     веб-браузер
 user/lib/js*.c     движок JavaScript (js.h); user/js.c — программа js
 user/lib/dom*.c    DOM для браузера (dom.h), dom_prelude.js — часть окружения на JS
 user/lib/css.c     стили CSS для браузера: каскад и вычисленный стиль
 tests/js/ tests/web/  тесты JavaScript, DOM и CSS (make jstest)
+tests/browser_host.c  весь браузер на Linux с AddressSanitizer (make browsertest)
+tests/img_test.c tests/img/   декодеры картинок против Pillow (make imgtest)
+tests/x509_test.c tests/x509/ сертификаты и подписи (make test, make x509test)
 user/terminal.c notepad.c files.c calc.c draw.c mines.c taskmgr.c about.c display.c hellowin.c
                    программы для рабочего стола
 user/cc/           компилятор Си для MyOS (lex, pp, parse, type, gen, main)
@@ -930,6 +1001,9 @@ Makefile
    make test       # тесты файловой системы и кучи
    make cctest     # тесты компилятора cc (и сборка им самого себя)
    make jstest     # тесты JavaScript, DOM и CSS браузера
+   make browsertest  # весь браузер на Linux под AddressSanitizer
+   make imgtest    # PNG/GIF/JPEG/BMP против Pillow (pip install pillow)
+   make x509test   # цепочки сертификатов (pip install cryptography)
    make gfxtest    # пробная картинка сглаженной графики и шрифтов
    make cleandisk  # стереть disk.img (ФС создастся заново)
    ```
@@ -938,7 +1012,7 @@ Makefile
 образы (`disk.img` уже лежит в папке):
 
 ```
-qemu-system-i386 -m 128M -vga vmware -drive format=raw,file=build\os.img,index=0,media=disk -drive format=raw,file=disk.img,index=1,media=disk -nic user,model=e1000,hostfwd=tcp::8080-:80 -rtc base=localtime
+qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0,media=disk -drive format=raw,file=disk.img,index=1,media=disk -nic user,model=e1000,hostfwd=tcp::8080-:80 -rtc base=localtime
 ```
 
 Отладка: `make debug` запускает QEMU, ждущий GDB на порту 1234
@@ -948,8 +1022,10 @@ qemu-system-i386 -m 128M -vga vmware -drive format=raw,file=build\os.img,index=0
 
 1. Рабочий стол дальше: прокрутка назад в Terminal, буфер обмена (копировать/вставить),
    колесо мыши, прилипание окон к половинам экрана; остальные программы на шрифт Ubuntu.
-2. Браузер дальше: картинки (BMP/GIF/PNG), проверка сертификатов HTTPS (RSA, ECDSA,
-   корневые центры), закладки, float и колонки CSS, картинки фона; в JS — модули и ускорение (байт-код).
+2. Браузер дальше: раскладка таблиц по колонкам (ширины, `colspan`, фон ячеек), float и
+   колонки CSS, картинки фона, закладки, TLS 1.2, соединения keep-alive и параллельная
+   загрузка; в JS — модули и ускорение (байт-код). (Сделано: картинки PNG/GIF/JPEG/BMP,
+   проверка сертификатов, P-256, тайм-ауты и устойчивость.)
 3. Copy-on-write для `fork` (сейчас память копируется сразу целиком).
 4. Звук (PC speaker).
 5. Загрузка на настоящем компьютере с флешки.

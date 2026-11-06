@@ -22,8 +22,21 @@ static struct gch *all_objs;        /* все объекты сборщика */
 static unsigned heap_bytes;         /* сколько живёт (примерно) */
 unsigned js_alloc_since_gc;
 
+/* Запас на чёрный день: когда память кончилась, отдаём его, помечаем js_low_memory
+ * (интерпретатор тут же бросит «out of memory» и скрипт закончится), а после сборки
+ * мусора берём запас снова. Без этого нехватка памяти = падение всей программы. */
+static void *reserve;
+int js_low_memory;
+
 static void *xmalloc(int n) {
+    if (!reserve && !js_low_memory) { reserve = malloc(2 << 20); if (!reserve) js_low_memory = 1; }
     void *p = malloc(n);
+    if (!p && reserve) {
+        free(reserve);
+        reserve = NULL;
+        js_low_memory = 1;
+        p = malloc(n);
+    }
     if (!p) {
 #ifdef JS_HOST
         fprintf(stderr, "js: out of memory\n");
@@ -927,6 +940,10 @@ void js_gc(void) {
     }
     heap_bytes = live;
     js_alloc_since_gc = 0;
+    if (js_low_memory && !reserve) {                       /* после сборки — снова отложить запас */
+        reserve = malloc(2 << 20);
+        if (reserve) js_low_memory = 0;                    /* не вышло — скрипты так и не запускаем */
+    }
 }
 
 /* ------------------------------------------------------------------ окружения */

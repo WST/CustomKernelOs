@@ -160,12 +160,21 @@ dnode *dn_clone(dnode *n, int deep) {
     return c;
 }
 
-void dn_text_content(dnode *n, jsbuf *b, int inner_text) {
-    if (n->type == DN_TEXT) { jb_add(b, n->text, n->tlen); return; }
-    if (n->type == DN_COMMENT) return;
-    if (inner_text && n->type == DN_ELEMENT && (!strcmp(n->tag, "script") || !strcmp(n->tag, "style"))) return;
-    if (inner_text && n->type == DN_ELEMENT && !strcmp(n->tag, "br")) { jb_addc(b, '\n'); return; }
-    for (dnode *k = n->first; k; k = k->next) dn_text_content(k, b, inner_text);
+/* текст поддерева; без рекурсии — дерево может быть глубиной в тысячи узлов */
+void dn_text_content(dnode *root, jsbuf *b, int inner_text) {
+    dnode *n = root;
+    for (;;) {
+        int down = 0;
+        if (n->type == DN_TEXT) jb_add(b, n->text, n->tlen);
+        else if (n->type == DN_COMMENT) ;
+        else if (inner_text && n->type == DN_ELEMENT && (!strcmp(n->tag, "script") || !strcmp(n->tag, "style"))) ;
+        else if (inner_text && n->type == DN_ELEMENT && !strcmp(n->tag, "br")) jb_addc(b, '\n');
+        else down = 1;
+        if (down && n->first) { n = n->first; continue; }
+        while (n != root && !n->next) n = n->parent;
+        if (n == root) return;
+        n = n->next;
+    }
 }
 
 void dn_set_text(dnode *n, const char *s, int len) {
@@ -588,7 +597,17 @@ void html_serialize(jsbuf *b, dnode *n, int outer) {
         jb_addc(b, '>');
         if (dn_is_void(n->tag)) return;
     }
-    for (dnode *k = n->first; k; k = k->next) html_serialize(b, k, 1);
+    static int depth;
+    if (depth > 1500) {                                        /* очень глубокое дерево: дальше только текст */
+        jsbuf tb = { 0 };
+        dn_text_content(n, &tb, 0);
+        esc(b, tb.p ? tb.p : "", tb.n, 0);
+        jb_free(&tb);
+    } else {
+        depth++;
+        for (dnode *k = n->first; k; k = k->next) html_serialize(b, k, 1);
+        depth--;
+    }
     if (outer && n->type == DN_ELEMENT) { jb_adds(b, "</"); jb_adds(b, n->tag); jb_addc(b, '>'); }
 }
 
@@ -597,11 +616,19 @@ void html_serialize(jsbuf *b, dnode *n, int outer) {
 extern int domjs_has_click(dnode *n);
 
 static const char *keep_attrs[] = { "href", "type", "name", "value", "size", "alt", "action", "method", "src", "checked",
-                                     "selected", "charset", "content", "http-equiv", "colspan", "start", NULL };
+                                     "selected", "charset", "content", "http-equiv", "colspan", "start",
+                                     "width", "height", "data-src", "data-original", "data-lazy-src", "srcset", NULL };
 
-static void layout_ser(jsbuf *b, dnode *n) {
+static void layout_ser(jsbuf *b, dnode *n, int depth) {
     if (n->type == DN_TEXT) { esc(b, n->text, n->tlen, 0); return; }
-    if (n->type != DN_ELEMENT) { for (dnode *k = n->first; k; k = k->next) layout_ser(b, k); return; }
+    if (depth > 600) {                                         /* слишком глубоко: дальше только текст */
+        jsbuf tb = { 0 };
+        dn_text_content(n, &tb, 1);
+        esc(b, tb.p ? tb.p : "", tb.n, 0);
+        jb_free(&tb);
+        return;
+    }
+    if (n->type != DN_ELEMENT) { for (dnode *k = n->first; k; k = k->next) layout_ser(b, k, depth + 1); return; }
     const char *t = n->tag;
     if (!strcmp(t, "script") || !strcmp(t, "style") || !strcmp(t, "template") || !strcmp(t, "head")) return;
     if (!strcmp(t, "noscript") && dom_scripting) return;
@@ -639,13 +666,26 @@ static void layout_ser(jsbuf *b, dnode *n) {
     jb_adds(b, num);
     jb_addc(b, '>');
     if (dn_is_void(t)) return;
-    if (strcmp(t, "textarea") && strcmp(t, "button")) for (dnode *k = n->first; k; k = k->next) layout_ser(b, k);
+    if (strcmp(t, "textarea") && strcmp(t, "button")) for (dnode *k = n->first; k; k = k->next) layout_ser(b, k, depth + 1);
     jb_adds(b, "</");
     jb_adds(b, t);
     jb_addc(b, '>');
 }
 
+struct ser_args { char *p; int len; };
+static void serialize_body(void *arg);
+
+/* на большом стеке: обход дерева рекурсивный, а у программы стек всего 64 КБ */
 char *dom_serialize(int *len) {
+    struct ser_args a = { NULL, 0 };
+    js_big_call(serialize_body, &a);
+    *len = a.len;
+    return a.p;
+}
+
+static void serialize_body(void *arg) {
+    struct ser_args *a = arg;
+    int *len = &a->len;
     jsbuf b = { 0 };
     char title[256];
     dom_title(title, sizeof(title));
@@ -654,11 +694,11 @@ char *dom_serialize(int *len) {
     jb_adds(&b, "</title>");
     dnode *root = dn_find_tag(d_document, "html");          /* <html> и <body> тоже: у них бывает фон */
     if (!root) root = dn_find_tag(d_document, "body");
-    layout_ser(&b, root ? root : d_document);
+    layout_ser(&b, root ? root : d_document, 0);
     jb_addc(&b, 0);
     *len = b.n - 1;
     dom_dirty = 0;
-    return b.p;
+    a->p = b.p;
 }
 
 void dom_title(char *out, int max) {
