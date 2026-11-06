@@ -111,7 +111,7 @@ static void load(const char *p) {
 static void save(void) {
     if (!path[0]) { editing_name = true; strcpy(status_msg, "type a file name, then Enter"); return; }
     int fd = open(path, O_WRITE);
-    if (fd < 0) { snprintf(status_msg, sizeof(status_msg), "cannot save: %s", strerror(-fd)); return; }
+    if (fd < 0) { snprintf(status_msg, sizeof(status_msg), "cannot save: %s", strerror(errno)); return; }
     int total = 0;
     for (int i = 0; i < n_lines; i++) {
         if (lens[i]) write(fd, lines[i], lens[i]);

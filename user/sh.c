@@ -480,13 +480,13 @@ static void child(struct cmd *c, int in_fd, int out_fd, int pgid) {
     if (out_fd != STDOUT) { dup2(out_fd, STDOUT); close(out_fd); }
     if (c->in) {
         int fd = open(c->in, O_READ);
-        if (fd < 0) { dprintf(STDERR, "sh: %s: %s\n", c->in, strerror(-fd)); exit(1); }
+        if (fd < 0) { dprintf(STDERR, "sh: %s: %s\n", c->in, strerror(errno)); exit(1); }
         dup2(fd, STDIN);
         close(fd);
     }
     if (c->out) {
-        int fd = open(c->out, c->append ? O_APPEND : O_WRITE);
-        if (fd < 0) { dprintf(STDERR, "sh: %s: %s\n", c->out, strerror(-fd)); exit(1); }
+        int fd = open(c->out, c->append ? (O_WRONLY | O_CREAT | O_APPEND) : O_WRITE);
+        if (fd < 0) { dprintf(STDERR, "sh: %s: %s\n", c->out, strerror(errno)); exit(1); }
         dup2(fd, STDOUT);
         close(fd);
     }
@@ -552,7 +552,7 @@ int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "-t")) { term_mode = true; argc = 1; }
     if (argc > 1) {                          /* sh script.sh */
         in = open(argv[1], O_READ);
-        if (in < 0) { dprintf(STDERR, "sh: %s: %s\n", argv[1], strerror(-in)); return 1; }
+        if (in < 0) { dprintf(STDERR, "sh: %s: %s\n", argv[1], strerror(errno)); return 1; }
         interactive = false;
     }
     setfg(0);

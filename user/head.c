@@ -6,7 +6,7 @@ int main(int argc, char **argv) {
     if (i + 1 < argc && !strcmp(argv[i], "-n")) { n = atoi(argv[i + 1]); i += 2; }
     int fd = STDIN;
     if (i < argc && (fd = open(argv[i], O_READ)) < 0) {
-        dprintf(STDERR, "head: %s: %s\n", argv[i], strerror(-fd));
+        dprintf(STDERR, "head: %s: %s\n", argv[i], strerror(errno));
         return 1;
     }
     char line[256];

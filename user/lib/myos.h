@@ -20,11 +20,13 @@ typedef char *va_list;
 #define va_start(v, l) ((v) = (char *)&(l) + ((sizeof(l) + 3) & ~3))
 #define va_end(v)      ((void)0)
 #define va_arg(v, t)   (*(t *)(((v) += (sizeof(t) + 3) & ~3) - ((sizeof(t) + 3) & ~3)))
+#define va_copy(d, s)  ((d) = (s))
 #else
 typedef __builtin_va_list va_list;
 #define va_start(v, l) __builtin_va_start(v, l)
 #define va_end(v)      __builtin_va_end(v)
 #define va_arg(v, t)   __builtin_va_arg(v, t)
+#define va_copy(d, s)  __builtin_va_copy(d, s)
 #endif
 
 /* ---- системные вызовы (номера совпадают с kernel/syscall.h) ---- */
@@ -41,8 +43,13 @@ enum {
     SYS_SHM_UNMAP, SYS_MSG_SEND, SYS_MSG_RECV, SYS_SERVICE, SYS_TIME,
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
-    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT
+    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
+    SYS_LSEEK, SYS_FSTAT
 };
+
+/* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
+ * дополнительно приводят его к -1 и пишут сюда, как в POSIX. */
+extern int errno;
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
 #define EPERM 1
@@ -60,6 +67,7 @@ enum {
 #define ENOMEM 12
 #define EFAULT 14
 #define EEXIST 17
+#define ESPIPE 29
 #define ENOTDIR 20
 #define EISDIR 21
 #define EINVAL 22
@@ -98,15 +106,28 @@ struct proc_info {
 #define STDOUT 1
 #define STDERR 2
 
-#define O_READ   0      /* открыть на чтение                     */
-#define O_WRITE  1      /* создать / обнулить и писать           */
-#define O_APPEND 2      /* создать при необходимости, писать в конец */
+/* Флаги open — как у System V / Linux i386. O_READ и O_WRITE сохранены:
+ * раньше это были режимы 0 и 1 с тем же смыслом (чтение и «создать и обнулить»). */
+#define O_RDONLY  0
+#define O_WRONLY  1
+#define O_RDWR    2
+#define O_CREAT   0100
+#define O_EXCL    0200
+#define O_TRUNC   01000
+#define O_APPEND  02000
+#define O_READ    O_RDONLY
+#define O_WRITE   (O_WRONLY | O_CREAT | O_TRUNC)
+
+#define SEEK_SET 0
+#define SEEK_CUR 1
+#define SEEK_END 2
 
 void  exit(int code) __attribute__((noreturn));
 int   write(int fd, const void *buf, size_t len);
 int   read(int fd, void *buf, size_t len);
-int   open(const char *path, int mode);
+int   open(const char *path, int flags, ...);
 int   close(int fd);
+int   lseek(int fd, long offset, int whence);
 struct block_info { char name[12]; unsigned start,sectors,partition; };
 int account(int op, const char *name, const char *password);
 int mount(const char *device,const char *target);
@@ -213,7 +234,7 @@ int  snprintf(char *buf, size_t n, const char *fmt, ...);
 int  vsnprintf(char *buf, size_t n, const char *fmt, va_list ap);
 int  puts(const char *s);
 int  putchar(int c);
-int  getline(char *buf, int max);   /* строка с клавиатуры без '\n'; -1 = конец ввода */
+int  getln(char *buf, int max);     /* строка с клавиатуры без '\n'; -1 = конец ввода */
 int  readln(int fd, char *buf, int max);  /* строка из любого fd (файл, канал); -1 = конец */
 
 /* ---- память ---- */

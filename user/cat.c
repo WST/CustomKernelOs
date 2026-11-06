@@ -14,7 +14,7 @@ int main(int argc, char **argv) {
     int rc = 0;
     for (int i = 1; i < argc; i++) {
         int fd = open(argv[i], O_READ);
-        if (fd < 0) { dprintf(STDERR, "cat: %s: %s\n", argv[i], strerror(-fd)); rc = 1; continue; }
+        if (fd < 0) { dprintf(STDERR, "cat: %s: %s\n", argv[i], strerror(errno)); rc = 1; continue; }
         rc |= copy(fd);
         close(fd);
     }

@@ -6,13 +6,16 @@ static Type t_bool   = { TY_BOOL, 1, 1 };
 static Type t_char   = { TY_CHAR, 1, 1 };
 static Type t_short  = { TY_SHORT, 2, 2 };
 static Type t_int    = { TY_INT, 4, 4 };
+static Type t_llong  = { TY_LONGLONG, 8, 4 };
 static Type t_uchar  = { TY_CHAR, 1, 1, true };
 static Type t_ushort = { TY_SHORT, 2, 2, true };
 static Type t_uint   = { TY_INT, 4, 4, true };
+static Type t_ullong = { TY_LONGLONG, 8, 4, true };
 static Type t_float  = { TY_FLOAT, 4, 4 };
 static Type t_double = { TY_DOUBLE, 8, 4 };
 
 Type *ty_void = &t_void, *ty_bool = &t_bool, *ty_char = &t_char, *ty_short = &t_short, *ty_int = &t_int;
+Type *ty_llong = &t_llong, *ty_ullong = &t_ullong;
 Type *ty_uchar = &t_uchar, *ty_ushort = &t_ushort, *ty_uint = &t_uint, *ty_float = &t_float, *ty_double = &t_double;
 
 static Type *new_type(TypeKind kind, int size, int align) {
@@ -25,7 +28,7 @@ static Type *new_type(TypeKind kind, int size, int align) {
 
 bool is_integer(Type *ty) {
     TypeKind k = ty->kind;
-    return k == TY_BOOL || k == TY_CHAR || k == TY_SHORT || k == TY_INT || k == TY_ENUM;
+    return k == TY_BOOL || k == TY_CHAR || k == TY_SHORT || k == TY_INT || k == TY_LONGLONG || k == TY_ENUM;
 }
 bool is_flonum(Type *ty) { return ty->kind == TY_FLOAT || ty->kind == TY_DOUBLE; }
 bool is_numeric(Type *ty) { return is_integer(ty) || is_flonum(ty); }
@@ -36,7 +39,7 @@ bool is_compatible(Type *a, Type *b) {
     if (b->origin) return is_compatible(a, b->origin);
     if (a->kind != b->kind) return false;
     switch (a->kind) {
-    case TY_CHAR: case TY_SHORT: case TY_INT: return a->is_unsigned == b->is_unsigned;
+    case TY_CHAR: case TY_SHORT: case TY_INT: case TY_LONGLONG: return a->is_unsigned == b->is_unsigned;
     case TY_FLOAT: case TY_DOUBLE: case TY_VOID: case TY_BOOL: return true;
     case TY_PTR: return is_compatible(a->base, b->base);
     case TY_FUNC:
@@ -94,8 +97,11 @@ static Type *get_common_type(Type *a, Type *b) {
     if (a->kind == TY_FLOAT || b->kind == TY_FLOAT) return ty_float;
     if (a->size < 4) a = ty_int;
     if (b->size < 4) b = ty_int;
-    if (a->is_unsigned || b->is_unsigned) return ty_uint;
-    return ty_int;
+    if (a->size < b->size) { Type *t = a; a = b; b = t; }
+    if (a->size > b->size) return a; /* 64-битный знаковый вмещает 32-битный беззнаковый */
+    if (a->is_unsigned) return a;
+    if (b->is_unsigned) return b;
+    return a;
 }
 
 /* «Обычные арифметические преобразования»: привести оба операнда к общему типу */

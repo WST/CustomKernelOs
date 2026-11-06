@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
     char line[1024];
     for (;;) {
         printf(ANSI_CYAN "> " ANSI_RESET);
-        if (getline(line, sizeof(line)) < 0 || !line[0]) break;
+        if (getln(line, sizeof(line)) < 0 || !line[0]) break;
         run(line, strlen(line), "repl", 1);
     }
     return 0;

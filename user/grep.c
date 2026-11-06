@@ -46,7 +46,7 @@ int main(int argc, char **argv) {
     int rc = 1;
     for (; i < argc; i++) {
         int fd = open(argv[i], O_READ);
-        if (fd < 0) { dprintf(STDERR, "grep: %s: %s\n", argv[i], strerror(-fd)); continue; }
+        if (fd < 0) { dprintf(STDERR, "grep: %s: %s\n", argv[i], strerror(errno)); continue; }
         if (search(fd, pat, names ? argv[i] : NULL) == 0) rc = 0;
         close(fd);
     }

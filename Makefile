@@ -78,7 +78,7 @@ $(BUILD)/os.img: $(BUILD)/boot.bin $(BUILD)/kernel.bin
 # программам FPU можно (ядро сохраняет его регистры при переключении), SSE — нет
 UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx \
-            -O2 -Wall -std=gnu11 -Iuser/lib -ffunction-sections -fdata-sections
+            -O2 -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
 # --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
 ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(basename $(notdir $(wildcard user/*.c))) cc
@@ -191,6 +191,9 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
 	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
+	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
@@ -292,7 +295,9 @@ gfxtest: | $(BUILD)
 CCROOT := $(BUILD)/ccroot
 cctest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@mkdir -p $(CCROOT)/include/sys
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
@@ -306,10 +311,30 @@ cctest: $(BUILD)/cc-host
 	    n=$$(basename $$t .c); \
 	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && ./$(BUILD)/cct_$$n || exit 1; \
 	done; \
+	rm -f $(BUILD)/cct_cc1 $(BUILD)/cct_cc2 $(BUILD)/cct_cc3; \
 	$(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
 	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)"
+
+# OpenBSD wc: cc -linux запускает утилиту на хосте, gcc -m32 собирает ELF для MyOS
+$(BUILD)/user/owc: third_party/openbsd/wc.c $(ULIB) user/user.ld | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c third_party/openbsd/wc.c -o $(BUILD)/user/owc.o
+	$(LD) $(ULDFLAGS) -o $@ $(BUILD)/user/owc.o $(ULIB)
+
+porttest: $(BUILD)/cc-host $(BUILD)/user/owc
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@printf 'hello world\n' > $(BUILD)/wc-in
+	@$(BUILD)/cc-host -B $(CCROOT) -linux third_party/openbsd/wc.c -o $(BUILD)/wc-linux
+	@$(BUILD)/wc-linux $(BUILD)/wc-in > $(BUILD)/wc-out
+	@printf '       1       2      12 %s\n' $(BUILD)/wc-in > $(BUILD)/wc-exp
+	@cmp $(BUILD)/wc-out $(BUILD)/wc-exp && echo "wc: lines/words/chars OK"
+	@$(BUILD)/wc-linux -c $(BUILD)/wc-in > $(BUILD)/wc-c
+	@printf '      12 %s\n' $(BUILD)/wc-in > $(BUILD)/wc-cexp
+	@cmp $(BUILD)/wc-c $(BUILD)/wc-cexp && echo "wc -c: OK"
 
 vfstest: all
 	python3 tests/vfs_smoke.py
@@ -319,7 +344,7 @@ largetest: | $(BUILD)
 	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/large_fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/large-host-io.o -o $(BUILD)/large-fs-test
 	python3 tests/run_large_fs.py $(BUILD)/large-fs-test
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest
+.PHONY: all run debug clean cleandisk test programs install cctest porttest jstest gfxtest vfstest largetest
 .SECONDARY:
 
 

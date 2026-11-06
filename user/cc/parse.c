@@ -155,6 +155,7 @@ static Node *new_unary(NodeKind kind, Node *expr, Token *tok) {
 static Node *new_num(int val, Token *tok) {
     Node *node = new_node(ND_NUM, tok);
     node->val = val;
+    node->ival = (unsigned long long)(long long)val;
     return node;
 }
 
@@ -350,8 +351,9 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
         case FLOAT: ty = ty_float; break;
         case DOUBLE: case LONG + DOUBLE: ty = ty_double; break;
         case LONG + LONG: case LONG + LONG + INT: case SIGNED + LONG + LONG: case SIGNED + LONG + LONG + INT:
+            ty = ty_llong; break;
         case UNSIGNED + LONG + LONG: case UNSIGNED + LONG + LONG + INT:
-            error_tok(tok, "'long long' is not supported (int and long are 32 bit)");
+            ty = ty_ullong; break;
         default: error_tok(tok, "invalid type");
         }
         tok = tok->next;
@@ -851,8 +853,8 @@ static Node *lvar_initializer(Token **rest, Token *tok, Obj *var) {
     return new_binary(ND_COMMA, lhs, rhs, tok);
 }
 
-static void write_buf(char *buf, unsigned val, int sz) {
-    for (int i = 0; i < sz; i++) buf[i] = (char)(val >> (8 * i));
+static void write_buf(char *buf, unsigned long long val, int sz) {
+    for (int i = 0; i < sz && i < 8; i++) buf[i] = (char)((val >> (8 * i)) & 0xFF);
 }
 
 static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf, int offset) {
@@ -881,9 +883,14 @@ static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf
         memcpy(buf + offset, &d, 8);
         return cur;
     }
+    if (init->expr->kind == ND_NUM) { write_buf(buf + offset, init->expr->ival, ty->size); return cur; }
     char **label = NULL;
     int val = eval2(init->expr, &label);
-    if (!label) { write_buf(buf + offset, val, ty->size); return cur; }
+    if (!label) {
+        unsigned long long wide = (unsigned long long)(long long)val;
+        write_buf(buf + offset, wide, ty->size);
+        return cur;
+    }
     Reloc *rel = xcalloc(sizeof(Reloc));
     rel->offset = offset;
     rel->label = *label;
@@ -1605,7 +1612,7 @@ static Node *primary(Token **rest, Token *tok) {
     if (tok->kind == TK_NUM) {
         Node *node;
         if (is_flonum(tok->ty)) { node = new_node(ND_NUM, tok); node->fval = tok->fval; }
-        else node = new_num(tok->val, tok);
+        else { node = new_num(tok->val, tok); node->ival = tok->ival; }
         node->ty = tok->ty;
         *rest = tok->next;
         return node;

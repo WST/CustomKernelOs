@@ -305,7 +305,7 @@ static bool expand_macro(Token **rest, Token *tok) {
             File *f = xcalloc(sizeof(File)); f->name = tok->file->name; f->contents = s;
             t = tokenize(f);
         } else {
-            t->kind = TK_NUM; t->val = tok->line; t->ty = ty_int;
+            t->kind = TK_NUM; t->val = tok->line; t->ival = (unsigned)tok->line; t->ty = ty_int;
         }
         t->at_bol = tok->at_bol; t->has_space = tok->has_space; t->line = tok->line;
         t->next = tok->next;
@@ -431,7 +431,7 @@ static Token *read_const_expr(Token **rest, Token *tok) {
             tok = tok->next;
             if (paren) tok = skip(tok, ")");
             Token *t = copy_token(start);
-            t->kind = TK_NUM; t->val = m ? 1 : 0; t->ty = ty_int;
+            t->kind = TK_NUM; t->val = m ? 1 : 0; t->ival = t->val; t->ty = ty_int;
             cur = cur->next = t;
             continue;
         }
@@ -448,7 +448,7 @@ static int eval_const_expr(Token **rest, Token *tok) {
     expr = preprocess2(expr);
     if (expr->kind == TK_EOF) error_tok(start, "no expression");
     for (Token *t = expr; t->kind != TK_EOF; t = t->next) {
-        if (t->kind == TK_IDENT) { t->kind = TK_NUM; t->val = 0; t->ty = ty_int; }   /* неизвестное имя = 0 */
+        if (t->kind == TK_IDENT) { t->kind = TK_NUM; t->val = 0; t->ival = 0; t->ty = ty_int; }   /* неизвестное имя = 0 */
         else if (t->kind == TK_PP_NUM) convert_pp_number(t);
     }
     Token *rest2;
