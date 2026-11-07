@@ -354,7 +354,15 @@ gztest: $(BUILD)/cc-host
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
 	@sh tests/gzip.sh $(BUILD)/gzip-linux
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest
+cptest: $(BUILD)/cc-host
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
+	@sh tests/cp.sh $(BUILD)/cp-linux
+
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest
 .SECONDARY:
 
 
