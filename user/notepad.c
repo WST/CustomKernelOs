@@ -27,6 +27,9 @@ static bool  editing_name;                  /* курсор в поле имен
 static int   name_len;
 static char  status_msg[64];
 static int   pressed_btn = -1;
+static int anchor_r, anchor_c;
+static bool selecting;
+static void changed(void);
 
 static const char *btn_labels[] = { "New", "Open", "Save" };
 #define BTN_X(i) (6 + (i) * 64)
@@ -80,6 +83,8 @@ static void clear_text(void) {
     while (n_lines) delete_line(n_lines - 1);
     insert_line(0, "", 0);
     cur_r = cur_c = top = left = 0;
+    anchor_r = anchor_c = 0;
+    selecting = false;
 }
 
 static void set_title(void) {
@@ -104,6 +109,8 @@ static void load(const char *p) {
     insert_line(n_lines, cur, cl);
     close(fd);
     cur_r = cur_c = top = left = 0;
+    anchor_r = anchor_c = 0;
+    selecting = false;
     modified = false;
     snprintf(status_msg, sizeof(status_msg), "opened, %d lines", n_lines);
 }
@@ -124,6 +131,99 @@ static void save(void) {
 }
 
 /* ------------------------------------------------------------ рисование */
+
+static bool has_selection(void) { return anchor_r != cur_r || anchor_c != cur_c; }
+static void selection_bounds(int *r0, int *c0, int *r1, int *c1) {
+    bool forward = anchor_r < cur_r || (anchor_r == cur_r && anchor_c <= cur_c);
+    *r0 = forward ? anchor_r : cur_r; *c0 = forward ? anchor_c : cur_c;
+    *r1 = forward ? cur_r : anchor_r; *c1 = forward ? cur_c : anchor_c;
+}
+static void drop_selection(void) { anchor_r = cur_r; anchor_c = cur_c; }
+static void erase_selection(void) {
+    if (!has_selection()) return;
+    int r0, c0, r1, c1;
+    selection_bounds(&r0, &c0, &r1, &c1);
+    if (r0 == r1) {
+        memmove(lines[r0] + c0, lines[r0] + c1, lens[r0] - c1);
+        lens[r0] -= c1 - c0;
+    } else {
+        int tail = lens[r1] - c1;
+        ensure_cap(r0, c0 + tail + 1);
+        memcpy(lines[r0] + c0, lines[r1] + c1, tail);
+        lens[r0] = c0 + tail;
+        for (int r = r1; r > r0; r--) delete_line(r);
+    }
+    cur_r = r0; cur_c = c0; drop_selection(); changed();
+}
+static void copy_selection(bool cut) {
+    if (!has_selection()) return;
+    int r0, c0, r1, c1;
+    selection_bounds(&r0, &c0, &r1, &c1);
+    int length = 0;
+    for (int r = r0; r <= r1; r++)
+        length += (r == r1 ? c1 : lens[r]) - (r == r0 ? c0 : 0) + (r < r1);
+    if (length > CLIPBOARD_MAX) { strcpy(status_msg, "selection exceeds 64 KiB"); return; }
+    char *s = malloc(length + 1);
+    if (!s) { strcpy(status_msg, "out of memory"); return; }
+    int n = 0;
+    for (int r = r0; r <= r1; r++) {
+        int start = r == r0 ? c0 : 0, end = r == r1 ? c1 : lens[r];
+        memcpy(s + n, lines[r] + start, end - start); n += end - start;
+        if (r < r1) s[n++] = '\n';
+    }
+    int result = clipboard_set(s, n);
+    free(s);
+    if (result < 0) { strcpy(status_msg, "clipboard copy failed"); return; }
+    if (cut) erase_selection();
+}
+
+/* Decode before editing: reject unsupported/malformed UTF-8 without losing
+ * the selected text. This editor's key representation supports BMP text. */
+static int paste_code(const char *s, int length, int *offset) {
+    unsigned c = (unsigned char)s[(*offset)++];
+    if (c < 128) return c;
+    int count = c >= 0xC2 && c <= 0xDF ? 1 : c >= 0xE0 && c <= 0xEF ? 2 : -1;
+    if (count < 0 || *offset + count > length) return -1;
+    unsigned cp = c & (count == 1 ? 31 : 15);
+    for (int i = 0; i < count; i++) {
+        c = (unsigned char)s[(*offset)++];
+        if ((c & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (c & 63);
+    }
+    if ((count == 2 && cp < 0x800) || (cp >= 0xD800 && cp <= 0xDFFF)) return -1;
+    return cp;
+}
+static void text_key(int k);
+static void paste_text(void) {
+    char *s = malloc(CLIPBOARD_MAX);
+    if (!s) return;
+    int length = clipboard_get(s, CLIPBOARD_MAX), extra = 0;
+    if (length <= 0) { free(s); return; }
+    for (int i = 0; i < length;) {
+        int cp = paste_code(s, length, &i);
+        if (cp < 0) { strcpy(status_msg, "unsupported clipboard encoding"); free(s); return; }
+        if (cp == '\n' || (cp == '\r' && (i == length || s[i] != '\n'))) extra++;
+    }
+    int r0, c0, r1, c1;
+    selection_bounds(&r0, &c0, &r1, &c1);
+    if (n_lines - (r1 - r0) + extra > MAX_LINES) {
+        strcpy(status_msg, "too many lines to paste"); free(s); return;
+    }
+    erase_selection();
+    for (int i = 0; i < length;) {
+        int cp = paste_code(s, length, &i);
+        if (cp == '\r') { if (i < length && s[i] == '\n') continue; cp = '\n'; }
+        if (cp == '\n' || cp == '\t') text_key(cp);
+        else if (cp >= 32 && cp != 127) {
+            char u[4]; int n = utf8_put(u, cp);
+            ensure_cap(cur_r, lens[cur_r] + n + 1);
+            memmove(lines[cur_r] + cur_c + n, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
+            memcpy(lines[cur_r] + cur_c, u, n);
+            cur_c += n; lens[cur_r] += n; changed(); drop_selection();
+        }
+    }
+    free(s);
+}
 
 static void draw(void) {
     gfx_fill_rect(0, 0, W, BAR_H, UI_FACE);
@@ -146,6 +246,18 @@ static void draw(void) {
             shown++;
         }
         buf[n] = 0;
+        if (has_selection() && !editing_name) {
+            int r0, c0, r1, c1;
+            selection_bounds(&r0, &c0, &r1, &c1);
+            if (li >= r0 && li <= r1) {
+                int start = li == r0 ? col_of(li, c0) : 0;
+                int end = li == r1 ? col_of(li, c1) : col_of(li, lens[li]) + 1;
+                if (start < left) start = left;
+                if (end > left + VIS_COLS) end = left + VIS_COLS;
+                if (end > start) gfx_fill_rect(TEXT_X + (start - left) * 8,
+                    TEXT_Y + r * 16, (end - start) * 8, 16, UI_SELECT);
+            }
+        }
         gfx_text(TEXT_X, TEXT_Y + r * 16, buf, UI_TEXT, TRANSPARENT);
     }
     int ccol = col_of(cur_r, cur_c);
@@ -206,6 +318,17 @@ static void name_key(int k) {
 }
 
 static void text_key(int k) {
+    if (k == CTRL('a')) { anchor_r = anchor_c = 0; cur_r = n_lines - 1; cur_c = lens[cur_r]; return; }
+    if (k == CTRL('c') || k == KEY_COPY) { copy_selection(false); return; }
+    if (k == CTRL('x')) { copy_selection(true); return; }
+    if (k == CTRL('v') || k == KEY_PASTE || k == (KEY_INS | KEY_SHIFT)) { paste_text(); return; }
+    bool shift = (k & KEY_SHIFT) != 0;
+    k &= ~KEY_SHIFT;
+    bool movement = k >= KEY_UP && k <= KEY_PGDN;
+    if (movement && !shift) drop_selection();
+    if (has_selection() && (k == 8 || k == 127 || k == KEY_DEL)) { erase_selection(); return; }
+    if (has_selection() && (k == '\n' || k == '\r' || k == '\t' ||
+        (k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS)))) erase_selection();
     if (k == CTRL('s')) { save(); set_title(); return; }
     if (k == CTRL('o')) { editing_name = true; name_len = strlen(path); strcpy(status_msg, "file name, then Enter"); return; }
     if (k == CTRL('n')) { clear_text(); path[0] = 0; modified = false; set_title(); return; }
@@ -226,6 +349,7 @@ static void text_key(int k) {
     case KEY_PGUP:  cur_r -= VIS_ROWS; if (cur_r < 0) cur_r = 0; cur_c = byte_of(cur_r, col); break;
     case KEY_PGDN:  cur_r += VIS_ROWS; if (cur_r >= n_lines) cur_r = n_lines - 1; cur_c = byte_of(cur_r, col); break;
     case '\n': case '\r':
+        if (n_lines >= MAX_LINES) { strcpy(status_msg, "line limit reached"); return; }
         insert_line(cur_r + 1, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
         lens[cur_r] = cur_c;
         cur_r++; cur_c = 0;
@@ -278,6 +402,7 @@ static void text_key(int k) {
     }
     }
     if (cur_c > lens[cur_r]) cur_c = lens[cur_r];
+    if (!movement || !shift) drop_selection();
 }
 
 static void click(int x, int y) {
@@ -298,6 +423,8 @@ static void click(int x, int y) {
         int c = left + (x - TEXT_X + 4) / 8;
         if (c < 0) c = 0;
         cur_r = r; cur_c = byte_of(r, c);
+        drop_selection();
+        selecting = true;
     }
 }
 
@@ -326,8 +453,17 @@ int main(int argc, char **argv) {
             continue;
         }
         if (e.type == EV_KEY) { if (editing_name) name_key(e.key); else text_key(e.key); keep_visible(); }
-        else if (e.type == EV_MOUSE_DOWN) { click(e.x, e.y); keep_visible(); }
-        else if (e.type == EV_MOUSE_UP) pressed_btn = -1;
+        else if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) { selecting = false; click(e.x, e.y); keep_visible(); }
+        else if (e.type == EV_MOUSE_MOVE && selecting) {
+            int r = top + (e.y - TEXT_Y) / 16;
+            if (r < 0) r = 0;
+            if (r >= n_lines) r = n_lines - 1;
+            int c = left + (e.x - TEXT_X + 4) / 8;
+            if (c < 0) c = 0;
+            cur_r = r; cur_c = byte_of(r, c); keep_visible();
+        }
+        else if (e.type == EV_MOUSE_UP) { pressed_btn = -1; selecting = false; }
+        else if (e.type == EV_FOCUS && !e.key) { selecting = false; pressed_btn = -1; }
         else if (e.type == EV_RESIZE) { W = e.x; H = e.y; keep_visible(); }
         else continue;
         draw();

@@ -70,6 +70,7 @@ enum {
     SYS_MKFS,
     SYS_PARTCTL,
     SYS_ACCOUNT,
+    SYS_CLIPBOARD,
     SYS_COUNT
 };
 

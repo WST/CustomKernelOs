@@ -102,6 +102,33 @@ static int alloc_fd(struct file *f) {
 
 /* ---------------------------------------------------------------- файлы */
 
+/* Copied into kernel storage: survives the source application's exit.
+ * A different account must not read the previous account's clipboard. */
+static char clipboard[65536];
+static u32 clipboard_length, clipboard_uid;
+static struct mutex clipboard_lock;
+static int sys_clipboard(u32 op, u32 addr, u32 size) {
+    if (op > 1) return -EINVAL;
+    if (size > sizeof(clipboard)) return -EFBIG;
+    if (size && !user_buf_ok(addr, size, op == 0)) return -EFAULT;
+    mutex_lock(&clipboard_lock);
+    u32 uid = task_current()->uid;
+    int result;
+    if (op == 1) {
+        if (size) memcpy(clipboard, (void *)addr, size);
+        clipboard_length = size;
+        clipboard_uid = uid;
+        result = size;
+    } else {
+        u32 length = uid == clipboard_uid ? clipboard_length : 0;
+        if (!size) result = length;
+        else if (size < length) result = -EFBIG;
+        else { if (length) memcpy((void *)addr, clipboard, length); result = length; }
+    }
+    mutex_unlock(&clipboard_lock);
+    return result;
+}
+
 static int sys_write(u32 fd, u32 buf, u32 len) {
     struct file *f = get_fd(fd);
     if (!f) return -EBADF;
@@ -744,6 +771,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_PTY_OPEN:    ret = sys_pty_open(a); break;
     case SYS_TTYCTL:      ret = tty_ctl(get_fd(a), b, c); break;
     case SYS_SOCKCTL:     { struct sock *s = get_sock(a); ret = s ? sock_ctl(s, (int)b, c) : -EBADF; break; }
+    case SYS_CLIPBOARD: ret = sys_clipboard(a, b, c); break;
     case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
     }
     r->eax = (u32)ret;

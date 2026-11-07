@@ -46,6 +46,24 @@ OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(
 
 all: $(BUILD)/os.img install
 
+# Native clipboard/editor checks, installed only onto a disposable test disk.
+$(BUILD)/user/clipboardcheck.o: tests/clipboardcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/clipboard_editor.o: tests/clipboard_editor.c user/notepad.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/clipboard_terminal.o: tests/clipboard_terminal.c user/terminal.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/clipboardcheck: $(BUILD)/user/clipboardcheck.o $(BUILD)/user/clipboard_editor.o $(BUILD)/user/clipboard_terminal.o $(BUILD)/user/libmyos.a
+	$(LD) -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections $^ -o $@
+
+.PHONY: clipboardtest
+clipboardtest:
+	python3 tests/clipboard_smoke.py
+	python3 tests/clipboard_gui_smoke.py
+
 $(BUILD) $(BUILD)/user:
 	mkdir -p $@
 
@@ -282,6 +300,7 @@ browsertest: user/lib/dom_prelude.h | $(BUILD)
 	    user/lib/img.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
+	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --clipboard-test
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --compat-test
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/modules.html assert-no-errors scroll
 	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/async-generators.html timers 150 assert-no-errors

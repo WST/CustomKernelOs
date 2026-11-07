@@ -118,6 +118,9 @@ int ttymode(int mode) { cur_tty = mode; return syscall3(SYS_TTYMODE, mode, 0, 0)
 void gotoxy(int x, int y) { printf("\x1b[%d;%dH", y + 1, x + 1); }
 
 /* Разобрать escape-последовательность: ESC [ A ... ESC [ 5 ~ */
+int clipboard_set(const char *s, unsigned n) { return syscall3(SYS_CLIPBOARD, 1, (int)s, n); }
+int clipboard_get(char *s, unsigned n) { return syscall3(SYS_CLIPBOARD, 0, (int)s, n); }
+
 int readkey(void) {
     unsigned char c;
     if (read(STDIN, &c, 1) <= 0) return -1;
@@ -140,6 +143,13 @@ int readkey(void) {
     if (b >= '0' && b <= '9') read(STDIN, &d, 1);
     syscall3(SYS_TTYMODE, cur_tty, 0, 0);
     if (n <= 0 || a != '[') return 27;
+    if (b >= 'a' && b <= 'l') {
+        static const int shifted[] = { KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
+            KEY_HOME, KEY_END, KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS };
+        if (b == 'k') return KEY_COPY;
+        if (b == 'l') return KEY_PASTE;
+        return shifted[b - 'a'] | KEY_SHIFT;
+    }
     switch (b) {
     case 'A': return KEY_UP;
     case 'B': return KEY_DOWN;

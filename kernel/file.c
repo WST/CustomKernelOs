@@ -119,6 +119,13 @@ static u32 pend_n, pend_pos;
 
 static void translate(int c) {
     const char *seq = NULL;
+    /* Shift navigation and clipboard shortcuts; private CSI finals are
+     * decoded by readkey without changing the Unicode key representation. */
+    if (c >= 0x90 && c <= 0x9B) {
+        pend_pos = 0; pend_n = 3;
+        pend[0] = 27; pend[1] = '['; pend[2] = 'a' + c - 0x90;
+        return;
+    }
     if (c >= KEY_UNI) {                                      /* буква не латиницей — в UTF-8 */
         u32 u = c - KEY_UNI;
         pend_pos = 0;

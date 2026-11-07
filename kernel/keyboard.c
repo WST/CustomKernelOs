@@ -57,6 +57,7 @@ int  kb_layout(void) { return layout; }
 void kb_set_layout(int l) { layout = l ? 1 : 0; }
 
 static void push(u16 c) {
+    if (shift && c >= KEY_UP && c <= KEY_INS) c += 0x10;
     u8 next = (head + 1) % BUF_SIZE;
     if (next != tail) { buf[head] = c; head = next; }
     task_wakeup((void *)buf);           /* разбудить того, кто ждёт клавишу */
@@ -107,6 +108,8 @@ static void keyboard_irq(struct regs *r) {
     (void)combo_used;
     if (sc == 0x3A) { caps = !caps; return; }                       /* CapsLock */
 
+    if (ctrl && shift && sc == 0x2E) { push(0x9A); return; } /* Ctrl+Shift+C */
+    if (ctrl && shift && sc == 0x2F) { push(0x9B); return; } /* Ctrl+Shift+V */
     if (ctrl && sc == 0x2E) { if (!proc_ctrl_c()) push(KEY_CTRL_C); return; }   /* Ctrl+C */
     bool sh = shift;
     if (layout && caps && map_normal[sc] && is_ru_letter_key(map_normal[sc])) sh = !sh;   /* это тоже буквы */

@@ -41,7 +41,7 @@ enum {
     SYS_SHM_UNMAP, SYS_MSG_SEND, SYS_MSG_RECV, SYS_SERVICE, SYS_TIME,
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
-    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT
+    SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT, SYS_CLIPBOARD
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
@@ -165,6 +165,15 @@ int  utf8_put(char *out, int cp); /* кодовая точка -> UTF-8 (1..3 б
 enum { KEY_UP = 1000, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
        KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS };
 int  readkey(void);
+#define KEY_SHIFT 0x10000
+#define KEY_COPY  0x20000
+#define KEY_PASTE 0x20001
+/* UTF-8 clipboard, at most 65536 bytes. get returns length, -EFBIG if too small.
+ * No trailing NUL is stored. get(NULL, 0) queries length. */
+#define CLIPBOARD_MAX 65536
+int clipboard_set(const char *text, unsigned length);
+int clipboard_get(char *text, unsigned capacity);
+
 #define CTRL(c) ((c) & 0x1F)
 
 /* escape-последовательности ANSI для консоли */
