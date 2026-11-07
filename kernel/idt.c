@@ -3,6 +3,7 @@
 #include "vga.h"
 #include "task.h"
 #include "syscall.h"
+#include "paging.h"
 
 struct idt_entry {
     u16 base_lo;
@@ -134,6 +135,11 @@ void kpanic(const char *msg) {
  * Возвращает regs, к которым надо вернуться: свои же или другой задачи. */
 struct regs *isr_handler(struct regs *r) {
     if (r->int_no < 32) {
+        if (r->int_no == 14 && (r->err_code & 2)) {     /* запись в общую страницу fork */
+            u32 cr2;
+            __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
+            if (vmm_cow_fault(cr2)) return r;
+        }
         if (task_fault(r, exception_names[r->int_no])) return schedule(r);  /* упал поток */
         panic(r);                                                           /* упало ядро */
     } else if (r->int_no < 48) {

@@ -73,6 +73,9 @@ enum {
     SYS_LSEEK,          /* lseek(fd, offset, whence) -> новое смещение */
     SYS_FSTAT,          /* fstat(fd, &{mode, size}) */
     SYS_RENAME,         /* rename(old, new) */
+    SYS_MMAP,           /* mmap(&{addr,len,prot,flags,fd,off}) -> адрес */
+    SYS_MUNMAP,         /* munmap(addr, len) */
+    SYS_MPROTECT,       /* mprotect(addr, len, prot) */
     SYS_COUNT
 };
 

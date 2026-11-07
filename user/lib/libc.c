@@ -187,6 +187,18 @@ int   open(const char *path, int flags, ...)     { return ioerr(syscall3(SYS_OPE
 int   close(int fd)                              { return ioerr(syscall3(SYS_CLOSE, fd, 0, 0)); }
 int   lseek(int fd, long offset, int whence)     { return ioerr(syscall3(SYS_LSEEK, fd, (int)offset, whence)); }
 void *sbrk(int inc)                              { return (void *)syscall3(SYS_SBRK, inc, 0, 0); }
+
+struct mmap_args { unsigned addr, len, prot, flags, fd, off; };
+
+void *mmap(void *addr, unsigned len, int prot, int flags, int fd, unsigned off) {
+    struct mmap_args a;
+    a.addr = (unsigned)addr; a.len = len; a.prot = prot; a.flags = flags; a.fd = fd; a.off = off;
+    unsigned r = syscall3(SYS_MMAP, (int)&a, 0, 0);
+    if (r >= 0xfffff001u) { errno = -(int)r; return (void *)-1; }
+    return (void *)r;
+}
+int munmap(void *addr, unsigned len)             { return syscall3(SYS_MUNMAP, (int)addr, len, 0); }
+int mprotect(void *addr, unsigned len, int prot) { return syscall3(SYS_MPROTECT, (int)addr, len, prot); }
 void  sleep_ms(unsigned ms)                      { syscall3(SYS_SLEEP, ms, 0, 0); }
 int   getpid(void)                               { return syscall3(SYS_GETPID, 0, 0, 0); }
 unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }

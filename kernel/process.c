@@ -4,10 +4,13 @@
  *
  *   0x40000000  .text .rodata      (только чтение)    ┐ из ELF-файла
  *   0x4000x000  .data .bss         (чтение и запись)  ┘
- *   brk ...     куча программы, растёт через sbrk()
- *        ...
+ *   brk ...     куча программы, растёт через sbrk() до 0x80000000
+ *   0x80000000  динамический загрузчик, если в ELF есть PT_INTERP
+ *   0xA0000000  общая память shm
+ *   0xB0000000  mmap (анонимные страницы и частные копии файлов)
  *   0xBFFF0000  стек программы, 64 КБ, растёт вниз
  *   0xBFFFFFFF  на вершине: строки аргументов, argv[], argc
+ *               у программы с PT_INTERP ещё envp и auxv
  */
 #include "process.h"
 #include "ipc.h"
@@ -33,9 +36,19 @@ struct elf_phdr {
 } __attribute__((packed));
 
 #define PT_LOAD   1
+#define PT_INTERP 3
 #define PF_W      2
 #define ET_EXEC   2
+#define ET_DYN    3
 #define EM_386    3
+
+#define AT_NULL   0
+#define AT_PHDR   3
+#define AT_PHENT  4
+#define AT_PHNUM  5
+#define AT_PAGESZ 6
+#define AT_BASE   7
+#define AT_ENTRY  9
 
 #define STACK_BOTTOM (USER_TOP - USER_STACK_PAGES * PAGE_SIZE)
 
@@ -66,12 +79,13 @@ static bool copy_to_dir(u32 dir, u32 va, const void *src, u32 n) {
     return true;
 }
 
-/* отобразить новые обнулённые страницы в [start, end) */
-static bool map_zero_pages(u32 dir, u32 start, u32 end, u32 flags, u32 *pages) {
+/* отобразить новые обнулённые страницы в [start, end).
+ * reuse: страница от соседнего сегмента того же файла — только дополнить права. */
+static bool map_zero_pages(u32 dir, u32 start, u32 end, u32 flags, u32 *pages, bool reuse) {
     for (u32 va = start & ~(PAGE_SIZE - 1); va < end; va += PAGE_SIZE) {
         u32 old_flags, phys;
         if (vmm_lookup(dir, va, &phys, &old_flags)) {
-            /* страницу уже занял другой сегмент — только добавим права */
+            if (!reuse) return false;
             if ((flags & PG_WRITE) && !(old_flags & PG_WRITE))
                 vmm_map_in(dir, va, phys & ~(PAGE_SIZE - 1), flags);
             continue;
@@ -95,6 +109,82 @@ struct image {
     u32 dir, entry, sp, brk, pages;
 };
 
+struct elfmap {
+    u32 base, entry, phdr, phnum, end;
+};
+
+/* ET_DYN с адресами меньше базы грузится от неё; уже абсолютный образ — как есть */
+static u32 elf_bias(struct elf_phdr *ph, u32 nph, u32 preferred) {
+    u32 top = 0;
+    for (u32 i = 0; i < nph; i++) {
+        if (ph[i].type != PT_LOAD || ph[i].memsz == 0) continue;
+        u32 end = ph[i].vaddr + ph[i].memsz;
+        if (end > top) top = end;
+    }
+    return top <= preferred ? preferred : 0;
+}
+
+static int map_elf(u8 *file, u32 size, u32 dir, u32 bias, bool reuse, u32 *pages, struct elfmap *out) {
+    struct elf_header *eh = (struct elf_header *)file;
+    struct elf_phdr *ph = (struct elf_phdr *)(file + eh->phoff);
+    u32 end_max = 0;
+    for (u32 i = 0; i < eh->phnum; i++) {
+        if (ph[i].type != PT_LOAD || ph[i].memsz == 0) continue;
+        u32 start = bias + ph[i].vaddr, end = start + ph[i].memsz;
+        bool interp = start >= INTERP_BASE;
+        if (end < start || start < USER_BASE || ph[i].filesz > ph[i].memsz ||
+            ph[i].offset + ph[i].filesz > size ||
+            (interp ? end > SHM_BASE : end > INTERP_BASE))
+            return PROC_ENOEXEC;
+        u32 flags = PG_USER | ((ph[i].flags & PF_W) ? PG_WRITE : 0);
+        if (!map_zero_pages(dir, start, end, flags, pages, reuse)) return PROC_ENOMEM;
+        if (!copy_to_dir(dir, start, file + ph[i].offset, ph[i].filesz)) return PROC_ENOMEM;
+        if (end > end_max) end_max = end;
+    }
+    if (!end_max) return PROC_ENOEXEC;
+    u32 entry = bias + eh->entry;
+    if (entry < USER_BASE || entry >= SHM_BASE) return PROC_ENOEXEC;
+    out->base = bias;
+    out->entry = entry;
+    out->phdr = bias + eh->phoff;
+    out->phnum = eh->phnum;
+    out->end = end_max;
+    return 0;
+}
+
+/* Стек для динамического загрузчика: argc, argv, пустой envp, auxv. esp кратен 16. */
+static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 interp, u32 *sp_out) {
+    u32 sp = USER_TOP, uargv[PROC_MAX_ARGS + 1];
+    for (int i = argc - 1; i >= 0; i--) {
+        u32 len = strlen(argv[i]) + 1;
+        if (len > 256) len = 256;
+        sp -= len;
+        if (sp < STACK_BOTTOM + 1024) return PROC_ENOMEM;
+        copy_to_dir(dir, sp, argv[i], len - 1);
+        copy_to_dir(dir, sp + len - 1, "", 1);
+        uargv[i] = sp;
+    }
+    uargv[argc] = 0;
+    u32 vec[PROC_MAX_ARGS + 24];
+    int n = 0;
+    vec[n++] = (u32)argc;
+    for (int i = 0; i <= argc; i++) vec[n++] = uargv[i];
+    vec[n++] = 0;                                            /* envp */
+    vec[n++] = AT_PHDR;   vec[n++] = prog->phdr;
+    vec[n++] = AT_PHENT;  vec[n++] = sizeof(struct elf_phdr);
+    vec[n++] = AT_PHNUM;  vec[n++] = prog->phnum;
+    vec[n++] = AT_PAGESZ; vec[n++] = PAGE_SIZE;
+    vec[n++] = AT_BASE;   vec[n++] = interp;
+    vec[n++] = AT_ENTRY;  vec[n++] = prog->entry;
+    vec[n++] = AT_NULL;   vec[n++] = 0;
+    u32 bytes = (u32)n * 4;
+    u32 dest = (sp - bytes) & ~15u;
+    if (dest < STACK_BOTTOM) return PROC_ENOMEM;
+    if (!copy_to_dir(dir, dest, vec, bytes)) return PROC_ENOMEM;
+    *sp_out = dest;
+    return 0;
+}
+
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
  * argv — строки в памяти ядра. */
 static int load_image(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
@@ -114,57 +204,95 @@ static int load_image(const char *path, u32 cwd, int argc, char **argv, struct i
     struct elf_header *eh = (struct elf_header *)file;
     if (eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' || eh->ident[3] != 'F' ||
         eh->ident[4] != 1 /* 32 бит */ || eh->ident[5] != 1 /* little endian */ ||
-        eh->type != ET_EXEC || eh->machine != EM_386 || eh->phentsize != sizeof(struct elf_phdr) ||
-        eh->phoff + eh->phnum * sizeof(struct elf_phdr) > st.size ||
-        eh->entry < USER_BASE || eh->entry >= STACK_BOTTOM)
+        (eh->type != ET_EXEC && eh->type != ET_DYN) || eh->machine != EM_386 ||
+        eh->phentsize != sizeof(struct elf_phdr) || !eh->phnum ||
+        eh->phoff + eh->phnum * sizeof(struct elf_phdr) > st.size)
         goto fail;
 
     err = PROC_ENOMEM;
     dir = vmm_create_dir();
     if (!dir) goto fail;
 
-    /* --- раскладываем сегменты PT_LOAD по страницам --- */
-    u32 brk = USER_BASE;
     struct elf_phdr *ph = (struct elf_phdr *)(file + eh->phoff);
+    u32 bias = eh->type == ET_DYN ? elf_bias(ph, eh->phnum, USER_BASE) : 0;
+    struct elfmap prog;
+    err = map_elf(file, st.size, dir, bias, true, &pages, &prog);
+    if (err) goto fail;
+    u32 brk = (prog.end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (brk > INTERP_BASE) brk = INTERP_BASE;
+
+    /* PT_INTERP: путь к загрузчику внутри файла, сам загрузчик — ET_DYN от INTERP_BASE */
+    char interp[128];
+    interp[0] = 0;
     for (u32 i = 0; i < eh->phnum; i++) {
-        if (ph[i].type != PT_LOAD || ph[i].memsz == 0) continue;
-        u32 start = ph[i].vaddr, end = ph[i].vaddr + ph[i].memsz;
-        if (start < USER_BASE || end > STACK_BOTTOM || end < start ||
-            ph[i].filesz > ph[i].memsz || ph[i].offset + ph[i].filesz > st.size) {
+        if (ph[i].type != PT_INTERP) continue;
+        if (!ph[i].filesz || ph[i].filesz >= sizeof(interp) || ph[i].offset + ph[i].filesz > st.size) {
             err = PROC_ENOEXEC;
             goto fail;
         }
-        u32 flags = PG_USER | ((ph[i].flags & PF_W) ? PG_WRITE : 0);
-        if (!map_zero_pages(dir, start, end, flags, &pages)) goto fail;
-        if (!copy_to_dir(dir, start, file + ph[i].offset, ph[i].filesz)) goto fail;
-        if (end > brk) brk = end;
+        bool nul = false;
+        for (u32 k = 0; k < ph[i].filesz; k++) if (file[ph[i].offset + k] == 0) nul = true;
+        if (!nul) { err = PROC_ENOEXEC; goto fail; }
+        memcpy(interp, file + ph[i].offset, ph[i].filesz);
+        break;
     }
-    brk = (brk + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
 
-    /* --- стек и аргументы --- */
-    if (!map_zero_pages(dir, STACK_BOTTOM, USER_TOP, PG_USER | PG_WRITE, &pages)) goto fail;
-    if (argc > PROC_MAX_ARGS) argc = PROC_MAX_ARGS;
-    u32 sp = USER_TOP, uargv[PROC_MAX_ARGS + 1];
-    for (int i = argc - 1; i >= 0; i--) {                /* сами строки */
-        u32 len = strlen(argv[i]) + 1;
-        if (len > 256) len = 256;
-        sp -= len;
-        copy_to_dir(dir, sp, argv[i], len - 1);
-        copy_to_dir(dir, sp + len - 1, "", 1);
-        uargv[i] = sp;
+    u32 entry = prog.entry;
+    u32 sp = 0;
+    if (!map_zero_pages(dir, STACK_BOTTOM, USER_TOP, PG_USER | PG_WRITE, &pages, false)) {
+        err = PROC_ENOMEM;
+        goto fail;
     }
-    uargv[argc] = 0;
-    u32 argv_addr = (sp - 4 * (argc + 1)) & ~15u;        /* массив argv[] */
-    copy_to_dir(dir, argv_addr, uargv, 4 * (argc + 1));
-    /* _start(argc, argv) вызывается «как обычная функция»: на стеке адрес
-     * возврата (0 — возвращаться некуда), argc, argv. По соглашению i386
-     * перед call стек выровнен на 16, т.е. esp+4 кратен 16. */
-    sp = argv_addr - 20;
-    u32 frame[3] = { 0, (u32)argc, argv_addr };
-    copy_to_dir(dir, sp, frame, sizeof(frame));
+    if (argc > PROC_MAX_ARGS) argc = PROC_MAX_ARGS;
+
+    if (interp[0]) {
+        u32 lino;
+        struct fs_stat lst;
+        if (fs_resolve(cwd, interp, &lino) || fs_stat(lino, &lst) || lst.type != FS_TYPE_FILE) {
+            err = PROC_ENOENT;
+            goto fail;
+        }
+        u8 *ld = kmalloc(lst.size);
+        if (!ld) { err = PROC_ENOMEM; goto fail; }
+        bool got = fs_read(lino, 0, ld, lst.size) == (int)lst.size && lst.size >= sizeof(struct elf_header);
+        struct elf_header *leh = (struct elf_header *)ld;
+        int lerr = PROC_ENOEXEC;
+        struct elfmap lm;
+        if (got && leh->ident[0] == 0x7F && leh->type == ET_DYN && leh->machine == EM_386 &&
+            leh->phentsize == sizeof(struct elf_phdr) && leh->phnum &&
+            leh->phoff + leh->phnum * sizeof(struct elf_phdr) <= lst.size) {
+            u32 lbias = elf_bias((struct elf_phdr *)(ld + leh->phoff), leh->phnum, INTERP_BASE);
+            lerr = map_elf(ld, lst.size, dir, lbias, false, &pages, &lm);
+        }
+        kfree(ld);
+        if (lerr) { err = lerr; goto fail; }
+        entry = lm.entry;
+        u32 ph;
+        if (!vmm_lookup(dir, prog.phdr, &ph, NULL)) { err = PROC_ENOEXEC; goto fail; }
+        err = aux_stack(dir, argc, argv, &prog, lm.base, &sp);
+        if (err) goto fail;
+    } else {
+        /* _start(argc, argv): адрес возврата, argc, argv. esp+4 кратен 16. */
+        u32 uargv[PROC_MAX_ARGS + 1];
+        sp = USER_TOP;
+        for (int i = argc - 1; i >= 0; i--) {
+            u32 len = strlen(argv[i]) + 1;
+            if (len > 256) len = 256;
+            sp -= len;
+            copy_to_dir(dir, sp, argv[i], len - 1);
+            copy_to_dir(dir, sp + len - 1, "", 1);
+            uargv[i] = sp;
+        }
+        uargv[argc] = 0;
+        u32 argv_addr = (sp - 4 * (argc + 1)) & ~15u;
+        copy_to_dir(dir, argv_addr, uargv, 4 * (argc + 1));
+        sp = argv_addr - 20;
+        u32 frame[3] = { 0, (u32)argc, argv_addr };
+        copy_to_dir(dir, sp, frame, sizeof(frame));
+    }
 
     im->dir = dir;
-    im->entry = eh->entry;
+    im->entry = entry;
     im->sp = sp;
     im->brk = brk;
     im->pages = pages;

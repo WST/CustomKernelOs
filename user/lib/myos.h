@@ -44,8 +44,16 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_LSEEK, SYS_FSTAT, SYS_RENAME
+    SYS_LSEEK, SYS_FSTAT, SYS_RENAME,
+    SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT
 };
+
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+#define MAP_SHARED 1
+#define MAP_PRIVATE 2
+#define MAP_ANONYMOUS 0x20
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
  * дополнительно приводят его к -1 и пишут сюда, как в POSIX. */
@@ -138,6 +146,9 @@ int blockinfo(unsigned index,struct block_info *info);
 int mkfs(const char *device);
 int partctl(const char *device,unsigned op,unsigned slot,unsigned start,unsigned sectors);
 void *sbrk(int increment);
+void *mmap(void *addr, unsigned len, int prot, int flags, int fd, unsigned off);
+int   munmap(void *addr, unsigned len);
+int   mprotect(void *addr, unsigned len, int prot);
 void  sleep_ms(unsigned ms);
 int   getpid(void);
 unsigned ticks(void);           /* миллисекунды с момента загрузки */

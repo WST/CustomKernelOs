@@ -24,7 +24,9 @@ struct pmm_stats {
 
 void pmm_init(void);
 u32  pmm_alloc(void);               /* физ. адрес фрейма или 0, если память кончилась */
-void pmm_free(u32 addr);
+void pmm_free(u32 addr);            /* уменьшить счётчик; в общий котёл — когда он обнулился */
+bool pmm_share(u32 addr);           /* ещё один владелец фрейма (copy-on-write, общая страница) */
+u32  pmm_refs(u32 addr);            /* сколько владельцев; 0 — кадр не из pmm_alloc */
 void pmm_stats(struct pmm_stats *st);
 
 u32  e820_count(void);

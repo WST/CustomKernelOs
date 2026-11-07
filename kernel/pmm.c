@@ -13,6 +13,7 @@
 #define MAX_FRAMES    (MAX_PHYS / PAGE_SIZE)
 
 static u32 bitmap[MAX_FRAMES / 32];   /* 32 КБ на 1 ГБ */
+static u8  refs[MAX_FRAMES];          /* сколько адресных пространств держит фрейм */
 static u32 limit_frame;               /* фреймы >= этого не существуют */
 static u32 total_frames, used_frames;
 static u32 next_hint;                 /* откуда начинать поиск */
@@ -103,6 +104,7 @@ u32 pmm_alloc(void) {
             if (bitmap[f / 32] == 0xFFFFFFFF) { f |= 31; continue; }   /* пропуск 32 занятых */
             if (!is_used(f)) {
                 set_used(f);
+                refs[f] = 1;
                 used_frames++;
                 next_hint = f + 1;
                 return f * PAGE_SIZE;
@@ -115,9 +117,24 @@ u32 pmm_alloc(void) {
 void pmm_free(u32 addr) {
     u32 f = addr / PAGE_SIZE;
     if (addr % PAGE_SIZE || addr < LOW_RESERVED || f >= limit_frame || !is_used(f)) return;
+    if (refs[f] > 1) { refs[f]--; return; }          /* кадр ещё отображён в другом процессе */
+    refs[f] = 0;
     set_free(f);
     used_frames--;
     if (f < next_hint) next_hint = f;
+}
+
+bool pmm_share(u32 addr) {
+    u32 f = addr / PAGE_SIZE;
+    if (addr % PAGE_SIZE || f >= limit_frame || !is_used(f) || refs[f] == 0 || refs[f] == 255) return false;
+    refs[f]++;
+    return true;
+}
+
+u32 pmm_refs(u32 addr) {
+    u32 f = addr / PAGE_SIZE;
+    if (addr % PAGE_SIZE || f >= limit_frame || !is_used(f)) return 0;
+    return refs[f];
 }
 
 void pmm_stats(struct pmm_stats *st) {
