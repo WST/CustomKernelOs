@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Notepad
+Exec=notepad
+Icon=notepad
+Keywords=блокнот текст редактор editor text
+X-MyOS-Favorite=true

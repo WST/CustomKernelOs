@@ -51,23 +51,79 @@ static int mouse_x, mouse_y;
 
 /* ------------------------------------------------------------ программы */
 
-struct app { const char *name, *prog; bool fav; const char *keywords; };
-static const struct app apps[] = {
-    { "Browser", "browser", true, "браузер интернет web internet сайт" },
-    { "Files", "files", true, "файлы папки folder" },
-    { "Terminal", "terminal", true, "терминал консоль shell sh командная" },
-    { "Notepad", "notepad", true, "блокнот текст редактор editor text" },
-    { "Calculator", "calc", true, "калькулятор" },
-    { "Paint", "draw", true, "рисование рисовать draw" },
-    { "Minesweeper", "mines", true, "сапёр сапер мины игра game" },
-    { "Battleship", "battle", true, "морской бой корабли игра game" },
-    { "Task Manager", "taskmgr", true, "диспетчер задач процессы process" },
-    { "Display", "display", false, "экран дисплей разрешение settings настройки" },
-    { "Code", "code", false, "код программирование code editor IDE редактор" },
-    { "About MyOS", "about", false, "о системе версия" },
-};
-#define N_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
-enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_CODE, APP_ABOUT };
+#define MAX_APPS 64
+#define APP_NAME 48
+#define APP_PROG 32
+#define APP_PATH 64
+#define APP_KEYWORDS 128
+enum { APP_GENERIC, APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_CODE, APP_ABOUT };
+struct app { char name[APP_NAME], prog[APP_PROG], path[APP_PATH], keywords[APP_KEYWORDS]; int icon; bool fav; };
+static struct app apps[MAX_APPS];
+static int N_APPS;
+
+static int app_icon_kind(const char *s) {
+    if (!strcmp(s, "browser")) return APP_BROWSER;
+    if (!strcmp(s, "files")) return APP_FILES;
+    if (!strcmp(s, "terminal")) return APP_TERMINAL;
+    if (!strcmp(s, "notepad")) return APP_NOTEPAD;
+    if (!strcmp(s, "calc")) return APP_CALC;
+    if (!strcmp(s, "paint")) return APP_PAINT;
+    if (!strcmp(s, "mines")) return APP_MINES;
+    if (!strcmp(s, "battle")) return APP_BATTLE;
+    if (!strcmp(s, "taskmgr")) return APP_TASKMGR;
+    if (!strcmp(s, "display")) return APP_DISPLAY;
+    if (!strcmp(s, "code")) return APP_CODE;
+    if (!strcmp(s, "about")) return APP_ABOUT;
+    return APP_GENERIC;
+}
+
+static void app_field(char *dst, int cap, const char *src) {
+    int n = strlen(src); if (n >= cap) n = cap - 1;
+    memcpy(dst, src, n); dst[n] = 0;
+}
+static void app_append(char *dst, int cap, const char *src) {
+    int n = strlen(dst);
+    if (n && n < cap - 1) dst[n++] = ' ';
+    while (*src && n < cap - 1) dst[n++] = *src++;
+    dst[n] = 0;
+}
+static void draw_generic_icon(const char *title, int x, int y, int size);
+
+/* Читаем Desktop Entry из стандартного каталога приложений. */
+static void load_apps(void) {
+    struct dirent_info ent;
+    for (int i = 0; N_APPS < MAX_APPS && dirread("/usr/share/applications", i, &ent) > 0; i++) {
+        int en = strlen(ent.name);
+        if (ent.type != 1 || en < 8 || strcmp(ent.name + en - 8, ".desktop")) continue;
+        char path[64], line[192];
+        snprintf(path, sizeof(path), "/usr/share/applications/%s", ent.name);
+        int fd = open(path, O_READ); if (fd < 0) continue;
+        struct app a; memset(&a, 0, sizeof(a)); a.icon = APP_GENERIC;
+        while (readln(fd, line, sizeof(line)) >= 0) {
+            int ll = strlen(line);
+            while (ll && (line[ll - 1] == '\r' || line[ll - 1] == ' ' || line[ll - 1] == '\t')) line[--ll] = 0;
+            char *eq = strchr(line, '='); if (!eq) continue; *eq++ = 0;
+            if (!strcmp(line, "Name")) app_field(a.name, sizeof(a.name), eq);
+            else if (!strcmp(line, "Exec")) {
+                while (*eq == ' ' || *eq == '\t') eq++;
+                char *end = eq; while (*end && *end != ' ' && *end != '\t') end++;
+                *end = 0;
+                const char *base = eq;
+                if (!strncmp(eq, "/bin/", 5)) base = eq + 5;
+                else if (!strncmp(eq, "/ext/bin/", 9)) base = eq + 9;
+                else if (strchr(eq, '/')) continue;
+                if (!*base || strchr(base, '/') || strstr(base, "..")) continue;
+                app_field(a.prog, sizeof(a.prog), base);
+                if (eq == base) snprintf(a.path, sizeof(a.path), "/bin/%s", base);
+                else app_field(a.path, sizeof(a.path), eq);
+            } else if (!strcmp(line, "Icon")) a.icon = app_icon_kind(eq);
+            else if (!strcmp(line, "Keywords") || !strcmp(line, "Comment")) app_append(a.keywords, sizeof(a.keywords), eq);
+            else if (!strcmp(line, "X-MyOS-Favorite") && (!strcmp(eq, "true") || !strcmp(eq, "1"))) a.fav = true;
+        }
+        close(fd);
+        if (a.name[0] && a.prog[0] && a.path[0]) apps[N_APPS++] = a;
+    }
+}
 
 static struct { int pid, app; } launched[32];
 static int n_launched;
@@ -201,7 +257,7 @@ static void tri(int x0, int y0, int x1, int y1, int x2, int y2, color_t c) {    
 
 static void draw_app_icon(int app, int x, int y, int size) {
     IX = x; IY = y; IS = size;
-    switch (app) {
+    switch (apps[app].icon) {
     case APP_TERMINAL:
         rr_grad(3, 5, 42, 38, 7, RGB(94, 94, 94), RGB(52, 52, 52));
         rr(6, 10, 36, 30, 4, RGB(48, 10, 36));
@@ -299,6 +355,7 @@ static void draw_app_icon(int app, int x, int y, int size) {
         ell(21, 10, 6, 6, C_WHITE, 255);
         rr(21, 19, 6, 19, 3, C_WHITE);
         break;
+    default: draw_generic_icon(apps[app].name, x, y, size); break;
     }
 }
 
@@ -318,13 +375,13 @@ static void draw_generic_icon(const char *title, int x, int y, int size) {
 }
 
 /* значки, готовые картинки 0xAARRGGBB (рисуются один раз на размер) */
-static uint32_t *icon_cache[N_APPS][2];
+static uint32_t *icon_cache[MAX_APPS][2];
 static int icon_cache_size[2];
 
 static uint32_t *app_icon(int app, int which, int size) {
     if (icon_cache[app][which] && icon_cache_size[which] == size) return icon_cache[app][which];
     if (icon_cache_size[which] != size) {
-        for (int i = 0; i < N_APPS; i++) { free(icon_cache[i][which]); icon_cache[i][which] = NULL; }
+        for (int i = 0; i < MAX_APPS; i++) { free(icon_cache[i][which]); icon_cache[i][which] = NULL; }
         icon_cache_size[which] = size;
     }
     struct gfx_canvas cv;
@@ -471,7 +528,7 @@ static int app_windows(int app) {
 
 static void dock_build(void) {
     n_dock = 0;
-    for (int a = 0; a < N_APPS; a++)
+    for (int a = 0; a < N_APPS && n_dock < DOCK_MAX; a++)
         if (apps[a].fav) { dock[n_dock].app = a; dock[n_dock].win = -1; n_dock++; }
     for (int a = 0; a < N_APPS && n_dock < DOCK_MAX; a++)
         if (!apps[a].fav && app_windows(a)) { dock[n_dock].app = a; dock[n_dock].win = -1; n_dock++; }
@@ -636,7 +693,7 @@ static int hover_ov = -1;
 /* поиск: что напечатано и какие программы подходят */
 static char search[64];
 static int  search_len;
-static int  ov_list[N_APPS], ov_n, ov_sel;
+static int  ov_list[MAX_APPS], ov_n, ov_sel;
 static bool ov_kbd;                     /* выбирали стрелками — показать выбранное */
 
 static int lower_cp(int c) {
@@ -807,7 +864,7 @@ static int win_radius(struct win *w) { return w->maximized ? 0 : RADIUS; }
 static void draw_frame(int idx) {
     struct win *w = &wins[idx];
     bool active = idx == focus;
-    bool code_theme = w->app == APP_CODE;
+    bool code_theme = w->app >= 0 && apps[w->app].icon == APP_CODE;
     int ow = outer_w(w), oh = outer_h(w), rad = win_radius(w);
     /* тень и тонкая обводка (у развёрнутого — не нужны: вокруг панель и док) */
     if (!w->maximized) {
@@ -1164,6 +1221,11 @@ static int app_by_title(const char *t) {
     return -1;
 }
 
+static int app_by_prog(const char *prog) {
+    for (int a = 0; a < N_APPS; a++) if (!strcmp(apps[a].prog, prog)) return a;
+    return -1;
+}
+
 static void handle_msg(struct msg *m) {
     switch (m->type) {
     case WM_CREATE: {
@@ -1253,13 +1315,14 @@ static void handle_msg(struct msg *m) {
 
 static void launch(int app) {
     char path[64];
-    snprintf(path, sizeof(path), "/bin/%s", apps[app].prog);
+    if (app < 0 || app >= N_APPS) return;
+    snprintf(path, sizeof(path), "%s", apps[app].path);
     int pid = fork();
     if (pid == 0) {
         int p[2];                                             /* ввод — пустой канал: клавиатура только у стола */
         if (pipe(p) == 0) { close(p[1]); dup2(p[0], 0); close(p[0]); }
         char *argv[2];
-        argv[0] = (char *)apps[app].prog; argv[1] = NULL;
+        argv[0] = apps[app].prog; argv[1] = NULL;
         exec(path, argv);
         exit(127);
     }
@@ -1427,8 +1490,8 @@ static void mouse_down(int x, int y) {
         int it = sysmenu_at(x, y);
         if (it >= 0) {
             close_sysmenu();
-            if (it == 0) launch(APP_DISPLAY);
-            else if (it == 1) launch(APP_ABOUT);
+            if (it == 0) launch(app_by_prog("display"));
+            else if (it == 1) launch(app_by_prog("about"));
             else if (it == 3) { logout_requested = true; quit = true; }
             else if (it == 4) quit = true;
             return;
@@ -1720,6 +1783,7 @@ static bool desktop_login(void) {
 }
 
 int main(void) {
+    load_apps();
     if (service_find("desktop")) { dprintf(STDERR, "desktop: already running\n"); return 1; }
     int r = gfx_open();
     if (r < 0) { dprintf(STDERR, "desktop: no graphics (%s)\n", strerror(-r)); return 1; }

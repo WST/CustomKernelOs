@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Minesweeper
+Exec=mines
+Icon=mines
+Keywords=сапёр сапер мины игра game
+X-MyOS-Favorite=true
