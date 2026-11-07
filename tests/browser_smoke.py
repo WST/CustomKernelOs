@@ -1,5 +1,6 @@
 """Run the real MyOS browser on an isolated disk against compressed HTTP fixtures."""
 import gzip
+import os
 import http.server
 import pathlib
 import re
@@ -42,6 +43,7 @@ class Server(http.server.BaseHTTPRequestHandler):
         seen.append(self.path)
         ctype, encoding, data = pages.get(self.path, ('text/plain', 'gzip', b'not found'))
         compressed = gzip.compress(data) if encoding == 'gzip' else zlib.compress(data)
+        time.sleep(.3)  # exceed the browser socket timeout before headers
         self.send_response(200)
         self.send_header('Content-Type', ctype)
         self.send_header('Content-Encoding', encoding.upper())
@@ -52,6 +54,7 @@ class Server(http.server.BaseHTTPRequestHandler):
             chunk = compressed[start:start + 23]
             self.wfile.write(f'{len(chunk):X};test=1\r\n'.encode() + chunk + b'\r\n')
             self.wfile.flush()
+            if start == 0: time.sleep(.15)  # timeout between body chunks too
         self.wfile.write(b'0\r\nX-Test: done\r\n\r\n')
         self.wfile.flush()
         self.close_connection = False
@@ -59,7 +62,7 @@ class Server(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('0.0.0.0', 0), Server)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 image = build / 'browser-smoke.img'
-shutil.copyfile('disk.img', image)
+shutil.copyfile(os.environ.get('MYOS_TEST_DISK', 'disk.img'), image)
 subprocess.run(['build/myfs', str(image), 'rm', '/etc/accounts'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.run(['build/myfs', str(image), 'put', 'build/user/browser', '/bin/browser'], check=True)
 script = build / 'browser-smoke.sh'

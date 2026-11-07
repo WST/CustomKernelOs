@@ -135,7 +135,7 @@ int main(int argc, char **argv) {
     unsigned total = header("Content-Length", lenh, sizeof(lenh)) ? (unsigned)atoi(lenh) : 0;
 
     int ofd = to_stdout ? STDOUT : open(out, O_WRITE);
-    if (ofd < 0) { dprintf(STDERR, "wget: %s: %s\n", out, strerror(-ofd)); close(fd); return 1; }
+    if (ofd < 0) { dprintf(STDERR, "wget: %s: %s\n", out, strerror(errno)); close(fd); return 1; }
 
     unsigned got = 0, t0 = ticks(), last = 0;
     if (resp_len > body_off) { write(ofd, resp + body_off, resp_len - body_off); got = resp_len - body_off; }
@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
     bool failed = false;
     while ((n = net_read(fd, buf, sizeof(buf))) > 0) {
         int w = write(ofd, buf, n);
-        if (w != n) { dprintf(STDERR, "\nwget: write to %s: %s\n", out, strerror(w < 0 ? -w : ENOSPC)); failed = true; n = 0; break; }
+        if (w != n) { dprintf(STDERR, "\nwget: write to %s: %s\n", out, strerror(w < 0 ? errno : ENOSPC)); failed = true; n = 0; break; }
         got += n;
         if (!quiet && ticks() - last > 200) {
             last = ticks();

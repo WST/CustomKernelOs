@@ -1465,6 +1465,7 @@ static int js_busy_poll(void) {
 static int net_read(int fd, void *b, int n) {
     for (;;) {
         int r = conn ? tls_read(conn, b, n) : read(fd, b, n);
+        if (!conn && r < 0) r = -errno; /* read is POSIX; this layer uses -errno */
         if (r > 0) { req_last_data = ticks(); return r; }
         if (r == -ETIMEDOUT && !conn) { if (net_idle()) continue; return -ETIMEDOUT; }
         if (r < 0 && req_fail[0]) return -ETIMEDOUT;            /* tls_read: net_idle сказала «хватит» */
@@ -1725,11 +1726,11 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
         struct dirent_info st;
         char path[512];
         snprintf(path, sizeof(path), "%s", p.path[0] ? p.path : "/");
-        if (stat(path, &st) < 0) { set_status("file not found"); return 404; }
+        if (dirstat(path, &st) < 0) { set_status("file not found"); return 404; }
         if (st.type == 2) {
             int o = snprintf(body, MAX_PAGE, "<title>%s</title><h1>Index of %s</h1><ul>", path, path);
             struct dirent_info e;
-            for (int i = 0; readdir(path, i, &e) == 1 && o < MAX_PAGE - 512; i++) {
+            for (int i = 0; dirread(path, i, &e) == 1 && o < MAX_PAGE - 512; i++) {
                 if (!strcmp(e.name, ".")) continue;
                 o += snprintf(body + o, MAX_PAGE - o, "<li><a href=\"file:%s%s%s%s\">%s%s</a> %s</li>",
                               path, path[strlen(path) - 1] == '/' ? "" : "/", e.name, e.type == 2 ? "/" : "",

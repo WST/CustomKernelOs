@@ -23,7 +23,7 @@ struct pipe {
 struct file {
     enum file_type type;
     u32  refs;
-    u8   mode;                      /* 0 чтение, 1 запись, 2 дозапись */
+    u8   mode;                      /* диск: биты FMODE_*; канал: 0 чтение, иначе запись */
     u32  ino, off;                  /* FILE_DISK */
     struct pipe *pipe;              /* FILE_PIPE */
     struct sock *sock;              /* FILE_SOCKET */
@@ -49,5 +49,10 @@ int   pipe_create(struct file **rd, struct file **wr);
 /* buf — указатель в памяти текущего процесса (уже проверенный) */
 int   file_read(struct file *f, void *buf, u32 len);
 int   file_write(struct file *f, const void *buf, u32 len, bool is_stderr);
+int   file_lseek(struct file *f, int off, int whence);   /* -> новое смещение или -errno */
+
+#define FMODE_READ   1
+#define FMODE_WRITE  2
+#define FMODE_APPEND 4
 
 #endif

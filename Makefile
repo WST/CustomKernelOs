@@ -59,6 +59,16 @@ $(BUILD)/user/clipboard_terminal.o: tests/clipboard_terminal.c user/terminal.c u
 $(BUILD)/user/clipboardcheck: $(BUILD)/user/clipboardcheck.o $(BUILD)/user/clipboard_editor.o $(BUILD)/user/clipboard_terminal.o $(BUILD)/user/libmyos.a
 	$(LD) -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections $^ -o $@
 
+$(BUILD)/user/pr2check.o: tests/pr2check.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/pr2check: $(BUILD)/user/pr2check.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+.PHONY: pr2test
+pr2test:
+	python3 tests/pr2_smoke.py
+
 .PHONY: clipboardtest
 clipboardtest:
 	python3 tests/clipboard_smoke.py
@@ -96,7 +106,7 @@ $(BUILD)/os.img: $(BUILD)/boot.bin $(BUILD)/kernel.bin
 # программам FPU можно (ядро сохраняет его регистры при переключении), SSE — нет
 UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx \
-            -O2 -Wall -std=gnu11 -Iuser/lib -ffunction-sections -fdata-sections
+            -O2 -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
 # --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
 ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(basename $(notdir $(wildcard user/*.c))) cc
@@ -108,7 +118,7 @@ ULIB := $(BUILD)/user/libmyos.a
 $(ULIB): $(ULIB_OBJS)
 	rm -f $@ && $(AR) rcs $@ $^
 
-$(BUILD)/user/libc.o: user/lib/libc.c user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
@@ -131,7 +141,7 @@ $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
 
 # HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
 # Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
-TLS_PROGS := $(BUILD)/user/wget
+TLS_PROGS := $(BUILD)/user/wget $(BUILD)/user/download
 
 # x509.c — проверка сертификатов (RSA, ECDSA P-256/P-384, цепочка до корней из /etc/certs.der)
 TLS_OBJS := $(BUILD)/user/tls.o $(BUILD)/user/x509.o
@@ -202,14 +212,28 @@ $(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/myfs.c kernel/myf
 $(DISK):
 	$(call padto,$@,$$(( $(DISK_MB) * 1048576 )))
 
-# Установить программы в /bin (остальные файлы на диске не трогаются)
+# Установить программы в /bin (остальные файлы на диске не трогаются).
+# Сторонние утилиты ставятся в /ext/bin командой ext, по файлам /ext/instructions.
 install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
+	@echo "==> инструкции сторонних программ в /ext/instructions"
+	@$(BUILD)/myfs $(DISK) mkdir /ext/bin >/dev/null
+	@$(BUILD)/myfs $(DISK) mkdir /ext/instructions >/dev/null
+	@$(BUILD)/myfs $(DISK) rm /ext/bin/wc || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/bin/head || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/bin/ls || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/bin/grep || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/ls.inst || exit 1
+	@for f in ext/instructions/*.inst; do $(BUILD)/myfs $(DISK) put $$f /ext/instructions/$$(basename $$f) || exit 1; done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
-	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
+	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /mnt /media /proc /sys /run /ext /ext/bin /ext/instructions; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
-	@for f in libc.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
+	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
+	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -295,7 +319,7 @@ x509test: | $(BUILD)
 # Весь браузер (загрузка, DOM, JS, CSS, раскладка, картинки) на Linux с AddressSanitizer:
 #   build/browser-host страница.html [w 1280] [scroll] [click] [keys] [images] [timers 500] [shot f.ppm]
 browsertest: user/lib/dom_prelude.h | $(BUILD)
-	gcc -m32 -std=gnu17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
+	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
 	    user/lib/img.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
@@ -316,8 +340,10 @@ gfxtest: | $(BUILD)
 CCROOT := $(BUILD)/ccroot
 cctest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h $(CCROOT)/include/
-	@cp user/lib/libc.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@mkdir -p $(CCROOT)/include/sys
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
@@ -330,6 +356,7 @@ cctest: $(BUILD)/cc-host
 	    n=$$(basename $$t .c); \
 	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && ./$(BUILD)/cct_$$n || exit 1; \
 	done; \
+	rm -f $(BUILD)/cct_cc1 $(BUILD)/cct_cc2 $(BUILD)/cct_cc3; \
 	$(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
 	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
@@ -343,7 +370,33 @@ largetest: | $(BUILD)
 	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/large_fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/large-host-io.o -o $(BUILD)/large-fs-test
 	python3 tests/run_large_fs.py $(BUILD)/large-fs-test
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest
+# ext без сети: разбор инструкций, каталоги, отказ на неизвестной команде.
+exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
+	@./$(BUILD)/ext-linux --selftest
+
+# gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
+gztest: $(BUILD)/cc-host
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
+	@sh tests/gzip.sh $(BUILD)/gzip-linux
+
+cptest: $(BUILD)/cc-host
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
+	@sh tests/cp.sh $(BUILD)/cp-linux
+
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest
 .SECONDARY:
 
 

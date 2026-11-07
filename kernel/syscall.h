@@ -71,6 +71,9 @@ enum {
     SYS_PARTCTL,
     SYS_ACCOUNT,
     SYS_CLIPBOARD,
+    SYS_LSEEK,
+    SYS_FSTAT,
+    SYS_RENAME,
     SYS_COUNT
 };
 
@@ -87,6 +90,8 @@ enum {
 #define ENOMEM       12
 #define EFAULT       14
 #define EEXIST       17
+#define ESPIPE       29
+#define EROFS        30
 #define ENODEV       19
 #define ENOTDIR      20
 #define EISDIR       21

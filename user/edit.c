@@ -101,14 +101,14 @@ static void load(void) {
 
 static void save(void) {
     int fd = open(filename, O_WRITE);
-    if (fd < 0) { snprintf(msg, sizeof(msg), "Cannot save: %s", strerror(-fd)); return; }
+    if (fd < 0) { snprintf(msg, sizeof(msg), "Cannot save: %s", strerror(errno)); return; }
     int total = 0;
     for (int i = 0; i < nl; i++) {
         int r = write(fd, L[i].s, L[i].len);
         int r2 = write(fd, "\n", 1);
         if (r < 0 || r2 < 0) {
             close(fd);
-            snprintf(msg, sizeof(msg), "Save FAILED: %s", strerror(-(r < 0 ? r : r2)));
+            snprintf(msg, sizeof(msg), "Save FAILED: %s", strerror(errno));
             return;
         }
         total += L[i].len + 1;

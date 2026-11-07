@@ -62,7 +62,8 @@ typedef struct Hideset Hideset;
 struct Token {
     TokenKind kind;
     Token *next;
-    int    val;                 /* TK_NUM: целое */
+    int    val;                 /* TK_NUM: младшие 32 бита (ещё и метки, #if) */
+    unsigned long long ival;    /* TK_NUM: полное целое, в том числе long long */
     double fval;                /* TK_NUM: дробное */
     Type  *ty;                  /* TK_NUM, TK_STR */
     char  *loc;                 /* где в исходнике */
@@ -94,7 +95,7 @@ void   define_macro(const char *name, const char *body);
 /* ------------------------------------------------------------ типы (type.c) */
 
 typedef enum {
-    TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_FLOAT, TY_DOUBLE,
+    TY_VOID, TY_BOOL, TY_CHAR, TY_SHORT, TY_INT, TY_LONGLONG, TY_FLOAT, TY_DOUBLE,
     TY_ENUM, TY_PTR, TY_FUNC, TY_ARRAY, TY_STRUCT, TY_UNION
 } TypeKind;
 
@@ -129,7 +130,7 @@ struct Member {
     int    offset;
 };
 
-extern Type *ty_void, *ty_bool, *ty_char, *ty_short, *ty_int;
+extern Type *ty_void, *ty_bool, *ty_char, *ty_short, *ty_int, *ty_llong, *ty_ullong;
 extern Type *ty_uchar, *ty_ushort, *ty_uint, *ty_float, *ty_double;
 
 bool  is_integer(Type *ty);
@@ -239,6 +240,7 @@ struct Node {
 
     Obj   *var;
     int    val;
+    unsigned long long ival;    /* ND_NUM */
     double fval;
 };
 

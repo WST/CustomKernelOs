@@ -4,6 +4,7 @@
  *   myfs disk.img mkdir <path>       создать каталог (вместе с родителями)
  *   myfs disk.img put <file> <path>  скопировать файл компьютера на диск
  *   myfs disk.img cat <path>         вывести (текстовый) файл с диска
+ *   myfs disk.img rm <path>          удалить файл; если его нет — не ошибка
  *
  * Используется ТОТ ЖЕ kernel/fs.c, что и в ядре: вместо драйвера ATA ему
  * подсовываются функции, читающие и пишущие сектора файла-образа. */
@@ -91,6 +92,12 @@ static int cmd_put(const char *src, const char *dst) {
     return FS_OK;
 }
 
+static int cmd_rm(const char *path) {
+    int r = fs_remove(FS_ROOT, path);
+    if (r == FS_ENOENT) return FS_OK;
+    return r;
+}
+
 static int cmd_cat(const char *path) {
     u32 ino, off = 0;
     int r = fs_resolve(FS_ROOT, path, &ino);
@@ -107,7 +114,7 @@ static int cmd_cat(const char *path) {
 
 int main(int argc, char **argv) {
     if (argc < 3) {
-        err("usage: myfs <disk.img> ls [path] | mkdir <path> | put <file> <path> | cat <path>\n");
+        err("usage: myfs <disk.img> ls [path] | mkdir <path> | put <file> <path> | cat <path> | rm <path>\n");
         return 2;
     }
     if (host_open_image(argv[1])) { err("myfs: cannot open %s\n", argv[1]); return 1; }
@@ -121,6 +128,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "mkdir") && argc > 3)   r = mkdir_p(argv[3]);
     else if (!strcmp(cmd, "put") && argc > 4)     r = cmd_put(argv[3], argv[4]);
     else if (!strcmp(cmd, "cat") && argc > 3)     r = cmd_cat(argv[3]);
+    else if (!strcmp(cmd, "rm") && argc > 3)      r = cmd_rm(argv[3]);
     else { err("myfs: bad command\n"); r = FS_EINVAL; }
 
     host_close_image();
