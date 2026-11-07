@@ -255,7 +255,10 @@ $(DISK):
 
 # Установить программы в /bin (остальные файлы на диске не трогаются).
 # Сторонние утилиты ставятся в /ext/bin командой ext, по файлам /ext/instructions.
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs | $(DISK)
+$(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
+
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -277,6 +280,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs | $(DISK)
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -436,7 +440,14 @@ cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
 	@sh tests/cp.sh $(BUILD)/cp-linux
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest
+# Загрузчик и программа с .so: внутри QEMU, диск — копия.
+ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUILD)/myfs
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libadd.so tests/ldso/add.c
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libb.so tests/ldso/b.c $(BUILD)/libadd.so
+	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
+	python3 tests/ldso_smoke.py
+
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest ldsotest
 .SECONDARY:
 
 

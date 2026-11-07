@@ -1434,6 +1434,13 @@ static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
         int si = -1;
         SoSym *so = so_find(sos, nso, g->name, &si);
         if (!so) {
+            /* Функция без библиотеки остаётся неопределённой: её найдёт ld.so
+             * (например dlopen) или библиотека, подгруженная позже. */
+            if (!opt_shared && g->saw_call) {
+                g->dyn = DYN_PLT;
+                g->dyn_size = 0;
+                continue;
+            }
             Section *site = ref_site(files, n_files, g);
             if (site) error("undefined reference to '%s' in %s", g->name, where(site));
             error("undefined reference to '%s'", g->name);
@@ -1617,15 +1624,29 @@ static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
     int phnum = opt_shared ? 3 : 4;
     unsigned rx_org = align_up(52u + 32u * (unsigned)phnum, 16);
     unsigned base = opt_shared ? 0 : TEXT_BASE;
+    /* Программу с PT_INTERP ядро запускает со стеком auxv, поэтому заглушка
+     * читает argc/argv как Linux. У ld.so (-shared и есть _start) заглушка
+     * передаёт указатель на этот стек и не зависит от адреса загрузки. */
     const unsigned char *stub = NULL;
     int stub_len = 0;
     unsigned entry_off = 0;
     unsigned pos = rx_org;
-    if (!opt_shared) {
-        static const unsigned char stub_myos[] = { 0xFF, 0x74, 0x24, 0x08, 0xFF, 0x74, 0x24, 0x08 };
-        static const unsigned char stub_linux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x50 };
-        stub = opt_linux ? stub_linux : stub_myos;
-        stub_len = opt_linux ? (int)sizeof(stub_linux) : (int)sizeof(stub_myos);
+    GSym *entry_fn = NULL;
+    if (opt_shared) {
+        GSym *st = gsym_get("_start", false);
+        if (st && st->state != DEF_NONE) {
+            static const unsigned char stub_pic[] = { 0x89, 0xE0, 0x50 }; /* mov eax, esp; push eax */
+            stub = stub_pic;
+            stub_len = 3;
+            entry_fn = st;
+        }
+    } else {
+        static const unsigned char stub_aux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x50 };
+        stub = stub_aux;
+        stub_len = (int)sizeof(stub_aux);
+        entry_fn = start;
+    }
+    if (stub) {
         entry_off = pos;
         pos = align_up(pos + (unsigned)stub_len + 7, 16);
     }
@@ -1781,17 +1802,17 @@ static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
                 error("internal: section '%s' does not fit", s->name);
             if (s->size && s->data) memcpy(image + fo, s->data, (unsigned)s->size);
         }
-    if (!opt_shared) {
+    if (stub) {
         unsigned char *ip = image + entry_off;
         memcpy(ip, stub, (unsigned)stub_len);
         ip[stub_len] = 0xE8;
         unsigned target;
-        if (start->dyn == DYN_PLT) target = plt_vaddr(plt, start);
+        if (!opt_shared && entry_fn && entry_fn->dyn == DYN_PLT) target = plt_vaddr(plt, entry_fn);
         else {
             Section *ss = NULL;
             unsigned sv = 0;
-            if (!start || !sym_target(start->file, start->idx, &ss, &sv))
-                error("undefined reference to '__libc_start'");
+            if (!entry_fn || !sym_target(entry_fn->file, entry_fn->idx, &ss, &sv))
+                error("undefined reference to '%s'", entry_fn ? entry_fn->name : "entry");
             target = (ss ? ss->addr : 0) + sv;
         }
         wr32(ip + stub_len + 1, target - (base + entry_off + (unsigned)stub_len + 5));
@@ -1830,7 +1851,7 @@ static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
     buf_u16(&h, opt_shared ? 3 : 2);
     buf_u16(&h, 3);
     buf_u32(&h, 1);
-    buf_u32(&h, opt_shared ? 0 : base + entry_off);
+    buf_u32(&h, stub ? base + entry_off : 0);
     buf_u32(&h, 52);
     buf_u32(&h, (unsigned)shdr_off);
     buf_u32(&h, 0);
