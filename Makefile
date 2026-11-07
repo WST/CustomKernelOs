@@ -189,6 +189,7 @@ $(DISK):
 install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
 	@echo "==> инструкции сторонних программ в /ext/instructions"
 	@$(BUILD)/myfs $(DISK) mkdir /ext/bin >/dev/null
 	@$(BUILD)/myfs $(DISK) mkdir /ext/instructions >/dev/null
@@ -344,7 +345,16 @@ exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest
+# gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
+gztest: $(BUILD)/cc-host
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
+	@sh tests/gzip.sh $(BUILD)/gzip-linux
+
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest
 .SECONDARY:
 
 
