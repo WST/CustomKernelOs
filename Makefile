@@ -40,7 +40,9 @@ LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
 
 BUILD   := build
 DISK    := disk.img
-DISK_MB := 4
+# Новый disk.img, если файла ещё нет. Готовый образ сам не растёт:
+# build/myfs disk.img grow 64  (прежний остаётся как disk.img.bak)
+DISK_MB := 64
 C_SRC   := $(wildcard kernel/*.c)
 OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
 
