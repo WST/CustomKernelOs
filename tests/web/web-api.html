@@ -1,0 +1,27 @@
+<p id=result>pending</p><script>
+function check(value,label){if(!value)throw new Error(label);}
+async function test(){
+ const c=new AbortController();let calls=0;const reason={test:1};
+ c.signal.addEventListener('abort',()=>calls++,{once:true});
+ c.abort(reason);c.abort('second');check(c.signal.reason===reason && calls===1,'abort once');
+ try{c.signal.throwIfAborted();throw new Error('not thrown');}catch(e){check(e===reason,'reason identity');}
+ try{await fetch('/should-not-fetch',{signal:c.signal});throw new Error('not rejected');}catch(e){check(e===reason,'fetch preabort');}
+ const later=new AbortController();const pending=fetch('/also-not-fetched',{signal:later.signal});later.abort();
+ try{await pending;throw new Error('not rejected');}catch(e){check(e.name==='AbortError','fetch abort');}
+ const combined=AbortSignal.any([new AbortController().signal,c.signal]);check(combined.aborted && combined.reason===reason,'any');
+ const timed=AbortSignal.timeout(5);await new Promise(resolve=>setTimeout(resolve,10));check(timed.aborted && timed.reason.name==='TimeoutError','timeout');
+ const response=new Response(new Blob(['Привет']),{headers:{'content-type':'text/plain'}});const copy=response.clone();
+ const blob=await response.blob();check(blob instanceof Blob && await blob.text()==='Привет','response blob');
+ check(await copy.text()==='Привет','response clone');
+ try{await response.text();throw new Error('double read');}catch(e){check(e.name==='TypeError','bodyUsed');}
+ const json=await new Response('{"ok":true}').json();check(json.ok,'json');
+ const root=document.createElement('div');root.innerHTML='<p>A<b>B</b></p><section><i>C</i></section>';
+ const walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT,{acceptNode:n=>n.tagName==='SECTION'?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT});
+ check(walker.nextNode().tagName==='P' && walker.nextNode().tagName==='B' && walker.nextNode()===null,'tree walker filtering');
+ const iterator=document.createNodeIterator(root,NodeFilter.SHOW_TEXT);let text='';let node;while((node=iterator.nextNode()))text+=node.textContent;check(text==='ABC','node iterator');
+ const a=document.getElementById('result').animate([{opacity:0},{opacity:1}],{duration:5});
+ check(a && a.effect && a.ready && a.finished,'animation contract');await a.finished;check(a.playState==='finished','animation finish');
+ document.getElementById('result').textContent='web-api-ok';console.log('web-api-ok');
+}
+test().catch(e=>console.log('WEB-FAIL',e.message||e));
+</script>

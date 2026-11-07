@@ -2,6 +2,57 @@
 // Выполняется перед скриптами каждой страницы. __myos — встроенные помощники из domjs.c.
 (function (w) {
   var my = w.__myos;
+  class Blob {
+    constructor(parts, options) {
+      var chunks = [], size = 0;
+      Array.from(parts || []).forEach(function (part) {
+        var bytes;
+        if (part instanceof Blob) bytes = part._bytes;
+        else if (part instanceof ArrayBuffer) bytes = new Uint8Array(part);
+        else if (part instanceof Uint8Array) bytes = part;
+        else if (ArrayBuffer.isView(part)) bytes = new Uint8Array(part.buffer).subarray(part.byteOffset,part.byteOffset+part.byteLength);
+        else {
+          bytes=[]; var str=String(part);
+          for(var k=0;k<str.length;k++) { var cp=str.charCodeAt(k);
+            if(cp>=128) k += cp<2048 ? 1 : cp<65536 ? 2 : 3;
+            if(cp>=55296 && cp<=56319 && k+1<str.length) {var low=str.charCodeAt(k+1);if(low>=56320 && low<=57343){cp=65536+((cp-55296)<<10)+low-56320;k++;}}
+            if(cp>=55296 && cp<=57343)cp=65533;
+            if(cp<128)bytes.push(cp);else if(cp<2048)bytes.push(192|(cp>>6),128|(cp&63));else if(cp<65536)bytes.push(224|(cp>>12),128|((cp>>6)&63),128|(cp&63));else bytes.push(240|(cp>>18),128|((cp>>12)&63),128|((cp>>6)&63),128|(cp&63));
+          }
+        }
+        bytes = new Uint8Array(bytes); chunks.push(bytes); size += bytes.length;
+      });
+      this._bytes = new Uint8Array(size);
+      var offset = 0, self = this;
+      chunks.forEach(function (b) { self._bytes.set(b, offset); offset += b.length; });
+      var type = String(options && options.type || '');
+      this._type = /[^\x20-\x7e]/.test(type) ? '' : type.toLowerCase();
+    }
+    get size() { return this._bytes.length; }
+    get type() { return this._type; }
+    text() {
+      var text = '', b = this._bytes;
+      for (var i = 0; i < b.length;) {
+        var c = b[i++], count = c < 128 ? 0 : c >= 194 && c < 224 ? 1 : c < 240 && c >= 224 ? 2 : c >= 240 && c <= 244 ? 3 : -1;
+        if(count < 0) { text += '\ufffd'; continue; }
+        var cp = count ? c & (127 >> count) : c, valid = true;
+        for(var j=0;j<count;j++) { if(i>=b.length || (b[i]&192)!==128) { valid=false; break; } cp=(cp<<6)|(b[i++]&63); }
+        if(!valid || (count===1 && cp<128) || (count===2 && cp<2048) || (count===3 && cp<65536) || cp>1114111 || (cp>=55296 && cp<=57343)) text+='\ufffd';
+        else if(cp<65536) text+=String.fromCharCode(cp);
+        else {cp-=65536;text+=String.fromCharCode(55296+(cp>>10),56320+(cp&1023));}
+      }
+      return Promise.resolve(text);
+    }
+    arrayBuffer() { var buffer=new ArrayBuffer(this.size); buffer._b=Array.from(this._bytes); return Promise.resolve(buffer); }
+    bytes() { return Promise.resolve(new Uint8Array(this._bytes)); }
+    slice(start, end, type) {
+      var size = this.size;
+      function bound(n, fallback) { n = n === undefined ? fallback : Math.trunc(Number(n)) || 0; return n < 0 ? Math.max(size + n, 0) : Math.min(n, size); }
+      start = bound(start, 0); end = Math.max(start, bound(end, size));
+      return new Blob([this._bytes.subarray(start, end)], {type:type});
+    }
+  }
+  w.Blob = Blob;
   function def(o, name, v) { Object.defineProperty(o, name, { value: v, writable: true, configurable: true, enumerable: false }); }
 
   // ---------------------------------------------------------------- события
@@ -66,6 +117,58 @@
   w.ProgressEvent = ProgressEvent; w.MessageEvent = MessageEvent; w.TouchEvent = UIEvent; w.WheelEvent = MouseEvent;
   w.AnimationEvent = Event; w.TransitionEvent = Event; w.SubmitEvent = Event; w.PageTransitionEvent = Event;
   document.createEvent = function (k) { var e = new Event(''); e.initCustomEvent = CustomEvent.prototype.initCustomEvent; return e; };
+  class DOMException extends Error { constructor(message, name) { super(message || ''); this.name=name || 'Error'; } }
+  class EventTarget {
+    constructor() { this._listeners=[]; }
+    addEventListener(type, callback, options) { if(callback && !this._listeners.some(p=>p.type===type && p.callback===callback)) this._listeners.push({type:String(type),callback:callback,once:!!(options && options.once)}); }
+    removeEventListener(type, callback) { this._listeners=this._listeners.filter(p=>p.type!==type || p.callback!==callback); }
+    dispatchEvent(event) {
+      event.target=event.currentTarget=this;
+      this._listeners.slice().forEach(p=>{if(p.type!==event.type)return;if(p.once)this.removeEventListener(p.type,p.callback);if(typeof p.callback==='function')p.callback.call(this,event);else p.callback.handleEvent(event);});
+      const handler=this['on'+event.type];if(typeof handler==='function')handler.call(this,event);
+      return !event.defaultPrevented;
+    }
+  }
+  class AbortSignal extends EventTarget {
+    constructor(){super();this.aborted=false;this.reason=undefined;this.onabort=null;}
+    throwIfAborted(){if(this.aborted)throw this.reason;}
+    _abort(reason){if(this.aborted)return;this.aborted=true;this.reason=reason===undefined?new DOMException('The operation was aborted','AbortError'):reason;this.dispatchEvent(new Event('abort'));}
+    static abort(reason){const s=new AbortSignal();s._abort(reason);return s;}
+    static timeout(ms){const s=new AbortSignal();setTimeout(()=>s._abort(new DOMException('The operation timed out','TimeoutError')),ms);return s;}
+    static any(signals){const out=new AbortSignal();for(const s of signals){if(s.aborted){out._abort(s.reason);break;}s.addEventListener('abort',()=>out._abort(s.reason),{once:true});}return out;}
+  }
+  class AbortController {constructor(){this.signal=new AbortSignal();}abort(reason){this.signal._abort(reason);}}
+  w.DOMException=DOMException;w.EventTarget=EventTarget;w.AbortSignal=AbortSignal;w.AbortController=AbortController;
+  w.NodeFilter={FILTER_ACCEPT:1,FILTER_REJECT:2,FILTER_SKIP:3,SHOW_ALL:4294967295,SHOW_ELEMENT:1,SHOW_TEXT:4,SHOW_COMMENT:128,SHOW_DOCUMENT:256,SHOW_DOCUMENT_FRAGMENT:1024};
+  document.createTreeWalker=function(root,whatToShow,filter){
+    const walker={root:root,currentNode:root,whatToShow:whatToShow===undefined?4294967295:whatToShow,filter:filter||null};
+    function accept(n){if(!(walker.whatToShow & (1<<(n.nodeType-1))))return 3;return !filter?1:typeof filter==='function'?filter(n):filter.acceptNode(n);}
+    function nodes(){const out=[root],stack=[];for(let n=root.lastChild;n;n=n.previousSibling)stack.push(n);while(stack.length){const n=stack.pop(),result=accept(n);if(result===1)out.push(n);if(result!==2)for(let c=n.lastChild;c;c=c.previousSibling)stack.push(c);}return out;}
+    walker.nextNode=function(){const all=nodes(),i=all.indexOf(this.currentNode);if(i>=0 && i+1<all.length)return this.currentNode=all[i+1];return null;};
+    walker.previousNode=function(){const all=nodes(),i=all.indexOf(this.currentNode);if(i>0)return this.currentNode=all[i-1];return null;};
+    walker.parentNode=function(){let n=this.currentNode;while(n && n!==root){n=n.parentNode;if(n && (n===root||accept(n)===1))return this.currentNode=n;}return null;};
+    walker.firstChild=function(){const parent=this.currentNode,all=nodes();for(const n of all){if(n!==parent && n.parentNode===parent)return this.currentNode=n;}return null;};
+    walker.lastChild=function(){const parent=this.currentNode,all=nodes();for(let i=all.length-1;i>=0;i--)if(all[i].parentNode===parent)return this.currentNode=all[i];return null;};
+    walker.nextSibling=function(){if(this.currentNode===root)return null;for(let n=this.currentNode.nextSibling;n;n=n.nextSibling)if(accept(n)===1)return this.currentNode=n;return null;};
+    walker.previousSibling=function(){if(this.currentNode===root)return null;for(let n=this.currentNode.previousSibling;n;n=n.previousSibling)if(accept(n)===1)return this.currentNode=n;return null;};
+    return walker;
+  };
+  document.createNodeIterator=function(root,show,filter){const walker=document.createTreeWalker(root,show,filter);let started=false;return {root:root,whatToShow:walker.whatToShow,filter:filter||null,nextNode:function(){if(!started){started=true;if((walker.whatToShow&(1<<(root.nodeType-1))) && (!filter || (typeof filter==='function'?filter(root):filter.acceptNode(root))===1))return root;}return walker.nextNode();},previousNode:function(){return walker.previousNode();},detach:function(){}};};
+  if(w.Element) w.Element.prototype.animate=function(frames,options){
+    options=typeof options==='number'?{duration:options}:options||{};
+    const animation=new EventTarget(), target=this;
+    animation.startTime=Date.now();animation.currentTime=0;animation.playState='running';animation.playbackRate=1;
+    animation.effect={target:target,getTiming:()=>options,getComputedTiming:()=>Object.assign({progress:animation.playState==='finished'?1:0,endTime:Number(options.duration)||0},options)};
+    animation.ready=Promise.resolve(animation);
+    let resolveFinished;
+    animation.finished=new Promise(resolve=>{resolveFinished=resolve;});
+    const finish=()=>{if(animation.playState==='finished')return;animation.playState='finished';animation.currentTime=Number(options.duration)||0;clearTimeout(animation._timer);resolveFinished(animation);animation.dispatchEvent(new Event('finish'));};
+    animation.finish=finish;animation.cancel=()=>{clearTimeout(animation._timer);animation.playState='idle';animation.dispatchEvent(new Event('cancel'));};
+    animation.pause=()=>{clearTimeout(animation._timer);animation.playState='paused';};
+    animation.play=()=>{animation.playState='running';animation._timer=setTimeout(finish,Math.max(0,Number(options.duration)||0));};
+    animation.reverse=()=>{animation.playbackRate=-animation.playbackRate;animation.play();};animation.commitStyles=()=>{};
+    animation.play();return animation;
+  };
 
   // ---------------------------------------------------------------- адреса
   function encodeQ(s) { return encodeURIComponent(s).replace(/%20/g, '+'); }
@@ -190,7 +293,8 @@
   class Response {
     constructor(body, init) {
       init = init || {};
-      this._body = body === undefined || body === null ? '' : String(body);
+      this._body = body === undefined || body === null ? '' : body;
+      this._blob = body instanceof Blob ? body : new Blob([this._body]);
       this.status = init.status === undefined ? 200 : init.status;
       this.statusText = init.statusText || '';
       this.ok = this.status >= 200 && this.status < 300;
@@ -200,24 +304,26 @@
       this.type = 'basic';
       this.bodyUsed = false;
     }
-    text() { this.bodyUsed = true; return Promise.resolve(this._body); }
-    json() { this.bodyUsed = true; var b = this._body; return new Promise(function (ok) { ok(JSON.parse(b)); }); }
-    blob() { return this.text(); }
-    arrayBuffer() { return this.text(); }
-    clone() { return new Response(this._body, this); }
+    _consume(read) { if(this.bodyUsed)return Promise.reject(new TypeError('Response body has already been consumed'));this.bodyUsed=true;return read(); }
+    text() { return this._consume(()=>this._blob.text()); }
+    json() { return this.text().then(text=>JSON.parse(text)); }
+    blob() { return this._consume(()=>Promise.resolve(new Blob([this._blob],{type:this.headers.get('content-type')||''}))); }
+    arrayBuffer() { return this._consume(()=>this._blob.arrayBuffer()); }
+    clone() { if(this.bodyUsed)throw new TypeError('Response body has already been consumed');return new Response(this._body, this); }
     static json(d, i) { return new Response(JSON.stringify(d), i); }
     static error() { return new Response('', { status: 0 }); }
   }
   class Request {
     constructor(u, init) {
       init = init || {};
-      if (u instanceof Request) { init = Object.assign({ method: u.method, body: u._body, headers: u.headers }, init); u = u.url; }
+      if (u instanceof Request) { init = Object.assign({ method: u.method, body: u._body, headers: u.headers, signal:u.signal }, init); u = u.url; }
       this.url = my.resolve(String(u));
       this.method = (init.method || 'GET').toUpperCase();
       this.headers = new Headers(init.headers);
       this._body = init.body;
       this.credentials = init.credentials || 'same-origin';
       this.mode = init.mode || 'cors';
+      this.signal = init.signal || new AbortController().signal;
     }
     clone() { return new Request(this); }
   }
@@ -230,8 +336,15 @@
   w.fetch = function (u, init) {
     var req = new Request(u, init);
     return new Promise(function (ok, fail) {
-      setTimeout(function () {
+      if(req.signal.aborted){fail(req.signal.reason);return;}
+      var settled=false;
+      var abort=function(){if(settled)return;settled=true;clearTimeout(timer);fail(req.signal.reason);};
+      req.signal.addEventListener('abort',abort,{once:true});
+      var timer=setTimeout(function () {
+        if(settled)return;
         var r = my.fetch(req.url, req.method, bodyText(req._body));
+        req.signal.removeEventListener('abort',abort);
+        if(settled)return;settled=true;
         if (!r) { fail(new TypeError('Failed to fetch')); return; }
         var h = new Headers(); if (r.type) h.set('content-type', r.type);
         var resp = new Response(r.text, { status: r.status, headers: h, url: req.url });
@@ -329,7 +442,7 @@
   w.requestIdleCallback = function (f) { return setTimeout(function () { f({ didTimeout: false, timeRemaining: function () { return 50; } }); }, 1); };
   w.cancelIdleCallback = function (id) { clearTimeout(id); };
   w.matchMedia = function (q) {
-    return { matches: my.media(String(q)), media: String(q), onchange: null,
+    return { get matches() { return my.media(String(q)); }, media: String(q), onchange: null,
       addListener: function () {}, removeListener: function () {}, addEventListener: function () {}, removeEventListener: function () {} };
   };
   w.getComputedStyle = function (el) {
@@ -377,4 +490,86 @@
   navigator.sendBeacon = function () { return true; };
   navigator.clipboard = { writeText: function () { return Promise.resolve(); }, readText: function () { return Promise.resolve(''); } };
   if (!document.fonts) document.fonts = { ready: Promise.resolve(), load: function () { return Promise.resolve([]); }, check: function () { return true; }, addEventListener: function () {} };
+  // Module records are retained by this realm and discarded on navigation.
+  var modules = Object.create(null), moduleRecords = [], moduleBytes = 0;
+  function moduleURL(base, spec) {
+    spec = String(spec);
+    if (!/^(\.{1,2}\/|\/|https?:|file:)/.test(spec)) throw new TypeError('Bare module specifier: ' + spec);
+    var url = my.resolve(spec, base);
+    if (!/^(https?:|file:)/.test(url)) throw new TypeError('Unsupported module URL: ' + url);
+    return url;
+  }
+  function moduleGetter(object, name, get) {
+    if (Object.prototype.hasOwnProperty.call(object, name)) throw new SyntaxError('Duplicate module binding: ' + name);
+    Object.defineProperty(object, name, { enumerable: true, get: get,
+      set: function () { throw new TypeError('Module binding is read-only: ' + name); } });
+  }
+  function prepareModule(url, source) {
+    if (modules[url]) { if (modules[url].error) throw modules[url].error; return modules[url]; }
+    if (moduleRecords.length >= 128) throw new RangeError('Too many modules');
+    var m = { url: url, ns: Object.create(null), imports: Object.create(null), deps: [], state: 0, error: null };
+    modules[url] = m; moduleRecords.push(m);
+    try {
+      if (source === undefined) source = my.moduleSource(url);
+      moduleBytes += source.length;
+      if (moduleBytes > 6 * 1024 * 1024) throw new RangeError('Module source limit exceeded');
+      var desc = my.moduleCompile(source), prefix = '';
+      desc.exports.forEach(function (p) {
+        prefix += '__module_export(' + JSON.stringify(p[0]) + ',function(){return ' + p[1] + ';});\n';
+      });
+      var factory = new Function('return function*(__module_export,__module_import,__module_meta,__module_bindings){with(__module_bindings){' + prefix +
+        '\nyield;\n' + desc.code + '\n}}')();
+      m.iterator = factory(function (name, get) { moduleGetter(m.ns, name, get); },
+        function (spec) { return Promise.resolve().then(function () { return runModule(moduleURL(url, spec)); }); },
+        { url: url, resolve: function (spec) { return moduleURL(url, spec); } }, m.imports);
+      m.iterator.next();
+      desc.deps.forEach(function (d) {
+        var dep = prepareModule(moduleURL(url, d.url));
+        m.deps.push(dep);
+        d.names.forEach(function (p) {
+          var target = d.reexport ? m.ns : m.imports;
+          if (p[0] === '*' && p[1] === '*' && d.reexport) {
+            Object.keys(dep.ns).forEach(function (name) {
+              if (name !== 'default' && !Object.prototype.hasOwnProperty.call(target, name))
+                moduleGetter(target, name, function () { return dep.ns[name]; });
+            });
+          } else {
+            moduleGetter(target, p[1], function () {
+              if (p[0] === '*') return dep.ns;
+              if (!Object.prototype.hasOwnProperty.call(dep.ns, p[0])) throw new SyntaxError('Missing module export: ' + p[0]);
+              return dep.ns[p[0]];
+            });
+            m.deps.push({ check: function () {
+              if (p[0] !== '*' && !Object.prototype.hasOwnProperty.call(dep.ns, p[0])) throw new SyntaxError('Missing module export: ' + p[0]);
+            } });
+          }
+        });
+      });
+      return m;
+    } catch (e) { m.error = e; throw e; }
+  }
+  function evaluateModule(m) {
+    if (m.error) throw m.error;
+    if (m.state) return;
+    m.state = 1;
+    try {
+      m.deps.forEach(function (dep) { if (!dep.check) evaluateModule(dep); });
+      m.iterator.next(); m.state = 2;
+    } catch (e) { m.error = e; throw e; }
+  }
+  function runModule(url, source) {
+    var m = prepareModule(url, source);
+    // Link errors must occur before any module body has side effects.
+    var visited = [];
+    function validate(record) {
+      if (visited.indexOf(record) >= 0) return;
+      visited.push(record);
+      if (record.error) throw record.error;
+      record.deps.forEach(function (d) { if (d.check) d.check(); else validate(d); });
+    }
+    validate(m);
+    evaluateModule(m); return m.ns;
+  }
+  my.runModule = runModule;
+  w.__import = function (spec) { return Promise.resolve().then(function () { return runModule(moduleURL(location.href, spec)); }); };
 })(this);

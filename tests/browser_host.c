@@ -11,6 +11,7 @@
  *
  * Рабочий стол и сеть заменены заглушками: окно — просто буфер в памяти, http(s)
  * отвечает «нет такого хоста», file:/путь читает файлы Linux. */
+#define BROWSER_HOST
 #define main browser_main
 #include "../user/browser.c"
 #undef main
@@ -23,6 +24,31 @@ extern int fseek(void *, long, int);
 extern long ftell(void *);
 extern int clock_gettime(int, void *);
 extern int usleep(unsigned);
+extern void *popen(const char *, const char *);
+extern int pclose(void *);
+static int host_net;
+int browser_host_fetch(const char *url, char *location, int loc_max, bool *is_html) {
+    if (!host_net || (strncmp(url,"https://",8) && strncmp(url,"http://",7))) return -999;
+    (void)loc_max;
+    char command[8192]; int used=snprintf(command,sizeof(command),"curl -sL --max-time 15 --compressed -w '\\n%%{http_code}\\n%%{content_type}' '");
+    for(const char *p=url;*p && used<(int)sizeof(command)-12;p++) {
+        if(*p=='\'') { memcpy(command+used,"'\\''",4);used+=4; } else command[used++]=*p;
+    }
+    command[used++]='\'';command[used]=0;
+    void *pipe=popen(command,"r");if(!pipe)return -1;
+    int total=fread(body,1,MAX_PAGE,pipe);
+    if(total==MAX_PAGE){char discard[8192];while(fread(discard,1,sizeof(discard),pipe));}
+    int result=pclose(pipe);
+    if(result || total>=MAX_PAGE)return -1;
+    body[total]=0;location[0]=0;
+    char *type=body+total;while(type>body && type[-1]!='\n')type--;
+    snprintf(resp_ctype,sizeof(resp_ctype),"%s",type);
+    char *code=type-1;while(code>body && code[-1]!='\n')code--;
+    int status_code=atoi(code);
+    body_len=code>body?code-body-1:0;body[body_len]=0;
+    *is_html=strstr(resp_ctype,"html")!=NULL;
+    return status_code;
+}
 
 /* -------- «система» */
 unsigned ticks(void) { long ts[2]; clock_gettime(1, ts); return ts[0] * 1000 + ts[1] / 1000000; }
@@ -118,12 +144,15 @@ static void pump(void) {                     /* обработать накоп�
     }
 }
 
+#include "browser_compat.h"
+
 int main(int argc, char **argv) {
+    if(argc>2 && !strcmp(argv[1],"--net")){host_net=1;argc--;argv++;}
     if (argc < 2) { printf("usage: browser-host page.html commands...\n"); return 1; }
     font_set_dir("fonts");
     char target[600];
     if (argv[1][0] == '/') snprintf(target, sizeof(target), "file:%s", argv[1]);
-    else if (!strncmp(argv[1], "file:", 5) || !strncmp(argv[1], "about:", 6)) snprintf(target, sizeof(target), "%s", argv[1]);
+    else if (!strncmp(argv[1], "http", 4) || !strncmp(argv[1], "file:", 5) || !strncmp(argv[1], "about:", 6)) snprintf(target, sizeof(target), "%s", argv[1]);
     else {
         char cwd[400];
         getcwd(cwd, sizeof(cwd));
@@ -140,13 +169,20 @@ int main(int argc, char **argv) {
     arena = malloc(arena_cap);
     dom_init(&dom_host);
     js_poll_hook = js_busy_poll;
+    if (!strcmp(argv[1], "--compat-test")) return compat_tests();
     unsigned t0 = ticks();
     navigate(target, true);
     printf("load: %u ms, items %d, links %d, doc_h %d; %s\n", ticks() - t0, n_items, n_links, doc_h, status);
     for (int i = 2; i < argc; i++) {
         const char *c = argv[i];
+        if (!strcmp(c,"console")) { printf("%.*s\n",console_len,console_buf);continue; }
+        if (!strcmp(c, "assert-no-errors")) {
+            if (dom_last_error()[0]) { printf("FAIL: %s\n", dom_last_error()); return 1; }
+            continue;
+        }
         if (!strcmp(c, "w") && i + 1 < argc) resize(atoi(argv[++i]), H);
         else if (!strcmp(c, "h") && i + 1 < argc) resize(W, atoi(argv[++i]));
+        else if (!strcmp(c, "at") && i + 1 < argc) { scroll = 0; scroll_by(atoi(argv[++i])); redraw(); }
         else if (!strcmp(c, "scroll")) {
             int pages = 0;
             for (scroll = 0; pages < 400; pages++) {

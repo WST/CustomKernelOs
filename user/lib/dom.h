@@ -41,6 +41,9 @@ struct dom_style {
     unsigned char flex_row;                     /* flex-контейнер в строку: дети встают в ряд */
     unsigned char width_pct, max_width_pct;
     unsigned char bg_image;                     /* фон — картинка (её не показываем) */
+    unsigned char border_box;
+    unsigned char flex_wrap;
+    short column_gap, row_gap;
     int   color, bg;
     short font_px;
     short margin[4], padding[4], border[4];
@@ -49,6 +52,10 @@ struct dom_style {
 };
 /* стиль узла с номером id (из data-n) после dom_serialize; NULL — нет */
 const struct dom_style *dom_style(int id);
+extern int dom_view_width, dom_view_height;
+void dom_set_viewport(int width, int height);
+int dom_layout_children(int id);
+int dom_module_scripts(void);
 
 void  dom_init(struct dom_host *h);
 /* разобрать страницу и выполнить её скрипты */

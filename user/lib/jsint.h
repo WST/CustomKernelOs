@@ -61,6 +61,7 @@ struct node {
 };
 
 node *js_parse(const char *src, int len, const char *file, int as_function, char *err, int errmax);
+int js_module_compile(const char *src, int len, jsval *out);
 jsobj *js_make_closure(node *fn, jsenv *env);
 int js_run_script(node *script, jsval *result);
 int js_call_depth_check(void);

@@ -1,0 +1,9 @@
+<script type="module" src="./module-main.js"></script>
+<script type="module" src="./module-main.js"></script>
+<div id="result">pending</div>
+<script type="module">
+import { count, increment } from './module-counter.js';
+increment();
+console.log('inline-live', count);
+import('./module-lazy.js').then(m => console.log('dynamic', m.default));
+</script>
