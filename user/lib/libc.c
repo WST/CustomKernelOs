@@ -18,9 +18,10 @@ int main(int argc, char **argv);
 
 int __libc_start(int argc, char **argv) __attribute__((noreturn));
 
-#ifndef __MYOS_CC__
+#if !defined(__MYOS_CC__) && !defined(__LIBC_SO__)
 /* Ядро «вызывает» _start(argc, argv): кладёт их на стек как аргументы функции.
- * (Программам, собранным cc внутри MyOS, такую же точку входа делает сам cc.) */
+ * (Программам, собранным cc внутри MyOS, такую же точку входа делает сам cc.
+ *  В libc.so точки входа нет: её даёт crt0 самой программы.) */
 __attribute__((noreturn, used, section(".text.start")))
 void _start(int argc, char **argv) {
     __libc_start(argc, argv);

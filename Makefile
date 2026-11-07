@@ -139,8 +139,37 @@ $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.
 $(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-$(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
+# sh и cc остаются статическими: оболочка и компилятор стартуют даже со сломанной libc.so.
+$(BUILD)/user/sh: $(BUILD)/user/sh.o $(ULIB) user/user.ld
 	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+# Динамические программы: libc.so/libgfx.so, интерпретатор /lib/ld.so.
+DYNLDFLAGS := -m elf_i386 -nostdlib -s --gc-sections -dynamic-linker /lib/ld.so \
+              --hash-style=sysv --as-needed -Ttext-segment=0x40000000
+
+$(BUILD)/user/crt0.o: user/lib/crt0.asm | $(BUILD)/user
+	$(NASM) -f elf32 $< -o $@
+
+$(BUILD)/user/libc.so: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ $<
+
+$(BUILD)/user/pic/%.o: user/lib/%.c user/lib/myos.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
+
+$(BUILD)/user/pic: | $(BUILD)/user
+	mkdir -p $@
+
+PIC_GFX := $(patsubst %,$(BUILD)/user/pic/%.o,gfx vec font win)
+$(BUILD)/user/pic/gfx.o: user/lib/gfx.h
+$(BUILD)/user/pic/vec.o: user/lib/gfx.h
+$(BUILD)/user/pic/font.o: user/lib/gfx.h
+$(BUILD)/user/pic/win.o: user/lib/win.h user/lib/gfx.h
+
+$(BUILD)/user/libgfx.so: $(PIC_GFX) $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libgfx.so -Wl,--hash-style=sysv -o $@ $(PIC_GFX) -L$(BUILD)/user -lc
+
+$(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
 
 # HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
 # Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
@@ -156,8 +185,8 @@ $(BUILD)/user/x509.o: user/lib/x509.c user/lib/x509.h user/lib/tls.h user/lib/my
 
 $(patsubst %,%.o,$(TLS_PROGS)) $(BUILD)/user/browser.o: user/lib/tls.h
 
-$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) $(TLS_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(ULIB) -o $@
+$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(TLS_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) -L$(BUILD)/user -lc -lgfx
 
 # JavaScript — движок user/lib/js*.c (программа js и браузер) и DOM user/lib/dom*.c (браузер).
 # Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
@@ -177,16 +206,16 @@ user/lib/dom_prelude.h: user/lib/dom_prelude.js
 
 $(BUILD)/user/js.o: user/lib/js.h
 
-$(BUILD)/user/js: $(BUILD)/user/js.o $(ULIB) $(JS_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(JS_OBJS) $(ULIB) -o $@
+$(BUILD)/user/js: $(BUILD)/user/js.o $(JS_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(JS_OBJS) -L$(BUILD)/user -lc -lgfx
 
 # картинки (PNG, GIF, JPEG, BMP) — user/lib/img.c, пока только браузеру
 $(BUILD)/user/l_img.o: user/lib/img.c user/lib/img.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/browser.o: user/lib/img.h
 
-$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) -L$(BUILD)/user -lc -lgfx
 
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
@@ -281,6 +310,8 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libc.so /lib/libc.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libgfx.so /lib/libgfx.so >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -441,13 +472,28 @@ cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@sh tests/cp.sh $(BUILD)/cp-linux
 
 # Загрузчик и программа с .so: внутри QEMU, диск — копия.
+dynsystest: $(BUILD)/ld.so $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/user/echo $(BUILD)/user/sh $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUILD)/myfs
+	gcc -m32 -shared -fPIC -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -mno-sse -mno-mmx -O2 \
+	    -Wl,-soname,libgccadd.so -Wl,--hash-style=sysv -o $(BUILD)/libgccadd.so tests/dyn/gccadd.c
+	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/cc-gccso tests/dyn/use_gcc.c $(BUILD)/libgccadd.so
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libadd.so tests/ldso/add.c
+	$(NASM) -f elf32 tests/dyn/start.asm -o $(BUILD)/dynstart.o
+	gcc -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx -O2 \
+	    -c tests/dyn/use_cc.c -o $(BUILD)/use_cc.o
+	ld -m elf_i386 -nostdlib -dynamic-linker /lib/ld.so --hash-style=sysv -Ttext-segment=0x40000000 \
+	    -o $(BUILD)/gcc-ccso $(BUILD)/dynstart.o $(BUILD)/use_cc.o $(BUILD)/libadd.so
+	gcc -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx -O2 \
+	    -Iuser/include -Iuser/lib -c tests/dyn/gfxuse.c -o $(BUILD)/gfxuse.o
+	ld $(DYNLDFLAGS) -o $(BUILD)/gfxuse $(BUILD)/user/crt0.o $(BUILD)/gfxuse.o -L$(BUILD)/user -lc -lgfx
+	python3 tests/dynsys_smoke.py
+
 ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUILD)/myfs
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libadd.so tests/ldso/add.c
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libb.so tests/ldso/b.c $(BUILD)/libadd.so
 	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
 	python3 tests/ldso_smoke.py
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest ldsotest
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest ldsotest dynsystest
 .SECONDARY:
 
 
