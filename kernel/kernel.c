@@ -4,6 +4,7 @@
 #include "timer.h"
 #include "keyboard.h"
 #include "shell.h"
+#include "services.h"
 #include "ata.h"
 #include "fs.h"
 #include "pmm.h"
@@ -114,5 +115,6 @@ void kmain(void) {
     vga_set_color(WHITE, BLACK);
     kprintf("\nWelcome to MyOS! Type 'help' for a list of commands.\n\n");
 
+    services_init();
     shell_run();
 }

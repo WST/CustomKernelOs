@@ -897,6 +897,10 @@ void *shm_map(int id) {
     return (r < 0 && r > -4096) ? NULL : (void *)r;  /* адреса общей памяти «отрицательные» как int */
 }
 int shm_unmap(void *addr)                       { return syscall3(SYS_SHM_UNMAP, (int)addr, 0, 0); }
+int unitctl(unsigned op, const char *name, struct unit_info *out, unsigned index) {
+    return syscall3(SYS_UNITCTL, op, op == UNIT_LIST ? (int)index : (int)name, (int)out);
+}
+
 int service_register(const char *name)          { return syscall3(SYS_SERVICE, 1, (int)name, 0); }
 int service_find(const char *name)              { return syscall3(SYS_SERVICE, 2, (int)name, 0); }
 int get_time(struct datetime *t)                { return syscall3(SYS_TIME, (int)t, 0, 0); }

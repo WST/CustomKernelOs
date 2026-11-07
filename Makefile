@@ -242,6 +242,11 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /etc >/dev/null 2>&1 || true
 	@$(BUILD)/myfs $(DISK) put certs/roots.der /etc/certs.der >/dev/null
 
+	@for d in /etc/services /etc/services/enabled; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null || exit 1; done
+	@for f in services/*.service; do \
+	  $(BUILD)/myfs $(DISK) cat /etc/services/$$(basename $$f) >/dev/null 2>&1 || \
+	  $(BUILD)/myfs $(DISK) put $$f /etc/services/$$(basename $$f) >/dev/null || exit 1; done
+
 # ------------------------------------------------------------------ запуск
 
 # index=0 — primary master (загрузка), index=1 — primary slave (MyFS)
@@ -400,3 +405,13 @@ cptest: $(BUILD)/cc-host
 .SECONDARY:
 
 
+
+$(BUILD)/user/servicecheck.o: tests/servicecheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/servicecheck: $(BUILD)/user/servicecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+.PHONY: servicetest
+servicetest:
+	python3 tests/services_smoke.py

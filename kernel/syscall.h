@@ -74,6 +74,7 @@ enum {
     SYS_LSEEK,
     SYS_FSTAT,
     SYS_RENAME,
+    SYS_UNITCTL,
     SYS_COUNT
 };
 
@@ -88,6 +89,7 @@ enum {
 #define ECHILD       10
 #define EAGAIN       11
 #define ENOMEM       12
+#define EBUSY        16
 #define EFAULT       14
 #define EEXIST       17
 #define ESPIPE       29

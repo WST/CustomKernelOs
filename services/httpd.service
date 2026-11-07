@@ -1,0 +1,7 @@
+[Unit]
+Description=MyOS HTTP server
+
+[Service]
+Type=simple
+ExecStart=/bin/httpd 80
+Restart=on-failure

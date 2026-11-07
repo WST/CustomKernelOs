@@ -29,6 +29,7 @@
 #include "display.h"
 #include "block.h"
 #include "account.h"
+#include "services.h"
 
 #define SBRK_LIMIT SHM_BASE         /* выше — общая память (ipc.c) и стек */
 #define PATH_MAX   128
@@ -818,6 +819,15 @@ void syscall_dispatch(struct regs *r) {
     case SYS_SHM_UNMAP:   ret = shm_unmap(a); break;
     case SYS_MSG_SEND:    ret = sys_msg_send(a, b); break;
     case SYS_MSG_RECV:    ret = sys_msg_recv(a, b); break;
+    case SYS_UNITCTL: {
+        char name[28] = {0};
+        if (a != UNIT_LIST && a != UNIT_RELOAD && !user_str(b, name, sizeof(name))) { ret = -EFAULT; break; }
+        if (c && !user_buf_ok(c, sizeof(struct unit_info), true)) { ret = -EFAULT; break; }
+        struct unit_info info = {0};
+        ret = services_ctl(a, name, &info, b);
+        if (!ret && c) memcpy((void *)c, &info, sizeof(info));
+        break;
+    }
     case SYS_SERVICE:     ret = sys_service(a, b); break;
     case SYS_TIME:        ret = sys_time(a); break;
     case SYS_GFX_MODE:    ret = sys_gfx_mode(a, b); break;

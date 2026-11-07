@@ -44,7 +44,7 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
@@ -314,6 +314,17 @@ int   service_find(const char *name);               /* -> pid службы ил�
 
 struct datetime { unsigned year, month, day, hour, min, sec; };
 int   get_time(struct datetime *t);                 /* часы компьютера */
+
+enum { UNIT_LIST, UNIT_STATUS, UNIT_START, UNIT_STOP, UNIT_RESTART,
+       UNIT_ENABLE, UNIT_DISABLE, UNIT_RELOAD };
+enum { UNIT_INACTIVE, UNIT_ACTIVE, UNIT_FAILED, UNIT_RESTARTING };
+struct unit_info {
+    char name[28];
+    unsigned state, enabled, pid;
+    int exit_code;
+    unsigned restarts;
+};
+int unitctl(unsigned op, const char *name, struct unit_info *out, unsigned index);
 
 /* ---- разное ---- */
 void     srand(unsigned seed);

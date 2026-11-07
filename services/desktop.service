@@ -1,0 +1,8 @@
+[Unit]
+Description=MyOS graphical desktop
+
+[Service]
+Type=simple
+StandardInput=tty
+ExecStart=/bin/desktop
+Restart=no
