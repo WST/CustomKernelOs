@@ -6,6 +6,7 @@
  * До пяти перенаправлений за одну попытку. */
 #include "myos.h"
 #include "unistd.h"
+#include "stdio.h"
 #include "tls.h"
 
 static char host[128];
@@ -105,6 +106,46 @@ static void close_net(int fd) {
     if (fd >= 0) close(fd);
 }
 
+/* Reserve a unique sibling, without truncating any existing path. */
+static int reserve_sibling(const char *out, char temp[128]) {
+    static unsigned serial;
+    const char *slash = strrchr(out, '/');
+    int prefix = slash ? (int)(slash - out) + 1 : 0;
+    if (prefix + 28 >= 128) { errno = ENAMETOOLONG; return -1; }
+    memcpy(temp, out, (size_t)prefix);
+    for (int i = 0; i < 32; i++) {
+        snprintf(temp + prefix, 128 - prefix, ".dl%u-%u", (unsigned)getpid(), ++serial);
+        int fd = open(temp, O_WRONLY | O_CREAT | O_EXCL);
+        if (fd >= 0 || errno != EEXIST) return fd;
+    }
+    errno = EEXIST; return -1;
+}
+
+/* This MyFS rename does not replace an existing file. Keep a recoverable
+ * backup until the completed download has reached its final name. */
+static int publish_download(const char *temp, const char *out) {
+    struct dirent_info st;
+    int r = dirstat(out, &st);
+    if (r == -ENOENT) return rename(temp, out);
+    if (r < 0) { errno = -r; return -1; }
+    if (st.type != 1) { errno = EISDIR; return -1; }
+    char backup[128];
+    int fd = reserve_sibling(out, backup);
+    if (fd < 0) return -1;
+    if (close(fd) < 0) { unlink(backup); return -1; }
+    if (unlink(backup) < 0) return -1;
+    if (rename(out, backup) < 0) return -1;
+    if (rename(temp, out) < 0) {
+        int saved = errno;
+        if (rename(backup, out) < 0)
+            dprintf(STDERR, "download: original file retained at %s\n", backup);
+        errno = saved; return -1;
+    }
+    if (unlink(backup) < 0)
+        dprintf(STDERR, "download: old file retained at %s\n", backup);
+    return 0;
+}
+
 /* 0 — файл записан, 2 — в cur новый адрес, -2 — сертификат, -1 — прочая ошибка. */
 static int once(char *cur, const char *out, int insecure) {
     int fd, ofd, status, n, r;
@@ -152,7 +193,20 @@ static int once(char *cur, const char *out, int insecure) {
     }
     if (status < 200 || status >= 300) { close_net(fd); return -1; }
 
-    ofd = open(out, O_WRITE);
+    char length_header[32];
+    unsigned expected = 0;
+    bool has_length = header("Content-Length", length_header, sizeof length_header);
+    if (has_length) {
+        const char *p = length_header;
+        if (!*p) { close_net(fd); return -1; }
+        for (; *p; p++) {
+            if (*p < '0' || *p > '9' || expected > (0xffffffffu - (*p - '0')) / 10) {
+                close_net(fd); return -1;
+            }
+            expected = expected * 10 + (*p - '0');
+        }
+    }
+    ofd = open(out, O_WRONLY | O_TRUNC); /* out is a reserved temporary file */
     if (ofd < 0) { dprintf(STDERR, "download: %s: %s\n", out, strerror(errno)); close_net(fd); return -1; }
     if (resp_len > body_off) {
         int w = write(ofd, resp + body_off, (size_t)(resp_len - body_off));
@@ -164,10 +218,11 @@ static int once(char *cur, const char *out, int insecure) {
         if (w != n) { dprintf(STDERR, "download: write failed\n"); close(ofd); close_net(fd); return -1; }
         got += (unsigned)n;
     }
-    close(ofd);
+    int closed = close(ofd);
     close_net(fd);
-    if (n < 0) { dprintf(STDERR, "download: %s\n", strerror(-n)); return -1; }
-    dprintf(STDERR, "download: saved %s (%u bytes)\n", out, got);
+    if (n < 0 || closed < 0 || (has_length && got != expected)) {
+        dprintf(STDERR, "download: incomplete transfer\n"); return -1;
+    }
     return 0;
 }
 
@@ -214,15 +269,25 @@ int main(int argc, char **argv) {
     }
     for (attempt = 0; attempt <= retries; attempt++) {
         int red;
+        char temporary[128];
+        int temp_fd = reserve_sibling(out, temporary);
+        if (temp_fd < 0) {
+            dprintf(STDERR, "download: cannot create temporary file: %s\n", strerror(errno)); return 1;
+        }
+        if (close(temp_fd) < 0) { unlink(temporary); return 1; }
         snprintf(cur, sizeof cur, "%s", url);
         for (red = 0; red < 5; red++) {
-            int r = once(cur, out, insecure);
-            if (r == 0) return 0;
+            int r = once(cur, temporary, insecure);
+            if (r == 0) {
+                if (publish_download(temporary, out) == 0) { dprintf(STDERR, "download: saved %s\n", out); return 0; }
+                dprintf(STDERR, "download: cannot publish %s: %s\n", out, strerror(errno));
+                unlink(temporary); return 1;
+            }
             if (r == 2) continue;
-            if (r == -2) return 1;
+            if (r == -2) { unlink(temporary); return 1; }
             break;
         }
-        unlink(out);
+        unlink(temporary);
         if (attempt < retries) {
             dprintf(STDERR, "download: retry %d/%d\n", attempt + 1, retries);
             sleep(1);

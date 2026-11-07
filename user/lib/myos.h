@@ -44,12 +44,17 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_LSEEK, SYS_FSTAT, SYS_RENAME
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
  * дополнительно приводят его к -1 и пишут сюда, как в POSIX. */
+#ifdef MYOS_HOST_LIBC
+int *__errno_location(void);
+#define errno (*__errno_location())
+#else
 extern int errno;
+#endif
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
 #define EPERM 1
@@ -188,6 +193,15 @@ int  utf8_put(char *out, int cp); /* кодовая точка -> UTF-8 (1..3 б
 enum { KEY_UP = 1000, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
        KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS };
 int  readkey(void);
+#define KEY_SHIFT 0x10000
+#define KEY_COPY  0x20000
+#define KEY_PASTE 0x20001
+/* UTF-8 clipboard, at most 65536 bytes. get returns length, -EFBIG if too small.
+ * No trailing NUL is stored. get(NULL, 0) queries length. */
+#define CLIPBOARD_MAX 65536
+int clipboard_set(const char *text, unsigned length);
+int clipboard_get(char *text, unsigned capacity);
+
 #define CTRL(c) ((c) & 0x1F)
 
 /* escape-последовательности ANSI для консоли */
@@ -300,6 +314,17 @@ int   service_find(const char *name);               /* -> pid службы ил�
 
 struct datetime { unsigned year, month, day, hour, min, sec; };
 int   get_time(struct datetime *t);                 /* часы компьютера */
+
+enum { UNIT_LIST, UNIT_STATUS, UNIT_START, UNIT_STOP, UNIT_RESTART,
+       UNIT_ENABLE, UNIT_DISABLE, UNIT_RELOAD };
+enum { UNIT_INACTIVE, UNIT_ACTIVE, UNIT_FAILED, UNIT_RESTARTING };
+struct unit_info {
+    char name[28];
+    unsigned state, enabled, pid;
+    int exit_code;
+    unsigned restarts;
+};
+int unitctl(unsigned op, const char *name, struct unit_info *out, unsigned index);
 
 /* ---- разное ---- */
 void     srand(unsigned seed);

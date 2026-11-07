@@ -111,5 +111,21 @@ cmp t a.txt || fail gunzip-bytes
 "$G" --best --keep --force z || fail longopt
 "$G" -a -q --rsyncable -f -k z || fail ignored
 
+# FNAME can legally equal the compressed file's name. Never overwrite input,
+# even with -f or a relative path containing ./ and ...
+python3 - <<'PY'
+import pathlib, struct, zlib
+raw = b'preserve this data\n'
+c = zlib.compressobj(wbits=-15)
+blob = bytes.fromhex('1f8b0808000000000003') + b'self.gz\0' + c.compress(raw) + c.flush() + struct.pack('<II', zlib.crc32(raw), len(raw))
+pathlib.Path('self.gz').write_bytes(blob)
+pathlib.Path('self.expected').write_bytes(blob)
+PY
+"$G" -dNf self.gz && fail self-overwrite || true
+cmp self.gz self.expected || fail self-archive-lost
+mkdir self-dir
+"$G" -dNfk ./self-dir/../self.gz && fail self-overwrite-alias || true
+cmp self.gz self.expected || fail self-alias-lost
+
 echo "gzip: OK"
 rm -rf "$D"

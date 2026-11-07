@@ -133,6 +133,7 @@ static int doc_h, scroll;
 struct input { int form; char name[40]; char value[128]; char type; int item; int node; };   /* type: t текст, s кнопка, h скрытое */
 static struct input inputs[MAX_INPUTS];
 static int n_inputs, focus_input = -1;
+static bool input_all;
 static char form_action[MAX_FORMS][256];
 static int form_node[MAX_FORMS];
 static int n_forms, cur_form = -1;
@@ -148,6 +149,9 @@ static char addr[512];             /* текст в строке адреса */
 static bool editing_addr;
 static int addr_cur;
 static bool addr_all;               /* весь адрес выделен: набор заменит его */
+static int sel_item = -1, sel_byte, sel_end_item = -1, sel_end_byte;
+static bool text_drag, text_dragged;
+static int text_down_x, text_down_y;
 
 static char *history[32];
 static int n_hist, hist_pos = -1;
@@ -980,6 +984,8 @@ static void style_close(struct frame *f) {
 
 /* разобрать HTML и разложить */
 static void layout_html(const char *s, int n, bool plain) {
+    sel_item = sel_end_item = -1; text_drag = false;
+    input_all = false;
     n_items = 0; n_links = 0; n_inputs = 0; n_forms = 0; cur_form = -1; n_boxes = 0;
     focus_input = -1;
     left = MARGIN - 8; right = view_w() - MARGIN + 8;      /* ещё 8 точек — отступ <body> по умолчанию */
@@ -1189,6 +1195,40 @@ static void draw_status(void) {
 }
 
 static void draw_img(struct item *it, int y);
+static void set_status(const char *s);
+
+static bool page_selection(void) {
+    return sel_item >= 0 && sel_end_item >= 0 &&
+        (sel_item != sel_end_item || sel_byte != sel_end_byte);
+}
+static void page_bounds(int *i0, int *b0, int *i1, int *b1) {
+    bool forward = sel_item < sel_end_item || (sel_item == sel_end_item && sel_byte <= sel_end_byte);
+    *i0 = forward ? sel_item : sel_end_item; *b0 = forward ? sel_byte : sel_end_byte;
+    *i1 = forward ? sel_end_item : sel_item; *b1 = forward ? sel_end_byte : sel_byte;
+}
+static int item_text_width(struct item *it, int bytes) {
+    if (it->fsize) return text_width_n(it->font, it->fsize, it->text, bytes);
+    return u8count(it->text, bytes) * 8 * (it->scale > 1 ? it->scale : 1);
+}
+static void copy_page_selection(void) {
+    if (!page_selection()) return;
+    int i0, b0, i1, b1, n = 0, previous = -1;
+    page_bounds(&i0, &b0, &i1, &b1);
+    char *s = malloc(CLIPBOARD_MAX);
+    if (!s) return;
+    for (int i = i0; i <= i1; i++) {
+        struct item *it = &items[i];
+        if (it->kind != IT_TEXT || !it->text) continue;
+        int start = i == i0 ? b0 : 0, end = i == i1 ? b1 : strlen(it->text);
+        if (end <= start) continue;
+        bool newline = previous >= 0 && (it->y >= items[previous].y + items[previous].h || it->y + it->h <= items[previous].y);
+        int gap = previous >= 0 && (newline || it->x > items[previous].x + item_text_width(&items[previous], strlen(items[previous].text)));
+        if (n + gap + end - start > CLIPBOARD_MAX) { free(s); set_status("Selection exceeds 64 KiB"); return; }
+        if (gap) s[n++] = newline ? '\n' : ' ';
+        memcpy(s + n, it->text + start, end - start); n += end - start; previous = i;
+    }
+    clipboard_set(s, n); free(s);
+}
 
 static void draw_page(void) {
     gfx_fill_rect(0, VIEW_Y, W, VIEW_H, page_bg >= 0 ? (color_t)page_bg : C_WHITE);
@@ -1224,6 +1264,15 @@ static void draw_page(void) {
         switch (it->kind) {
         case IT_TEXT:
             if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, it->h, it->bg);
+            if (page_selection()) {
+                int i0, b0, i1, b1;
+                page_bounds(&i0, &b0, &i1, &b1);
+                if (i >= i0 && i <= i1) {
+                    int start = i == i0 ? b0 : 0, end = i == i1 ? b1 : strlen(it->text);
+                    int x0 = item_text_width(it, start), x1 = item_text_width(it, end);
+                    if (x1 > x0) gfx_fill_rect(it->x + x0, y, x1 - x0, it->h, UI_SELECT);
+                }
+            }
             if (it->fsize) {                                 /* шрифт Ubuntu нужного размера */
                 int lh = text_line_h(it->font, it->fsize), ty = y + (it->h - lh) / 2;
                 int base = ty + text_ascent(it->font, it->fsize);
@@ -1268,6 +1317,7 @@ static void draw_page(void) {
             int maxc = (it->w - 8) / 8, l = u8count(in->value, strlen(in->value)), skip = l > maxc - 1 ? l - maxc + 1 : 0;
             const char *v = in->value;                    /* в буквах UTF-8: видны последние maxc */
             while (skip > 0 && *v) { v++; while (u8cont(*v)) v++; skip--; }
+            if (focus_input == it->input && input_all) gfx_fill_rect(it->x + 3, y + 3, it->w - 6, it->h - 6, UI_SELECT);
             gfx_text(it->x + 4, y + 4, v, UI_TEXT, TRANSPARENT);
             if (focus_input == it->input) gfx_fill_rect(it->x + 4 + u8count(v, strlen(v)) * 8, y + 4, 2, 16, UI_TEXT);
             break;
@@ -1415,6 +1465,7 @@ static int js_busy_poll(void) {
 static int net_read(int fd, void *b, int n) {
     for (;;) {
         int r = conn ? tls_read(conn, b, n) : read(fd, b, n);
+        if (!conn && r < 0) r = -errno; /* read is POSIX; this layer uses -errno */
         if (r > 0) { req_last_data = ticks(); return r; }
         if (r == -ETIMEDOUT && !conn) { if (net_idle()) continue; return -ETIMEDOUT; }
         if (r < 0 && req_fail[0]) return -ETIMEDOUT;            /* tls_read: net_idle сказала «хватит» */
@@ -2452,7 +2503,35 @@ static void scroll_by(int d) {
     if (scroll < 0) scroll = 0;
 }
 
+/* Locate a UTF-8 character boundary in the nearest rendered text run. */
+static int text_position(int x, int y, int *byte) {
+    int best = -1, distance = 0x7fffffff;
+    y += scroll - VIEW_Y;
+    for (int i = 0; i < n_items; i++) {
+        struct item *it = &items[i];
+        if (it->kind != IT_TEXT || !it->text || !it->text[0]) continue;
+        int dy = y < it->y ? it->y - y : y >= it->y + it->h ? y - it->y - it->h + 1 : 0;
+        int dx = x < it->x ? it->x - x : x > it->x + it->w ? x - it->x - it->w : 0;
+        int d = dy * 4096 + dx;
+        if (d < distance) { distance = d; best = i; }
+    }
+    *byte = 0;
+    if (best < 0) return -1;
+    struct item *it = &items[best];
+    int prev = 0;
+    while (it->text[*byte]) {
+        int next = *byte + 1;
+        while (u8cont(it->text[next])) next++;
+        int width = item_text_width(it, next);
+        if (x - it->x < (prev + width) / 2) break;
+        *byte = next; prev = width;
+    }
+    return best;
+}
+
 static void on_click(int x, int y) {
+    input_all = false;
+    sel_item = sel_end_item = -1; text_drag = false;
     if (y < BAR_H) {
         editing_addr = false;
         if (ui_inside(x, y, 6, 6, 30, 24)) { go_history(-1); return; }
@@ -2546,6 +2625,15 @@ static void edit_string(char *s, int max, int *cur, int k) {
 
 
 static void on_key(int k) {
+    if (!editing_addr && focus_input < 0 && (k == CTRL('c') || k == KEY_COPY)) { copy_page_selection(); return; }
+    if (!editing_addr && focus_input < 0 && k == CTRL('a')) {
+        sel_item = sel_end_item = -1;
+        for (int i = 0; i < n_items; i++) if (items[i].kind == IT_TEXT && items[i].text) {
+            if (sel_item < 0) { sel_item = i; sel_byte = 0; }
+            sel_end_item = i; sel_end_byte = strlen(items[i].text);
+        }
+        redraw(); return;
+    }
     if (k == CTRL('l')) { editing_addr = true; addr_all = true; focus_input = -1; addr_cur = strlen(addr); redraw(); return; }
     if (k == CTRL('j')) {                                  /* JavaScript вкл/выкл — и перезагрузить */
         dom_scripting = !dom_scripting;
@@ -2561,6 +2649,27 @@ static void on_key(int k) {
         return;
     }
     if (editing_addr) {
+        if (k == CTRL('a')) { addr_all = true; addr_cur = strlen(addr); draw_toolbar(); win_update_rect(win, 0, 0, W, BAR_H); return; }
+        if (k == CTRL('c') || k == KEY_COPY || k == CTRL('x')) {
+            if (addr_all && clipboard_set(addr, strlen(addr)) >= 0 && k == CTRL('x')) {
+                addr[0] = 0; addr_cur = 0; addr_all = false;
+            }
+            draw_toolbar(); win_update_rect(win, 0, 0, W, BAR_H); return;
+        }
+        if (k == CTRL('v') || k == KEY_PASTE || k == (KEY_INS | KEY_SHIFT)) {
+            char *s = malloc(CLIPBOARD_MAX);
+            if (!s) return;
+            int n = clipboard_get(s, CLIPBOARD_MAX), length = strlen(addr);
+            /* A URL is a single line; stop before pasted line breaks. */
+            int count = 0;
+            while (count < n && (unsigned char)s[count] >= 32 && s[count] != 127) count++;
+            if (count > 0 && count + (addr_all ? 0 : length) < (int)sizeof(addr)) {
+                if (addr_all) { addr[0] = 0; addr_cur = length = 0; addr_all = false; }
+                memmove(addr + addr_cur + count, addr + addr_cur, length - addr_cur + 1);
+                memcpy(addr + addr_cur, s, count); addr_cur += count;
+            }
+            free(s); draw_toolbar(); win_update_rect(win, 0, 0, W, BAR_H); return;
+        }
         if (k == '\n' || k == '\r') { editing_addr = false; navigate(addr, true); return; }
         if (k == 27) { editing_addr = false; snprintf(addr, sizeof(addr), "%s", url); redraw(); return; }
         if (addr_all) {
@@ -2576,6 +2685,11 @@ static void on_key(int k) {
     if (focus_input >= 0) {
         struct input *in = &inputs[focus_input];
         bool js = page_is_dom && dom_scripting && in->node >= 0;
+        if (k == CTRL('a')) { input_all = true; redraw(); return; }
+        if (k == CTRL('c') || k == KEY_COPY || k == CTRL('x')) {
+            if (!input_all) return;
+            if (clipboard_set(in->value, strlen(in->value)) < 0 || k != CTRL('x')) return;
+        }
         if (k == '\n' || k == '\r') {
             if (js) {
                 int f = in->form;
@@ -2593,7 +2707,25 @@ static void on_key(int k) {
         char before[128];
         snprintf(before, sizeof(before), "%s", in->value);
         int cur = strlen(in->value);
-        edit_string(in->value, sizeof(in->value), &cur, k);
+        if (k == CTRL('v') || k == KEY_PASTE || k == (KEY_INS | KEY_SHIFT)) {
+            char *s = malloc(CLIPBOARD_MAX);
+            if (!s) return;
+            int n = clipboard_get(s, CLIPBOARD_MAX), count = 0;
+            while (count < n && (unsigned char)s[count] >= 32 && s[count] != 127) count++;
+            if (count > 0 && count + (input_all ? 0 : cur) < (int)sizeof(in->value)) {
+                if (input_all) cur = 0;
+                memcpy(in->value + cur, s, count); in->value[cur + count] = 0; input_all = false;
+            }
+            free(s); k = 0;
+        } else {
+            bool printable = (k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS));
+            if (input_all && (printable || k == 8 || k == 127 || k == KEY_DEL || k == CTRL('x'))) {
+                in->value[0] = 0; cur = 0;
+                if (!printable) k = 0;
+            }
+            input_all = false;
+            if (k) edit_string(in->value, sizeof(in->value), &cur, k);
+        }
         if (page_is_dom && in->node >= 0) {
             dom_key(in->node, k < 256 ? k : 0, strcmp(before, in->value) ? in->value : NULL);
             after_js();
@@ -2665,7 +2797,29 @@ int main(int argc, char **argv) {
             continue;
         }
         if (e.type == EV_CLOSE) break;
-        if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) on_click(e.x, e.y);
+        if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) {
+            int hit = item_at(e.x, e.y);
+            if (e.y >= VIEW_Y && e.y < H - STATUS_H && hit >= 0 && items[hit].kind == IT_TEXT) {
+                sel_item = sel_end_item = text_position(e.x, e.y, &sel_byte);
+                sel_end_byte = sel_byte; text_drag = true; text_dragged = false;
+                text_down_x = e.x; text_down_y = e.y;
+                editing_addr = false; focus_input = -1; redraw();
+            } else on_click(e.x, e.y);
+        }
+        else if (e.type == EV_MOUSE_MOVE && text_drag) {
+            if (e.x < text_down_x - 3 || e.x > text_down_x + 3 || e.y < text_down_y - 3 || e.y > text_down_y + 3) text_dragged = true;
+            if (text_dragged) {
+                if (e.y < VIEW_Y) scroll_by(-16);
+                if (e.y >= H - STATUS_H) scroll_by(16);
+                sel_end_item = text_position(e.x, e.y, &sel_end_byte); redraw();
+            }
+        }
+        else if (e.type == EV_MOUSE_UP && text_drag) {
+            text_drag = false;
+            if (!text_dragged) on_click(text_down_x, text_down_y);
+            else { sel_end_item = text_position(e.x, e.y, &sel_end_byte); redraw(); }
+        }
+        else if (e.type == EV_FOCUS && !e.key) text_drag = false;
         else if (e.type == EV_MOUSE_MOVE && !e.buttons) on_move(e.x, e.y);
         else if (e.type == EV_KEY) on_key(e.key);
         else if (e.type == EV_RESIZE) {                    /* новая ширина — разложить страницу заново */

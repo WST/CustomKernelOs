@@ -177,7 +177,7 @@ fail:
     return err;
 }
 
-int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
+static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input) {
     struct image im;
     int err = load_image(path, cwd, argc, argv, &im);
     if (err) return err;
@@ -186,10 +186,21 @@ int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
     t->brk_start = t->brk = im.brk;
     t->user_pages = im.pages;
     t->cwd = cwd;
+    if (input) { file_close(t->fds[0]); t->fds[0] = file_dup(input); }
+    if (log) {
+        for (int i = 1; i <= 2; i++) { file_close(t->fds[i]); t->fds[i] = file_dup(log); }
+    }
     t->keep_zombie = fg;                                 /* оболочка заберёт код выхода */
     u32 id = task_start(t);                              /* при неудаче сама освободит всё */
     if (!id) return PROC_EAGAIN;
     return id;
+}
+
+int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
+    return spawn(path, cwd, argc, argv, fg, NULL, NULL);
+}
+int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input) {
+    return spawn(path, FS_ROOT, argc, argv, true, log, input);
 }
 
 /* ---------------------------------------------------------------- fork

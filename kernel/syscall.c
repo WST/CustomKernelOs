@@ -29,6 +29,7 @@
 #include "display.h"
 #include "block.h"
 #include "account.h"
+#include "services.h"
 
 #define SBRK_LIMIT SHM_BASE         /* выше — общая память (ipc.c) и стек */
 #define PATH_MAX   128
@@ -101,6 +102,33 @@ static int alloc_fd(struct file *f) {
 }
 
 /* ---------------------------------------------------------------- файлы */
+
+/* Copied into kernel storage: survives the source application's exit.
+ * A different account must not read the previous account's clipboard. */
+static char clipboard[65536];
+static u32 clipboard_length, clipboard_uid;
+static struct mutex clipboard_lock;
+static int sys_clipboard(u32 op, u32 addr, u32 size) {
+    if (op > 1) return -EINVAL;
+    if (size > sizeof(clipboard)) return -EFBIG;
+    if (size && !user_buf_ok(addr, size, op == 0)) return -EFAULT;
+    mutex_lock(&clipboard_lock);
+    u32 uid = task_current()->uid;
+    int result;
+    if (op == 1) {
+        if (size) memcpy(clipboard, (void *)addr, size);
+        clipboard_length = size;
+        clipboard_uid = uid;
+        result = size;
+    } else {
+        u32 length = uid == clipboard_uid ? clipboard_length : 0;
+        if (!size) result = length;
+        else if (size < length) result = -EFBIG;
+        else { if (length) memcpy((void *)addr, clipboard, length); result = length; }
+    }
+    mutex_unlock(&clipboard_lock);
+    return result;
+}
 
 static int sys_write(u32 fd, u32 buf, u32 len) {
     struct file *f = get_fd(fd);
@@ -323,7 +351,19 @@ static int sys_unlink(u32 upath) {
 static int sys_rename(u32 uold, u32 unew) {
     char oldp[PATH_MAX], newp[PATH_MAX];
     if (!user_str(uold, oldp, sizeof(oldp)) || !user_str(unew, newp, sizeof(newp))) return -EFAULT;
-    return fs_errno(fs_rename(task_current()->cwd, oldp, newp));
+    /* Resolve and rename under one namespace lock: checking a path before
+     * acquiring the VFS lock would let another task move it in between. */
+    fs_namespace_lock();
+    u32 source, target, etc;
+    u32 cwd = task_current()->cwd;
+    int result;
+    if (!fs_resolve(cwd, oldp, &source) &&
+        (account_private(source) ||
+         (!fs_resolve(FS_ROOT, "/etc", &etc) && source == etc))) result = -EPERM;
+    else if (!fs_resolve(cwd, newp, &target) && account_private(target)) result = -EPERM;
+    else result = fs_errno(fs_rename(cwd, oldp, newp));
+    fs_namespace_unlock();
+    return result;
 }
 
 /* ---------------------------------------------------------------- процессы */
@@ -779,6 +819,15 @@ void syscall_dispatch(struct regs *r) {
     case SYS_SHM_UNMAP:   ret = shm_unmap(a); break;
     case SYS_MSG_SEND:    ret = sys_msg_send(a, b); break;
     case SYS_MSG_RECV:    ret = sys_msg_recv(a, b); break;
+    case SYS_UNITCTL: {
+        char name[28] = {0};
+        if (a != UNIT_LIST && a != UNIT_RELOAD && !user_str(b, name, sizeof(name))) { ret = -EFAULT; break; }
+        if (c && !user_buf_ok(c, sizeof(struct unit_info), true)) { ret = -EFAULT; break; }
+        struct unit_info info = {0};
+        ret = services_ctl(a, name, &info, b);
+        if (!ret && c) memcpy((void *)c, &info, sizeof(info));
+        break;
+    }
     case SYS_SERVICE:     ret = sys_service(a, b); break;
     case SYS_TIME:        ret = sys_time(a); break;
     case SYS_GFX_MODE:    ret = sys_gfx_mode(a, b); break;
@@ -788,6 +837,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_PTY_OPEN:    ret = sys_pty_open(a); break;
     case SYS_TTYCTL:      ret = tty_ctl(get_fd(a), b, c); break;
     case SYS_SOCKCTL:     { struct sock *s = get_sock(a); ret = s ? sock_ctl(s, (int)b, c) : -EBADF; break; }
+    case SYS_CLIPBOARD: ret = sys_clipboard(a, b, c); break;
     case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
     }
     r->eax = (u32)ret;

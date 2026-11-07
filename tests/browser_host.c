@@ -16,6 +16,19 @@
 #include "../user/browser.c"
 #undef main
 
+static char host_clipboard[CLIPBOARD_MAX];
+static unsigned host_clipboard_length;
+int clipboard_set(const char *s, unsigned n) {
+    if (n > CLIPBOARD_MAX) return -EFBIG;
+    if (n) memcpy(host_clipboard, s, n);
+    host_clipboard_length = n; return n;
+}
+int clipboard_get(char *s, unsigned n) {
+    if (!n) return host_clipboard_length;
+    if (n < host_clipboard_length) return -EFBIG;
+    memcpy(s, host_clipboard, host_clipboard_length); return host_clipboard_length;
+}
+
 extern void *fopen(const char *, const char *);
 extern unsigned long fread(void *, unsigned long, unsigned long, void *);
 extern unsigned long fwrite(const void *, unsigned long, unsigned long, void *);
@@ -146,6 +159,40 @@ static void pump(void) {                     /* обработать накоп�
 
 #include "browser_compat.h"
 
+static int clipboard_browser_test(void) {
+    const char html[] = "<p>Hello \320\274\320\270\321\200</p><p>Second</p><input name=q value=initial>";
+    compat_page(html);
+    focus_input = -1; editing_addr = false;
+    on_key(CTRL('a')); on_key(CTRL('c'));
+    const char expected[] = "Hello \320\274\320\270\321\200\nSecond";
+    CHECK(host_clipboard_length == sizeof(expected) - 1 && !memcmp(host_clipboard, expected, sizeof(expected) - 1), "copy page text, spaces, Unicode and paragraphs");
+    int index = -1;
+    for (int i = 0; i < n_items; i++) if (items[i].kind == IT_TEXT && !strcmp(items[i].text, "\320\274\320\270\321\200")) index = i;
+    CHECK(index >= 0, "Unicode text run exists");
+    if (index >= 0) {
+        struct item *it = &items[index];
+        int b = -1;
+        CHECK(text_position(it->x, it->y + VIEW_Y + it->h / 2, &b) == index && b == 0, "hit test start");
+        sel_item = sel_end_item = index; sel_byte = 2; sel_end_byte = 4;
+        copy_page_selection();
+        CHECK(host_clipboard_length == 2 && !memcmp(host_clipboard, "\320\270", 2), "copy a whole UTF-8 character");
+        redraw();
+    }
+    on_key(CTRL('l'));
+    clipboard_set("https://example.org/path\nignored", 32);
+    on_key(CTRL('v'));
+    CHECK(!strcmp(addr, "https://example.org/path"), "paste address without navigation or newline");
+    on_key(CTRL('a')); on_key(CTRL('x'));
+    CHECK(!addr[0] && host_clipboard_length == 24, "cut selected address");
+    editing_addr = false; focus_input = 0;
+    on_key(CTRL('a')); clipboard_set("field", 5); on_key(CTRL('v'));
+    CHECK(!strcmp(inputs[0].value, "field"), "replace selected form field");
+    on_key(CTRL('a')); on_key(CTRL('c'));
+    CHECK(host_clipboard_length == 5 && !memcmp(host_clipboard, "field", 5), "copy form field");
+    if (!compat_failures) puts("Browser clipboard: PASS");
+    return compat_failures ? 1 : 0;
+}
+
 int main(int argc, char **argv) {
     if(argc>2 && !strcmp(argv[1],"--net")){host_net=1;argc--;argv++;}
     if (argc < 2) { printf("usage: browser-host page.html commands...\n"); return 1; }
@@ -170,6 +217,7 @@ int main(int argc, char **argv) {
     dom_init(&dom_host);
     js_poll_hook = js_busy_poll;
     if (!strcmp(argv[1], "--compat-test")) return compat_tests();
+    if (!strcmp(argv[1], "--clipboard-test")) return clipboard_browser_test();
     unsigned t0 = ticks();
     navigate(target, true);
     printf("load: %u ms, items %d, links %d, doc_h %d; %s\n", ticks() - t0, n_items, n_links, doc_h, status);

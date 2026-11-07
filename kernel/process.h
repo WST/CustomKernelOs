@@ -18,6 +18,9 @@ enum {
 int  proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool foreground);
 const char *proc_strerror(int err);
 
+struct file;
+int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input);
+
 int  proc_fork(struct regs *r);         /* -> id потомка или PROC_E* */
 int  proc_exec(struct regs *r, const char *path, int argc, char **argv);
 
