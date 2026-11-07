@@ -53,4 +53,13 @@ $C -c dup.c || fail dup-compile
 $C main.o lib1.o lib2.o dup.o -o dup 2> dup.err && fail duplicate-accepted
 grep -q "multiple definition of 'lib1_helper'" dup.err || { cat dup.err; fail duplicate-message; }
 
+# -fPIC вместе с обычными объектами: GOT и PLT32, программа та же
+P="$C -fPIC"
+$P "$SRC/main.c" "$SRC/lib1.c" "$SRC/lib2.c" -o allpic || fail allpic-build
+run allpic
+$P -c "$SRC/main.c" -o mainpic.o || fail pic-compile
+$C -c "$SRC/lib1.c" -o lib1nop.o || fail nopic-compile
+$C mainpic.o lib1nop.o lib2.o -o mixpic || fail mixpic-build
+run mixpic
+
 echo "cc separate compilation: OK"

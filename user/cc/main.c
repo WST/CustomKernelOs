@@ -14,6 +14,7 @@
 char **include_paths;
 int    n_include_paths;
 bool   opt_linux;
+bool   opt_pic;
 
 static char *base_dir = "";         /* -B: где искать include/ и lib/ (по умолчанию корень MyOS) */
 
@@ -130,8 +131,9 @@ static void add_include(char *path) {
 
 static void usage(void) {
     dprintf(STDERR,
-        "usage: cc [-c] [-o out] [-E] [-I dir] [-L dir] [-l name] [-nostdlib] file.c... file.o... lib.a...\n"
+        "usage: cc [-c] [-fPIC] [-o out] [-E] [-I dir] [-L dir] [-l name] [-nostdlib] file.c... file.o... lib.a...\n"
         "  -c          only compile: each file.c -> file.o (ELF relocatable object)\n"
+        "  -fPIC       position-independent code (GOT, PLT); still links into a normal program\n"
         "  -o out      name of the program or, with -c and one file, of the object\n"
         "              (default: first file without .c or .o)\n"
         "  -E          only preprocess, print the result\n"
@@ -229,6 +231,8 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-c")) { opt_c = true; continue; }
         if (!strcmp(a, "-E")) { opt_E = true; continue; }
         if (!strcmp(a, "-linux")) { opt_linux = true; continue; }
+        if (!strcmp(a, "-fPIC") || !strcmp(a, "-fpic")) { opt_pic = true; continue; }
+        if (!strcmp(a, "-fno-pic") || !strcmp(a, "-fno-PIC")) { opt_pic = false; continue; }
         if (!strcmp(a, "-nostdlib")) { nostdlib = true; continue; }
         if (!strcmp(a, "-B") && i + 1 < argc) { base_dir = argv[++i]; continue; }
         if (!strcmp(a, "-I") && i + 1 < argc) { add_include(argv[++i]); continue; }

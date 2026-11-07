@@ -9,7 +9,11 @@
  *      обычному, COMMON — любому);
  *   2. отсев: остаются только секции, до которых можно дойти от точки входа;
  *   3. раскладка: код и константы с TEXT_BASE, данные и bss — с новой страницы;
- *   4. перемещения: R_386_32 = S + A, R_386_PC32 = S + A - P (A лежит в самих байтах). */
+ *   4. перемещения (A лежит в самих байтах):
+ *      R_386_32 = S + A,  R_386_PC32 и R_386_PLT32 = S + A - P,
+ *      R_386_GOTPC = GOT + A - P,  R_386_GOTOFF = S + A - GOT,
+ *      R_386_GOT32 = смещение ячейки GOT. Для обычной программы PLT не строится:
+ *      PLT32 считается как PC32, а ячейки GOT заполняются абсолютными адресами. */
 #include "cc.h"
 
 #define SHT_PROGBITS      1
@@ -609,20 +613,111 @@ static void mark(Section *s) {
     work[n_work++] = s;
 }
 
+static bool is_pic_reloc(int type) {
+    return type == R_386_GOT32 || type == R_386_GOTOFF || type == R_386_GOTPC;
+}
+
+static bool reloc_ok(int type) {
+    return type == R_386_32 || type == R_386_PC32 || type == R_386_PLT32 || is_pic_reloc(type);
+}
+
 static void mark_from_relocs(void) {
     while (n_work) {
         Section *s = work[--n_work];
         for (int i = 0; i < s->n_rels; i++) {
             LinkReloc *r = &s->rels[i];
             if (r->type == R_386_NONE) continue;
-            if (r->type != R_386_32 && r->type != R_386_PC32 && r->type != R_386_PLT32)
-                error("unsupported relocation type %d in %s (compile with -fno-pic)", r->type, where(s));
+            if (!reloc_ok(r->type))
+                error("unsupported relocation type %d in %s", r->type, where(s));
             Section *t;
             unsigned v;
             if (!sym_target(s->file, r->sym, &t, &v))
                 error("undefined reference to '%s' in %s", s->file->syms[r->sym].name, where(s));
             mark(t);
         }
+    }
+}
+
+/* GOT для -fPIC. Первые три ячейки зарезервированы, как в System V i386:
+ * их заполнит динамический загрузчик, а в обычной программе они нули. */
+static Section *got_sec;
+typedef struct { GSym *g; int off; } GotSlot;
+static GotSlot *got_slots;
+static int n_got_slots, cap_got_slots;
+
+static bool any_pic(ObjFile **files, int n) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            for (int r = 0; r < s->n_rels; r++)
+                if (is_pic_reloc(s->rels[r].type)) return true;
+        }
+    return false;
+}
+
+static void ensure_got(ObjFile *common) {
+    int sec = obj_add_section(common, ".got", SEC_DATA, 4, NULL, 12);
+    got_sec = common->secs[sec];
+    int idx = obj_add_sym(common, "_GLOBAL_OFFSET_TABLE_", BIND_GLOBAL, STY_OBJECT, sec, 0, 12);
+    GSym *g = gsym_get("_GLOBAL_OFFSET_TABLE_", true);
+    if (g->state == DEF_STRONG)
+        error("multiple definition of '_GLOBAL_OFFSET_TABLE_'");
+    g->state = DEF_STRONG;
+    g->file = common;
+    g->idx = idx;
+    common->syms[idx].global = g;
+}
+
+static void got_add(GSym *g) {
+    for (int i = 0; i < n_got_slots; i++)
+        if (got_slots[i].g == g) return;
+    if (n_got_slots == cap_got_slots) {
+        cap_got_slots = cap_got_slots ? cap_got_slots * 2 : 32;
+        GotSlot *p = xcalloc(sizeof(GotSlot) * cap_got_slots);
+        if (got_slots) memcpy(p, got_slots, sizeof(GotSlot) * n_got_slots);
+        free(got_slots);
+        got_slots = p;
+    }
+    got_slots[n_got_slots].g = g;
+    got_slots[n_got_slots].off = 12 + n_got_slots * 4;
+    n_got_slots++;
+}
+
+static int got_slot_off(ObjFile *f, int sym) {
+    LinkSym *s = &f->syms[sym];
+    if (s->bind == BIND_LOCAL || !s->global)
+        error("R_386_GOT32 against local symbol '%s'", s->name);
+    for (int i = 0; i < n_got_slots; i++)
+        if (got_slots[i].g == s->global) return got_slots[i].off;
+    error("internal: '%s' has no GOT entry", s->name);
+}
+
+/* Ячейка GOT — абсолютный адрес символа. Пишем его тем же R_386_32, что и указатели в данных. */
+static void fill_got(ObjFile **files, int n, ObjFile *common) {
+    if (!got_sec) return;
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            if (!s->live) continue;
+            for (int r = 0; r < s->n_rels; r++) {
+                if (s->rels[r].type != R_386_GOT32) continue;
+                LinkSym *ls = &s->file->syms[s->rels[r].sym];
+                if (ls->bind == BIND_LOCAL || !ls->global)
+                    error("R_386_GOT32 against local symbol '%s' in %s", ls->name, where(s));
+                got_add(ls->global);
+                mark(got_sec);
+            }
+        }
+    if (!got_sec->live) return;
+    int size = 12 + n_got_slots * 4;
+    free(got_sec->data);
+    got_sec->data = xcalloc(size);
+    got_sec->size = size;
+    common->syms[gsym_get("_GLOBAL_OFFSET_TABLE_", false)->idx].size = size;
+    for (int i = 0; i < n_got_slots; i++) {
+        int idx = obj_add_sym(common, got_slots[i].g->name, BIND_GLOBAL, STY_NOTYPE, SYM_UNDEF, 0, 0);
+        common->syms[idx].global = got_slots[i].g;
+        obj_add_reloc(got_sec, got_slots[i].off, R_386_32, idx);
     }
 }
 
@@ -677,6 +772,9 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char
             int s = obj_add_section(common, g->name, SEC_BSS, g->common_align, NULL, g->common_size);
             g->common = common->secs[s];
         }
+    got_sec = NULL;
+    n_got_slots = 0;
+    if (any_pic(files, n_files)) ensure_got(common);
 
     /* точка входа: заглушка зовёт __libc_start(argc, argv) */
     GSym *start = gsym_get("__libc_start", false);
@@ -686,6 +784,7 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char
     sym_target(start->file, start->idx, &start_sec, &start_val);
     mark(start_sec);
     mark_from_relocs();
+    fill_got(files, n_files, common);
 
     /* место под заголовки ELF: 52 + 2*32 = 116 байт, код с 0x80 */
     static const unsigned char stub_myos[] = { 0xFF, 0x74, 0x24, 0x08, 0xFF, 0x74, 0x24, 0x08 };  /* ядро: _start(argc, argv) */
@@ -742,16 +841,30 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char
             if (!s->live || s->kind == SEC_BSS) continue;
             unsigned char *p = o + file_off(s, data_vaddr, data_off);
             memcpy(p, s->data, s->size);
+            unsigned got = got_sec && got_sec->live ? got_sec->addr : 0;
             for (int r = 0; r < s->n_rels; r++) {
                 LinkReloc *rl = &s->rels[r];
                 if (rl->type == R_386_NONE) continue;
+                if (!reloc_ok(rl->type))
+                    error("unsupported relocation type %d in %s", rl->type, where(s));
                 Section *t;
                 unsigned v;
                 sym_target(s->file, rl->sym, &t, &v);
                 unsigned S = (t ? t->addr : 0) + v;
                 unsigned A = rd32(p + rl->offset);
                 unsigned P = s->addr + rl->offset;
-                wr32(p + rl->offset, rl->type == R_386_32 ? S + A : S + A - P);
+                unsigned val;
+                switch (rl->type) {
+                case R_386_32: val = S + A; break;
+                case R_386_PC32: case R_386_PLT32: val = S + A - P; break;
+                case R_386_GOTPC:
+                case R_386_GOTOFF:
+                    if (!got) error("relocation against the GOT in %s, but there is no GOT", where(s));
+                    val = rl->type == R_386_GOTPC ? got + A - P : S + A - got;
+                    break;
+                default: val = (unsigned)got_slot_off(s->file, rl->sym) + A; break;   /* R_386_GOT32 */
+                }
+                wr32(p + rl->offset, val);
             }
         }
 

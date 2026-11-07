@@ -49,6 +49,7 @@ void *xcalloc(int n);
 extern char **include_paths;
 extern int    n_include_paths;
 extern bool   opt_linux;                            /* -linux: ELF для Linux (тесты на хосте) */
+extern bool   opt_pic;                              /* -fPIC: код не зависит от адреса загрузки */
 
 /* ------------------------------------------------------------ токены (lex.c) */
 
@@ -282,10 +283,13 @@ enum { STY_NOTYPE, STY_OBJECT, STY_FUNC, STY_SECTION };
 #define SYM_ABS    (-3)
 
 /* типы перемещений i386; слагаемое (addend) лежит в самих байтах, как в ELF REL */
-#define R_386_NONE  0
-#define R_386_32    1
-#define R_386_PC32  2
-#define R_386_PLT32 4
+#define R_386_NONE   0
+#define R_386_32     1
+#define R_386_PC32   2
+#define R_386_GOT32  3              /* смещение ячейки GOT от _GLOBAL_OFFSET_TABLE_ */
+#define R_386_PLT32  4              /* как PC32, но цель — элемент PLT */
+#define R_386_GOTOFF 9              /* адрес символа минус адрес GOT */
+#define R_386_GOTPC  10             /* адрес GOT минус адрес поля перемещения */
 
 typedef struct ObjFile ObjFile;
 typedef struct GSym GSym;

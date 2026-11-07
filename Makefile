@@ -391,6 +391,7 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
 	    echo "32-bit programs cannot run here - only checking that tests and cc itself compile"; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_x || exit 1; done; \
+	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_x || exit 1; done; \
 	    $(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && echo "compile-only: OK"; \
 	    exit 0; \
 	fi; \
@@ -398,6 +399,11 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	    n=$$(basename $$t .c); \
 	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && ./$(BUILD)/cct_$$n || exit 1; \
 	done; \
+	for t in tests/cc/*.c; do \
+	    n=$$(basename $$t .c); \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_pic_$$n && ./$(BUILD)/cct_pic_$$n || exit 1; \
+	done; \
+	echo "cc -fPIC: OK"; \
 	rm -f $(BUILD)/cct_cc1 $(BUILD)/cct_cc2 $(BUILD)/cct_cc3; \
 	$(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
 	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
