@@ -105,6 +105,17 @@ int account_name(char *out) {
     if(!r) { if(!t->authenticated || t->uid>=USERS) r=-EPERM;else memcpy(out,db.users[t->uid].name,24); }
     mutex_unlock(&lock);return r;
 }
+/* Public names only: salts and password hashes stay in the kernel. */
+int account_list(char *out, unsigned index) {
+    mutex_lock(&lock); int r=load();
+    if(!r) {
+        r=-ENOENT;
+        for(int i=0;i<USERS;i++) if(db.users[i].name[0]) {
+            if(!index--) { memcpy(out,db.users[i].name,24); r=0; break; }
+        }
+    }
+    mutex_unlock(&lock); return r;
+}
 /* 0 first setup, 1 login, 2 useradd, 3 passwd, 4 uid, 5 name, 6 logout */
 int account_ctl(unsigned op,const char *name,const char *pw) {
     struct task *t=task_current();int r;mutex_lock(&lock);

@@ -566,11 +566,11 @@ static void draw_tip(void) {
 /* ------------------------------------------------------------ системное меню */
 
 #define SM_W 260
-static const char *sm_items[] = { "Display Settings", "About MyOS", "", "Power Off / Log Out" };
-#define SM_N 4
+static const char *sm_items[] = { "Display Settings", "About MyOS", "", "Log Out", "Close Desktop" };
+#define SM_N 5
 static int hover_sm = -1;
 
-static struct rect sysmenu_rect(void) { return mkrect(SW - SM_W - 8, TOPBAR_H + 6, SM_W, 16 + 3 * 38 + 13); }
+static struct rect sysmenu_rect(void) { return mkrect(SW - SM_W - 8, TOPBAR_H + 6, SM_W, 16 + 4 * 38 + 13); }
 static struct rect sm_item(int i) {
     struct rect r = sysmenu_rect();
     int y = r.y + 8;
@@ -594,6 +594,11 @@ static void draw_sysmenu(void) {
             gfx_ellipse(icon_x, icon_y - 8, 16, 16, RGB(235, 235, 235), 255);
             gfx_fill_rect(icon_x + 7, icon_y - 2, 2, 6, RGB(48, 48, 48));
             gfx_fill_rect(icon_x + 7, icon_y - 5, 2, 2, RGB(48, 48, 48));
+        } else if (i == 3) {
+            gfx_round_frame(icon_x, icon_y - 8, 11, 16, 2, C_WHITE, RGB(48, 48, 48));
+            gfx_fill_rect(icon_x + 6, icon_y - 1, 15, 2, C_WHITE);
+            gfx_line16((icon_x+16)*16, (icon_y-5)*16, (icon_x+21)*16, icon_y*16, 24, C_WHITE, 255);
+            gfx_line16((icon_x+21)*16, icon_y*16, (icon_x+16)*16, (icon_y+5)*16, 24, C_WHITE, 255);
         } else {                                                            /* питание */
             gfx_ellipse(icon_x, icon_y - 7, 16, 16, RGB(235, 235, 235), 255);
             gfx_ellipse(icon_x + 2, icon_y - 5, 12, 12, RGB(48, 48, 48), 255);
@@ -1300,7 +1305,7 @@ static int drag_dx, drag_dy, drag_px, drag_py;
 static unsigned last_click_t;                                     /* двойной щелчок по заголовку */
 static int last_click_win = -1, last_click_x, last_click_y;
 static unsigned prev_buttons;
-static bool quit;
+static bool quit, logout_requested;
 
 static int window_at(int px, int py) {
     if (overview_open) return -1;
@@ -1421,7 +1426,8 @@ static void mouse_down(int x, int y) {
             close_sysmenu();
             if (it == 0) launch(APP_DISPLAY);
             else if (it == 1) launch(APP_ABOUT);
-            else if (it == 3) quit = true;
+            else if (it == 3) { logout_requested = true; quit = true; }
+            else if (it == 4) quit = true;
             return;
         }
         if (it == -1) return;                                     /* по меню, мимо пунктов */
@@ -1593,6 +1599,123 @@ static void mouse_up(int x, int y) {
 
 /* ------------------------------------------------------------ главный цикл */
 
+/* No desktop actions or client messages are dispatched until login succeeds. */
+static void login_wipe(char *p, unsigned n) {
+    volatile char *v = p;
+    while (n--) *v++ = 0;
+}
+
+static bool desktop_login(void) {
+    if (account(4, NULL, NULL) >= 0) return true;
+    char names[16][24], password[128] = {0}, confirm[128] = {0};
+    int count = 0, selected = 0, len = 0, stage = 0;
+    int setup = account(0, NULL, NULL);
+    const char *error = "";
+    if (setup < 0) error = "Cannot read accounts. Press Escape to exit.";
+    while (count < 16 && account_list(names[count], count) == 0) count++;
+    if (!count) error = "No accounts available. Press Escape to exit.";
+    unsigned buttons = prev_buttons;
+    int field = 1; /* Account, password, submit; password starts focused. */
+    unsigned caret_since = ticks();
+    for (;;) {
+        if (gfx_check_mode()) {
+            SW = gfx_w; SH = gfx_h; back = gfx_buf;
+            make_wallpaper(); dock_build();
+        }
+        int x = (SW - 352) / 2, y = (SH - 300) / 2;
+        gfx_no_clip();
+        memcpy(back, wallpaper, SW * SH * 4);
+        gfx_fill_rect_a(0, 0, SW, SH, C_BLACK, 95);
+        gfx_round_rect(x, y, 352, 300, 18, RGB(42, 39, 45));
+        const char *title = setup > 0 ? (stage ? "Confirm password" : "Set a password") : "Sign in";
+        text_draw(FONT_UI_BOLD, 24, x+28, y+24, title, C_WHITE);
+        color_t accent = RGB(235, 103, 58), input = RGB(62, 58, 66);
+        gfx_round_rect(x+28, y+78, 296, 44, 8, field == 0 ? accent : input);
+        gfx_round_rect(x+30, y+80, 292, 40, 6, input);
+        if (count) {
+            int tw=text_width(FONT_UI_MEDIUM,17,names[selected]);
+            text_draw(FONT_UI_MEDIUM,17,x+176-tw/2,y+89,names[selected],C_WHITE);
+        }
+        if (count > 1 && !setup) {
+            text_draw(FONT_UI,19,x+42,y+88,"<",RGB(205,200,210));
+            text_draw(FONT_UI,19,x+299,y+88,">",RGB(205,200,210));
+        }
+        gfx_round_rect(x+28,y+142,296,46,8,field == 1 ? accent : input);
+        gfx_round_rect(x+30,y+144,292,42,6,input);
+        int chars=0;
+        for (int i=0;i<len;i++) if (((unsigned char)password[i]&0xc0)!=0x80) chars++;
+        int visible=chars < 26 ? chars : 26;
+        if (!len) text_draw(FONT_UI,15,x+42,y+155,"Password",RGB(165,158,171));
+        for (int i=0;i<visible;i++) gfx_ellipse(x+44+i*10,y+162,5,5,C_WHITE,255);
+        if (field == 1 && (ticks()-caret_since)%1000 < 550)
+            gfx_fill_rect(x+42+visible*10,y+154,2,22,C_WHITE);
+        text_draw_fit(FONT_UI,12,x+28,y+199,error,296,RGB(255,170,155));
+        gfx_round_rect(x+28,y+234,296,42,8,field == 2 ? C_WHITE : accent);
+        gfx_round_rect(x+30,y+236,292,38,6,accent);
+        const char *button=setup > 0 ? "Continue" : "Sign in";
+        int bw=text_width(FONT_UI_MEDIUM,16,button);
+        text_draw(FONT_UI_MEDIUM,16,x+176-bw/2,y+245,button,C_WHITE);
+        struct mouse ms; mouse_get(&ms);
+        mouse_x = ms.x; mouse_y = ms.y;
+        if (!hwcur) gfx_cursor_draw(mouse_x, mouse_y);
+        gfx_flip();
+        ttymode(TTY_RAW | TTY_NONBLOCK | TTY_NOSIG);
+        int k = readkey();
+        if ((ms.buttons & MOUSE_LEFT) && !(buttons & MOUSE_LEFT)) {
+            field = -1;
+            if (ms.x >= x+28 && ms.x < x+324) {
+                if (ms.y >= y+78 && ms.y < y+122) {
+                    field = 0;
+                    if (count > 1 && !setup) k = ms.x < x+176 ? KEY_UP : KEY_DOWN;
+                }
+                if (ms.y >= y+142 && ms.y < y+188) { field=1; caret_since=ticks(); }
+                if (ms.y >= y+234 && ms.y < y+276) { field=2; k='\n'; }
+            }
+        }
+        buttons = ms.buttons;
+        if (k == 27) { login_wipe(password,sizeof(password)); login_wipe(confirm,sizeof(confirm)); return false; }
+        if (setup >= 0 && count) {
+            if (k == 9) {
+                field = (field+1)%3; caret_since=ticks();
+            } else if (setup == 0 && (k == KEY_UP || k == KEY_DOWN)) {
+                selected = (selected + (k == KEY_UP ? count-1 : 1)) % count;
+                login_wipe(password,sizeof(password)); len = 0; error = "";
+            } else if ((k == '\n' || k == '\r') && field >= 0) {
+                if (field == 0) { field=1; caret_since=ticks(); continue; }
+                field=1; caret_since=ticks();
+                if (setup > 0 && !stage) {
+                    if (!len) error = "Enter a password.";
+                    else { memcpy(confirm,password,sizeof(confirm)); login_wipe(password,sizeof(password)); len=0; stage=1; error=""; }
+                } else if (setup > 0 && strcmp(confirm,password)) {
+                    error="Passwords do not match. Try again."; stage=0;
+                    login_wipe(password,sizeof(password)); login_wipe(confirm,sizeof(confirm)); len=0;
+                } else {
+                    int result = setup > 0 ? account(3,"root",password) : 0;
+                    if (!result) result=account(1,names[selected],password);
+                    login_wipe(password,sizeof(password)); login_wipe(confirm,sizeof(confirm)); len=0;
+                    if (!result) return true;
+                    error=setup > 0 ? "Could not set password. Try again." : "Incorrect password. Try again.";
+                    setup=account(0,NULL,NULL); stage=0;
+                }
+            } else if (field == 1 && (k == 8 || k == 127)) {
+                caret_since=ticks();
+                if (len) {
+                    do { len--; } while (len && ((unsigned char)password[len] & 0xc0) == 0x80);
+                    password[len]=0;
+                }
+            } else if (field == 1 && ((k >= 32 && k < 127) || (k >= 0x400 && k <= 0xffff))) {
+                caret_since=ticks();
+                char encoded[4]; int bytes=utf8_put(encoded,k);
+                if (bytes > 0 && len+bytes < (int)sizeof(password)) {
+                    memcpy(password+len,encoded,bytes); len+=bytes; password[len]=0;
+                }
+            }
+        }
+        ttymode(TTY_RAW | TTY_NONBLOCK | TTY_NOSIG);
+        sleep_ms(20);
+    }
+}
+
 int main(void) {
     if (service_find("desktop")) { dprintf(STDERR, "desktop: already running\n"); return 1; }
     int r = gfx_open();
@@ -1611,6 +1734,15 @@ int main(void) {
     kb_lang = kblayout(-1);
     int cw, ch, want_hw = 0;
     if (gfx_load_config(&cw, &ch, &want_hw) == 0 && want_hw) set_hw_cursor(true);
+start_session:
+    quit = false; logout_requested = false;
+    if (!desktop_login()) {
+        if (hwcur) gfx_hw_cursor(0);
+        gfx_close();
+        return 1;
+    }
+    mouse_get(&ms);
+    prev_buttons = ms.buttons;
     add_dirty(0, 0, SW, SH);
     flush();
 
@@ -1665,6 +1797,14 @@ int main(void) {
         flush();
     }
 
+    /* Include terminal shells and background children, even without windows. */
+    struct proc_info pi[128]; bool member[128] = {0};
+    int n = ps(pi,128), self = getpid();
+    for (int pass=0;pass<n;pass++) for (int i=0;i<n;i++) {
+        if (pi[i].ppid == (unsigned)self) member[i]=true;
+        for (int j=0;j<n;j++) if (member[j] && pi[i].ppid==pi[j].pid) member[i]=true;
+    }
+
     /* выход: попросить программы закрыться, подождать, остальных — kill */
     int owners[MAXWIN], n_owners = 0;
     for (int i = 0; i < MAXWIN; i++) {
@@ -1677,6 +1817,22 @@ int main(void) {
     for (int j = 0; j < n_owners; j++) kill(owners[j]);
     for (int i = 0; i < MAXWIN; i++) if (wins[i].used) shm_unmap(wins[i].px);
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    if (logout_requested) {
+        for (int i=n-1;i>=0;i--) if (member[i]) kill(pi[i].pid);
+        while (waitpid(-1,NULL,WNOHANG)>0) {}
+        account(6,NULL,NULL);
+        memset(wins,0,sizeof(wins)); nz=0; focus=-1; cascade=0;
+        drag=capture=resizing=-1;
+        hover_top=hover_dock=hover_sm=hover_ov=-1;
+        hover_close=hover_min=hover_max=-1; last_click_win=-1;
+        sysmenu_open=false; overview_open=false;
+        free(overview_bg); overview_bg=NULL;
+        search_len=0; search[0]=0;
+        ndirty=0; dock_build();
+        struct msg stale;
+        while (msg_recv(&stale,0)==0) {}
+        goto start_session;
+    }
     if (hwcur) gfx_hw_cursor(0);
     gfx_close();
     printf(ANSI_CLEAR "Desktop closed.\n");
