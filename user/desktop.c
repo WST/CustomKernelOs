@@ -28,6 +28,7 @@
  * В обзоре (Activities) можно сразу печатать — это поиск программ, в том
  * числе по-русски. Справа в панели — раскладка клавиатуры (en/ru). */
 #include "win.h"
+#include "img.h"
 
 static int iabs(int v) { return v < 0 ? -v : v; }
 
@@ -403,6 +404,33 @@ static color_t lerp3(int t) {                                      /* t 0..1023:
     return gfx_mix(stops[seg], stops[seg + 1], f);
 }
 
+static void custom_wallpaper(void) {
+    char name[128];
+    strcpy(name,"/usr/share/wallpapers/moon.jpg");
+    int fd=open("/etc/wallpaper",O_READ);
+    if(fd>=0) {
+        char configured[128]; int n=read(fd,configured,sizeof(configured)-1); close(fd);
+        if(n>0) { configured[n]=0; strcpy(name,configured); }
+    }
+    fd=open(name,O_READ); if(fd<0) return;
+    int len=lseek(fd,0,SEEK_END); lseek(fd,0,SEEK_SET);
+    if(len<=0 || len>8*1024*1024) { close(fd); return; }
+    unsigned char *data=malloc(len); img im;
+    int ok=data && read(fd,data,len)==len && img_decode(data,len,&im,2048)==0;
+    close(fd); free(data); if(!ok) return;
+    /* Fill the screen, keeping the aspect ratio and cropping centrally. */
+    int cw=im.w, ch=im.h;
+    if(im.w*SH>im.h*SW) cw=im.h*SW/SH;
+    else ch=im.w*SH/SW;
+    if(cw<1) cw=1;
+    if(ch<1) ch=1;
+    for(int y=0;y<SH;y++) for(int x=0;x<SW;x++) {
+        unsigned c=im.px[((im.h-ch)/2+y*ch/SH)*im.w+(im.w-cw)/2+x*cw/SW];
+        wallpaper[y*SW+x]=gfx_mix(RGB(40,30,40),c,c>>24);
+    }
+    img_free(&im);
+}
+
 static void make_wallpaper(void) {
     wallpaper = malloc(SW * SH * 4);
     color_t *save = gfx_buf;
@@ -442,6 +470,7 @@ static void make_wallpaper(void) {
     /* подпись в углу */
     const char *s = "MyOS";
     text_draw(FONT_UI_BOLD, 30, SW - text_width(FONT_UI_BOLD, 30, s) - 34, SH - 76, s, RGB(255, 220, 200));
+    custom_wallpaper();
     gfx_buf = save; gfx_w = sw; gfx_h = sh;
 }
 
@@ -625,7 +654,7 @@ static void draw_tip(void) {
 /* ------------------------------------------------------------ системное меню */
 
 #define SM_W 260
-static const char *sm_items[] = { "Display Settings", "About MyOS", "", "Log Out", "Close Desktop" };
+static const char *sm_items[] = { "Settings", "About MyOS", "", "Log Out", "Close Desktop" };
 #define SM_N 5
 static int hover_sm = -1;
 
@@ -1305,6 +1334,12 @@ static void handle_msg(struct msg *m) {
         request_buffer(m->a);                                     /* пока ждали, рамку могли ещё растянуть */
         return;
     }
+    case WM_WALLPAPER:
+        free(wallpaper);
+        make_wallpaper();
+        if (overview_bg) { free(overview_bg); overview_bg = NULL; overview_open = false; }
+        add_dirty(0, 0, SW, SH);
+        return;
     case WM_DISPLAY:                                              /* Display / mode: курсор */
         set_hw_cursor(m->a != 0);
         return;
@@ -1490,7 +1525,7 @@ static void mouse_down(int x, int y) {
         int it = sysmenu_at(x, y);
         if (it >= 0) {
             close_sysmenu();
-            if (it == 0) launch(app_by_prog("display"));
+            if (it == 0) launch(app_by_prog("settings"));
             else if (it == 1) launch(app_by_prog("about"));
             else if (it == 3) { logout_requested = true; quit = true; }
             else if (it == 4) quit = true;
