@@ -127,12 +127,39 @@ static void add_include(char *path) {
 
 static void usage(void) {
     dprintf(STDERR,
-        "usage: cc [-o out] [-E] [-I dir] [-nostdlib] file.c...\n"
-        "  -o out      name of the program (default: first file without .c)\n"
+        "usage: cc [-c] [-o out] [-E] [-I dir] [-nostdlib] file.c... file.o...\n"
+        "  -c          only compile: each file.c -> file.o (ELF relocatable object)\n"
+        "  -o out      name of the program or, with -c and one file, of the object\n"
+        "              (default: first file without .c or .o)\n"
         "  -E          only preprocess, print the result\n"
         "  -I dir      also look for #include files in dir\n"
-        "  -nostdlib   do not add /lib/libc.c, gfx.c, vec.c, font.c, win.c\n");
+        "  -nostdlib   do not add /lib/libc.c, gfx.c, vec.c, font.c, win.c\n"
+        "Objects (.o) may come from cc -c or from gcc -m32 -fno-pic.\n");
     exit(2);
+}
+
+static bool has_suffix(const char *s, const char *suf) {
+    int n = strlen(s), m = strlen(suf);
+    return n > m && !strcmp(s + n - m, suf);
+}
+
+static Obj *compile(const char *path) {
+    Token *tok = tokenize_file(path);
+    if (!tok) error("%s: no such file", path);
+    return parse(preprocess(tok));
+}
+
+static char **roots;
+static int n_roots, cap_roots;
+
+static void add_root(char *name) {
+    if (n_roots == cap_roots) {
+        cap_roots = cap_roots ? cap_roots * 2 : 64;
+        char **p = xcalloc(sizeof(char *) * cap_roots);
+        if (roots) memcpy(p, roots, sizeof(char *) * n_roots);
+        roots = p;
+    }
+    roots[n_roots++] = name;
 }
 
 static void print_tokens(Token *tok) {
@@ -146,23 +173,25 @@ static void print_tokens(Token *tok) {
     dprintf(STDOUT, "\n");
 }
 
-/* последний компонент пути без .c */
-static char *default_output(const char *src) {
+/* последний компонент пути без .c / .o, плюс ext */
+static char *default_output(const char *src, const char *ext) {
     const char *b = strrchr(src, '/');
     b = b ? b + 1 : src;
     int n = strlen(b);
-    if (n > 2 && b[n - 2] == '.' && b[n - 1] == 'c') n -= 2;
-    if (n == 0) return "a.out";
-    return strndup2(b, n);
+    if (n > 2 && b[n - 2] == '.' && (b[n - 1] == 'c' || b[n - 1] == 'o')) n -= 2;
+    if (n == 0) return *ext ? "a.o" : "a.out";
+    return format("%s%s", strndup2(b, n), ext);
 }
 
 int main(int argc, char **argv) {
-    char *out = NULL;
-    bool opt_E = false, nostdlib = false;
-    char **inputs = xcalloc(sizeof(char *) * (argc + 1));
-    int n_inputs = 0;
+    char *out = NULL, *first = NULL;
+    bool opt_E = false, opt_c = false, nostdlib = false;
+    char **srcs = xcalloc(sizeof(char *) * (argc + 8));
+    char **objs = xcalloc(sizeof(char *) * (argc + 1));
+    int n_srcs = 0, n_objs = 0;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "-o") && i + 1 < argc) { out = argv[++i]; continue; }
+        if (!strcmp(argv[i], "-c")) { opt_c = true; continue; }
         if (!strcmp(argv[i], "-E")) { opt_E = true; continue; }
         if (!strcmp(argv[i], "-linux")) { opt_linux = true; continue; }
         if (!strcmp(argv[i], "-nostdlib")) { nostdlib = true; continue; }
@@ -170,34 +199,64 @@ int main(int argc, char **argv) {
         if (!strcmp(argv[i], "-I") && i + 1 < argc) { add_include(argv[++i]); continue; }
         if (!strncmp(argv[i], "-I", 2) && argv[i][2]) { add_include(argv[i] + 2); continue; }
         if (argv[i][0] == '-') usage();
-        inputs[n_inputs++] = argv[i];
+        if (!first) first = argv[i];
+        if (has_suffix(argv[i], ".o")) objs[n_objs++] = argv[i];
+        else srcs[n_srcs++] = argv[i];
     }
-    if (!n_inputs) usage();
+    if (!first) usage();
     add_include(format("%s/include", base_dir));
 
-    if (!nostdlib && !opt_E) {
-        inputs[n_inputs++] = format("%s/lib/libc.c", base_dir);
+    if (opt_E) {
+        for (int i = 0; i < n_srcs; i++) {
+            Token *tok = tokenize_file(srcs[i]);
+            if (!tok) error("%s: no such file", srcs[i]);
+            print_tokens(preprocess(tok));
+        }
+        return 0;
+    }
+
+    /* -c: каждый .c — в свой .o, без библиотеки и без компоновки */
+    if (opt_c) {
+        if (!n_srcs) error("-c: no C files to compile");
+        if (out && n_srcs > 1) error("-o with -c needs exactly one C file");
+        for (int i = 0; i < n_srcs; i++)
+            obj_write(codegen(compile(srcs[i]), srcs[i], NULL, 0, true), out ? out : default_output(srcs[i], ".o"));
+        return 0;
+    }
+
+    /* Все .c (вместе с библиотекой) компилируются в один объект: из него сразу
+     * выбрасывается всё, до чего не дойти от main и от ссылок из файлов .o. */
+    ObjFile **files = xcalloc(sizeof(ObjFile *) * (n_objs + 1));
+    int n_files = 1;
+    add_root("__libc_start");
+    add_root("main");
+    add_root("exit");
+    for (int i = 0; i < n_objs; i++) {
+        ObjFile *f = obj_read(objs[i]);
+        if (!f) error("%s: no such file", objs[i]);
+        files[n_files++] = f;
+        for (int j = 0; j < f->n_syms; j++)
+            if (f->syms[j].bind != BIND_LOCAL && f->syms[j].sec == SYM_UNDEF) add_root(f->syms[j].name);
+    }
+    if (!nostdlib) {
+        srcs[n_srcs++] = format("%s/lib/libc.c", base_dir);
         static const char *extra[] = { "gfx.c", "vec.c", "font.c", "win.c" };      /* есть на диске — добавляем */
         for (int k = 0; k < 4; k++) {
             char *g = format("%s/lib/%s", base_dir, extra[k]);
             int len;
             char *s = read_file(g, &len);
-            if (s) { free(s); inputs[n_inputs++] = g; }
+            if (s) { free(s); srcs[n_srcs++] = g; }
         }
     }
-    if (!out) out = default_output(inputs[0]);
+    if (!out) out = default_output(first, "");
 
     Obj *prog = NULL, **tail = &prog;
-    for (int i = 0; i < n_inputs; i++) {
-        Token *tok = tokenize_file(inputs[i]);
-        if (!tok) error("%s: no such file", inputs[i]);
-        tok = preprocess(tok);
-        if (opt_E) { print_tokens(tok); continue; }
-        Obj *objs = parse(tok);
-        *tail = objs;
+    for (int i = 0; i < n_srcs; i++) {
+        *tail = compile(srcs[i]);
         while (*tail) tail = &(*tail)->next;
     }
-    if (opt_E) return 0;
-    codegen(prog, out);
+    if (prog) files[0] = codegen(prog, "", roots, n_roots, false);
+    if (files[0]) link_program(files, n_files, out);
+    else link_program(files + 1, n_files - 1, out);
     return 0;
 }
