@@ -35,6 +35,27 @@ static color_t cur_fg, cur_bg;
 static bool bold, inverse;
 static int  top_m, bot_m;                   /* область прокрутки (строки, включительно) */
 static int  master = -1, sh_pid, reader_pid;
+static int sel_anchor, sel_end;
+static bool selecting;
+static char *paste_buffer;
+static int paste_length, paste_offset;
+static unsigned paste_next;
+static void paste_step(void) {
+    if (!paste_buffer || (int)(ticks() - paste_next) < 0) return;
+    int n = paste_length - paste_offset;
+    if (n > 16) n = 16;
+    int written = n ? write(master, paste_buffer + paste_offset, n) : 0;
+    if (written > 0) paste_offset += written;
+    if (written <= 0 || paste_offset >= paste_length) {
+        free(paste_buffer); paste_buffer = NULL;
+    }
+    paste_next = ticks() + 10;
+}
+static void selection_clear(void) {
+    if (sel_anchor != sel_end)
+        for (int r = 0; r < rows; r++) row_dirty[r] = true;
+    sel_anchor = sel_end = 0; selecting = false;
+}
 
 /* палитра Tango, как в терминале Ubuntu; фон — фирменный баклажановый */
 static const color_t ansi[8] = {
@@ -192,6 +213,7 @@ static void esc_final(char c) {
 }
 
 static void term_write(const char *s, int n) {
+    selection_clear();
     for (int i = 0; i < n; i++) {
         unsigned char c = s[i];
         if (esc_state == 1) {
@@ -242,6 +264,9 @@ static void draw_cell(int r, int c, bool cursor) {
     struct cell *p = at(r, c);
     int x = PAD + c * CW, y = PAD + r * CH;
     color_t fg = p->fg, bg = p->bg;
+    int lo = sel_anchor < sel_end ? sel_anchor : sel_end;
+    int hi = sel_anchor > sel_end ? sel_anchor : sel_end;
+    if (r * cols + c >= lo && r * cols + c < hi) { fg = UI_TEXT; bg = UI_SELECT; }
     if (cursor && focused) { color_t t = fg; fg = bg; bg = t; if (fg == bg) { fg = DEF_BG; bg = DEF_FG; } }
     char s[4];
     int n;
@@ -269,6 +294,7 @@ static void draw_rows(void) {
 
 /* окно нового размера: сетка заново, содержимое — сколько влезет (курсор остаётся виден) */
 static void set_grid(int nc, int nr) {
+    selection_clear();
     if (nc < 10) nc = 10;
     if (nr < 3) nr = 3;
     struct cell *g = malloc(nc * nr * sizeof(struct cell));
@@ -310,6 +336,49 @@ static void send_bytes(const char *s, int n) { if (master >= 0) write(master, s,
 static void send_str(const char *s) { send_bytes(s, strlen(s)); }
 
 static void on_key(int k) {
+    if (k == KEY_COPY) {
+        int lo = sel_anchor < sel_end ? sel_anchor : sel_end;
+        int hi = sel_anchor > sel_end ? sel_anchor : sel_end;
+        if (lo == hi) return;
+        char *s = malloc(CLIPBOARD_MAX);
+        if (!s) return;
+        int n = 0;
+        for (int r = lo / cols; r <= (hi - 1) / cols; r++) {
+            int start = r == lo / cols ? lo % cols : 0;
+            int end = hi - r * cols;
+            if (end > cols) end = cols;
+            while (end > start && at(r, end - 1)->ch == ' ') end--;
+            for (int c = start; c < end; c++) {
+                char u[4]; int cp = at(r, c)->ch;
+                int count = utf8_put(u, cp & 0x10000 ? cp & 255 : cp);
+                if (n + count > CLIPBOARD_MAX) { free(s); return; }
+                memcpy(s + n, u, count); n += count;
+            }
+            if (r < (hi - 1) / cols) {
+                if (n == CLIPBOARD_MAX) { free(s); return; }
+                s[n++] = '\n';
+            }
+        }
+        clipboard_set(s, n); free(s); return;
+    }
+    if (k == KEY_PASTE || k == (KEY_INS | KEY_SHIFT)) {
+        char *s = malloc(CLIPBOARD_MAX);
+        if (!s) return;
+        int n = clipboard_get(s, CLIPBOARD_MAX), out = 0;
+        /* Do not inject terminal escape/control sequences from the clipboard.
+         * Newlines are ordinary Enter presses, so pasted commands may execute. */
+        for (int i = 0; i < n; i++) {
+            unsigned char ch = s[i];
+            if (ch == '\r' && i + 1 < n && s[i + 1] == '\n') continue;
+            if (ch == '\n') ch = '\r';
+            if (ch == '\r' || ch == '\t' || (ch >= 32 && ch != 127)) s[out++] = ch;
+        }
+        free(paste_buffer);
+        paste_buffer = s; paste_length = out; paste_offset = 0; paste_next = ticks();
+        selection_clear(); return;
+    }
+    k &= ~KEY_SHIFT;
+    free(paste_buffer); paste_buffer = NULL; /* typing cancels the remaining paste */
     switch (k) {
     case KEY_UP:    send_str("\x1b[A"); return;
     case KEY_DOWN:  send_str("\x1b[B"); return;
@@ -380,7 +449,20 @@ static bool handle(struct event *e) {
     switch (e->type) {
     case EV_CLOSE: return false;
     case EV_KEY: on_key(e->key); break;
-    case EV_FOCUS: focused = e->key != 0; row_dirty[cy] = true; break;
+    case EV_FOCUS: focused = e->key != 0; row_dirty[cy] = true; if (!focused) selecting = false; break;
+    case EV_MOUSE_DOWN:
+        if (!(e->buttons & MOUSE_LEFT)) break;
+        selection_clear(); selecting = true;
+        sel_anchor = sel_end = clampi((e->y - PAD) / CH, 0, rows - 1) * cols + clampi((e->x - PAD) / CW, 0, cols);
+        break;
+    case EV_MOUSE_MOVE:
+    case EV_MOUSE_UP:
+        if (selecting) {
+            sel_end = clampi((e->y - PAD) / CH, 0, rows - 1) * cols + clampi((e->x - PAD + CW / 2) / CW, 0, cols);
+            for (int r = 0; r < rows; r++) row_dirty[r] = true;
+        }
+        if (e->type == EV_MOUSE_UP) selecting = false;
+        break;
     case EV_RESIZE:
         set_grid((e->x - 2 * PAD) / CW, (e->y - 2 * PAD) / CH);
         redraw_all();
@@ -405,7 +487,7 @@ int main(void) {
 
     struct event e;
     bool run = true;
-    while (run && win_event(&e, -1)) {
+    while (run && win_event(&e, paste_buffer ? 10 : -1)) {
         run = handle(&e);
         /* всё, что уже пришло (поток вывода), — разобрать и нарисовать одним кадром */
         for (int i = 0; run && i < 200; i++) {
@@ -414,8 +496,10 @@ int main(void) {
             run = handle(&e);
         }
         draw_rows();
+        if (run) paste_step();
     }
     kill_tree(sh_pid);
+    free(paste_buffer);
     kill(reader_pid);
     if (master >= 0) close(master);
     win_destroy(win);

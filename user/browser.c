@@ -133,6 +133,7 @@ static int doc_h, scroll;
 struct input { int form; char name[40]; char value[128]; char type; int item; int node; };   /* type: t текст, s кнопка, h скрытое */
 static struct input inputs[MAX_INPUTS];
 static int n_inputs, focus_input = -1;
+static bool input_all;
 static char form_action[MAX_FORMS][256];
 static int form_node[MAX_FORMS];
 static int n_forms, cur_form = -1;
@@ -148,6 +149,9 @@ static char addr[512];             /* текст в строке адреса */
 static bool editing_addr;
 static int addr_cur;
 static bool addr_all;               /* весь адрес выделен: набор заменит его */
+static int sel_item = -1, sel_byte, sel_end_item = -1, sel_end_byte;
+static bool text_drag, text_dragged;
+static int text_down_x, text_down_y;
 
 static char *history[32];
 static int n_hist, hist_pos = -1;
@@ -703,6 +707,7 @@ struct frame {
     const struct dom_style *prev, *s;
     int kind, left, right, box, inline_bg, cur_bg, item_start;
     int fill_x, fill_start, fill_lines, flex_item, promoted;
+    int flex_x, flex_y, flex_bottom, flex_count, column;
 };
 static struct frame frames[256];
 
@@ -772,7 +777,7 @@ static void promote(struct frame *f) {
     }
 }
 
-static void style_open(struct frame *f, const struct dom_style *s, const char *tag) {
+static void style_open(struct frame *f, const struct dom_style *s, const char *tag, int id) {
     f->prev = cs;
     f->s = s;
     f->left = left;
@@ -784,6 +789,39 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
     f->flex_item = cs->flex_row;
     f->promoted = 0;
     f->kind = display_kind(s);
+    f->column = 0;
+    if (cs->flex_row && f > frames) {
+        struct frame *p = f - 1;
+        int avail = right - left;
+        int gap = clampi(cs->column_gap, 0, avail / 2);
+        int anonymous = lx > left && p->flex_x == left;
+        if (anonymous) {
+            p->flex_x = lx + gap;
+            const struct dom_style *saved = cs;
+            struct dom_style text_style = *cs;
+            text_style.align = 0; cs = &text_style;
+            finish_line(); cs = saved;
+            if (ly > p->flex_bottom) p->flex_bottom = ly;
+        } else finish_line();
+        int count = p->flex_count > 0 ? p->flex_count : 1;
+        int basis = cs->flex_wrap ? avail : avail - gap * (count - 1);
+        if (basis < 24) basis = 24;
+        int width = s->width >= 0 ? (s->width_pct ? basis * s->width / 100 : s->width) :
+                    ((anonymous ? right - p->flex_x : avail) - gap * (count - 1)) / count;
+        if (!s->border_box && s->width >= 0) width += s->padding[1] + s->padding[3] + s->border[1] + s->border[3];
+        width = clampi(width, 24, avail > 24 ? avail : 24);
+        if (cs->flex_wrap && p->flex_x > left && p->flex_x + width > right + 1) {
+            p->flex_x = left;
+            p->flex_y = p->flex_bottom + clampi(cs->row_gap, 0, 200);
+        }
+        left = p->flex_x;
+        right = left + width;
+        lx = left; ly = p->flex_y;
+        gap_pending = 0;
+        p->flex_x = right + gap;
+        f->column = 1;
+        f->kind = FK_BLOCK;
+    }
     if (f->kind == FK_BLOCK) promote(f);
     bool root = !strcmp(tag, "html") || !strcmp(tag, "body");
     switch (f->kind) {
@@ -795,19 +833,21 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         int mr = s->margin[1] == CSS_AUTO ? 0 : clampi(s->margin[1], -(view_w() - right), 200);
         int bx = left + ml, bxr = right - mr;
         int want = -1;                                     /* ширина: max-width всегда, width — у колонки по центру */
-        bool autom = s->margin[1] == CSS_AUTO || s->margin[3] == CSS_AUTO;
-        if (s->width >= 0 && autom) want = s->width_pct ? avail * s->width / 100 : s->width;
+        if (s->width >= 0 && !f->column) {
+            want = s->width_pct ? avail * s->width / 100 : s->width;
+            if (!s->border_box) want += s->padding[1] + s->padding[3] + s->border[1] + s->border[3];
+        }
         if (s->max_width >= 0) {
             int mw = s->max_width_pct ? avail * s->max_width / 100 : s->max_width;
             if (want < 0 || mw < want) want = mw;
         }
-        if (want >= 80 && want < bxr - bx) {
+        if (want >= 0 && want < bxr - bx) {
             int extra = bxr - bx - want;
             if (s->margin[1] == CSS_AUTO && s->margin[3] == CSS_AUTO) bx += extra / 2;
             else if (s->margin[3] == CSS_AUTO) bx += extra;
             bxr = bx + want;
         }
-        if (bxr - bx < 80) { bx = left; bxr = right; }
+        if (bxr < bx) bxr = bx;
         bool painted = s->bg >= 0 || has_border(s) || s->bg_image;
         if (root && s->bg >= 0 && page_bg < 0) { page_bg = s->bg; painted = has_border(s); }   /* фон страницы */
         int pt = s->padding[0] + s->border[0];
@@ -858,6 +898,9 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         if (s->bg >= 0 && s->bg != page_bg) inline_bg = s->bg;
         break;
     }
+    f->flex_x = left;
+    f->flex_y = f->flex_bottom = ly;
+    f->flex_count = s->flex_row ? dom_layout_children(id) : 0;
 }
 
 /* блок закрылся: высота его фона; картинка фона со светлым текстом поверх — тёмный фон */
@@ -929,10 +972,20 @@ static void style_close(struct frame *f) {
     }
     inline_bg = f->inline_bg;
     cur_bg = f->cur_bg;
+    if (f->column) {
+        struct frame *p = f - 1;
+        if (ly > p->flex_bottom) p->flex_bottom = ly;
+        ly = p->flex_bottom;
+        left = f->left; right = f->right; lx = left;
+        gap_pending = 0;
+        line_start = n_items;
+    }
 }
 
 /* разобрать HTML и разложить */
 static void layout_html(const char *s, int n, bool plain) {
+    sel_item = sel_end_item = -1; text_drag = false;
+    input_all = false;
     n_items = 0; n_links = 0; n_inputs = 0; n_forms = 0; cur_form = -1; n_boxes = 0;
     focus_input = -1;
     left = MARGIN - 8; right = view_w() - MARGIN + 8;      /* ещё 8 точек — отступ <body> по умолчанию */
@@ -987,7 +1040,7 @@ static void layout_html(const char *s, int n, bool plain) {
                     node_stack[node_sp] = id >= 0 ? id : node_sp ? node_stack[node_sp - 1] : -1;
                     node_sp++;
                     f->s = NULL;
-                    if (ds) { style_open(f, ds, nm); cs = ds; }
+                    if (ds) { style_open(f, ds, nm, id); cs = ds; }
                     if (!in_skip) handle_tag(s + i + 1, j - i - 1);
                 } else if (!in_skip) {                     /* <img>, <input>, <br>... */
                     bool blk = ds && display_kind(ds) == FK_BLOCK && strcmp(nm, "hr");
@@ -1142,9 +1195,50 @@ static void draw_status(void) {
 }
 
 static void draw_img(struct item *it, int y);
+static void set_status(const char *s);
+
+static bool page_selection(void) {
+    return sel_item >= 0 && sel_end_item >= 0 &&
+        (sel_item != sel_end_item || sel_byte != sel_end_byte);
+}
+static void page_bounds(int *i0, int *b0, int *i1, int *b1) {
+    bool forward = sel_item < sel_end_item || (sel_item == sel_end_item && sel_byte <= sel_end_byte);
+    *i0 = forward ? sel_item : sel_end_item; *b0 = forward ? sel_byte : sel_end_byte;
+    *i1 = forward ? sel_end_item : sel_item; *b1 = forward ? sel_end_byte : sel_byte;
+}
+static int item_text_width(struct item *it, int bytes) {
+    if (it->fsize) return text_width_n(it->font, it->fsize, it->text, bytes);
+    return u8count(it->text, bytes) * 8 * (it->scale > 1 ? it->scale : 1);
+}
+static void copy_page_selection(void) {
+    if (!page_selection()) return;
+    int i0, b0, i1, b1, n = 0, previous = -1;
+    page_bounds(&i0, &b0, &i1, &b1);
+    char *s = malloc(CLIPBOARD_MAX);
+    if (!s) return;
+    for (int i = i0; i <= i1; i++) {
+        struct item *it = &items[i];
+        if (it->kind != IT_TEXT || !it->text) continue;
+        int start = i == i0 ? b0 : 0, end = i == i1 ? b1 : strlen(it->text);
+        if (end <= start) continue;
+        bool newline = previous >= 0 && (it->y >= items[previous].y + items[previous].h || it->y + it->h <= items[previous].y);
+        int gap = previous >= 0 && (newline || it->x > items[previous].x + item_text_width(&items[previous], strlen(items[previous].text)));
+        if (n + gap + end - start > CLIPBOARD_MAX) { free(s); set_status("Selection exceeds 64 KiB"); return; }
+        if (gap) s[n++] = newline ? '\n' : ' ';
+        memcpy(s + n, it->text + start, end - start); n += end - start; previous = i;
+    }
+    clipboard_set(s, n); free(s);
+}
 
 static void draw_page(void) {
     gfx_fill_rect(0, VIEW_Y, W, VIEW_H, page_bg >= 0 ? (color_t)page_bg : C_WHITE);
+    if (page_is_dom && !n_items && dom_module_scripts() && dom_last_error()[0]) {
+        gfx_fill_rect(12, VIEW_Y + 12, W - 36, 124, RGB(245, 245, 245));
+        gfx_text(24, VIEW_Y + 24, "The module application could not be started.", UI_DARK, TRANSPARENT);
+        gfx_text(24, VIEW_Y + 48, "A script failed to load, link or execute.", UI_DARK, TRANSPARENT);
+        gfx_text(24, VIEW_Y + 72, "The page loaded, but its content was not built.", UI_DARK, TRANSPARENT);
+        gfx_text(24, VIEW_Y + 96, "Ctrl+K: details. Use the Back button to return.", UI_DARK, TRANSPARENT);
+    }
     for (int i = 0; i < n_boxes; i++) {                      /* фон и рамки блоков */
         struct box *b = &boxes[i];
         int y = b->y - scroll + VIEW_Y;
@@ -1170,6 +1264,15 @@ static void draw_page(void) {
         switch (it->kind) {
         case IT_TEXT:
             if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, it->h, it->bg);
+            if (page_selection()) {
+                int i0, b0, i1, b1;
+                page_bounds(&i0, &b0, &i1, &b1);
+                if (i >= i0 && i <= i1) {
+                    int start = i == i0 ? b0 : 0, end = i == i1 ? b1 : strlen(it->text);
+                    int x0 = item_text_width(it, start), x1 = item_text_width(it, end);
+                    if (x1 > x0) gfx_fill_rect(it->x + x0, y, x1 - x0, it->h, UI_SELECT);
+                }
+            }
             if (it->fsize) {                                 /* шрифт Ubuntu нужного размера */
                 int lh = text_line_h(it->font, it->fsize), ty = y + (it->h - lh) / 2;
                 int base = ty + text_ascent(it->font, it->fsize);
@@ -1214,6 +1317,7 @@ static void draw_page(void) {
             int maxc = (it->w - 8) / 8, l = u8count(in->value, strlen(in->value)), skip = l > maxc - 1 ? l - maxc + 1 : 0;
             const char *v = in->value;                    /* в буквах UTF-8: видны последние maxc */
             while (skip > 0 && *v) { v++; while (u8cont(*v)) v++; skip--; }
+            if (focus_input == it->input && input_all) gfx_fill_rect(it->x + 3, y + 3, it->w - 6, it->h - 6, UI_SELECT);
             gfx_text(it->x + 4, y + 4, v, UI_TEXT, TRANSPARENT);
             if (focus_input == it->input) gfx_fill_rect(it->x + 4 + u8count(v, strlen(v)) * 8, y + 4, 2, 16, UI_TEXT);
             break;
@@ -1361,6 +1465,7 @@ static int js_busy_poll(void) {
 static int net_read(int fd, void *b, int n) {
     for (;;) {
         int r = conn ? tls_read(conn, b, n) : read(fd, b, n);
+        if (!conn && r < 0) r = -errno; /* read is POSIX; this layer uses -errno */
         if (r > 0) { req_last_data = ticks(); return r; }
         if (r == -ETIMEDOUT && !conn) { if (net_idle()) continue; return -ETIMEDOUT; }
         if (r < 0 && req_fail[0]) return -ETIMEDOUT;            /* tls_read: net_idle сказала «хватит» */
@@ -1393,6 +1498,47 @@ static bool blocked_host(const char *u) {
 }
 
 /* разобрать Transfer-Encoding: chunked на месте; -> новая длина */
+static bool response_header(const char *line, const char *name) {
+    while (*name && *line && tolower((unsigned char)*line) == *name) { line++; name++; }
+    return !*name && *line == ':';
+}
+
+/* A complete chunked response need not close its TCP connection. */
+static int chunks_complete(const char *b, int len) {
+    int r = 0;
+    while (r < len) {
+        unsigned size = 0;
+        int digits = 0;
+        while (r < len) {
+            char c = tolower((unsigned char)b[r]);
+            int d = c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : -1;
+            if (d < 0) break;
+            if (size > MAX_PAGE / 16) return -1;
+            size = size * 16 + d; r++; digits++;
+        }
+        if (r == len) return 0;
+        if (!digits) return -1;
+        if (b[r] == ';') { while (r < len && b[r] != '\r') r++; }
+        if (r + 1 >= len) return 0;
+        if (b[r] != '\r' || b[r + 1] != '\n') return -1;
+        r += 2;
+        if (!size) {             /* optional trailers, then an empty line */
+            while (r + 1 < len) {
+                if (b[r] == '\r' && b[r + 1] == '\n') return 1;
+                while (r + 1 < len && !(b[r] == '\r' && b[r + 1] == '\n')) r++;
+                r += 2;
+            }
+            return 0;
+        }
+        if (size > (unsigned)(len - r)) return 0;
+        r += size;
+        if (r + 1 >= len) return 0;
+        if (b[r] != '\r' || b[r + 1] != '\n') return -1;
+        r += 2;
+    }
+    return 0;
+}
+
 static int dechunk(char *b, int len) {
     int r = 0, w = 0;
     while (r < len) {
@@ -1416,6 +1562,68 @@ static int dechunk(char *b, int len) {
         if (r < len && b[r] == '\n') r++;
     }
     return w;
+}
+
+static unsigned response_crc(const unsigned char *p, int n) {
+    unsigned crc = ~0u;
+    for (int i = 0; i < n; i++) {
+        crc ^= p[i];
+        for (int k = 0; k < 8; k++) crc = (crc >> 1) ^ (0xedb88320u & (0u - (crc & 1)));
+    }
+    return ~crc;
+}
+
+static unsigned response_le32(const unsigned char *p) {
+    return (unsigned)p[0] | (unsigned)p[1] << 8 | (unsigned)p[2] << 16 | (unsigned)p[3] << 24;
+}
+
+/* Servers may compress HTML, scripts and styles even for HTTP/1.0 clients. */
+static int decode_response(const char *encoding) {
+    if (!encoding[0] || !strcmp(encoding, "identity")) return 0;
+    unsigned char *in = (unsigned char *)body;
+    int gzip = !strcmp(encoding, "gzip") || !strcmp(encoding, "x-gzip");
+    int deflate = !strcmp(encoding, "deflate");
+    if (!gzip && !deflate) { set_status("Unsupported HTTP Content-Encoding"); return -1; }
+    int start = 0, end = body_len;
+    if (gzip) {
+        if (end < 18 || in[0] != 31 || in[1] != 139 || in[2] != 8 || (in[3] & 0xe0)) goto bad;
+        int flags = in[3];
+        start = 10; end -= 8;
+        if (flags & 4) {
+            if (start + 2 > end) goto bad;
+            int extra = in[start] | in[start + 1] << 8;
+            start += 2 + extra;
+            if (start > end) goto bad;
+        }
+        for (int flag = 8; flag <= 16; flag <<= 1) if (flags & flag) {
+            while (start < end && in[start]) start++;
+            if (start >= end) goto bad;
+            start++;
+        }
+        if (flags & 2) {
+            if (start + 2 > end || (response_crc(in, start) & 65535) != (unsigned)(in[start] | in[start + 1] << 8)) goto bad;
+            start += 2;
+        }
+        if (response_le32(in + end + 4) > MAX_PAGE) goto bad;
+    } else if (end < 6) goto bad;
+    if (start >= end) goto bad;
+    unsigned char *out = malloc(MAX_PAGE + 1);
+    if (!out) { set_status("Not enough memory to decompress page"); return -1; }
+    int len = img_inflate(in + start, end - start, out, MAX_PAGE, deflate);
+    int valid = len >= 0;
+    if (valid && gzip) valid = response_le32(in + end + 4) == (unsigned)len && response_le32(in + end) == response_crc(out, len);
+    if (valid && deflate) {
+        unsigned a = 1, b = 0;
+        for (int i = 0; i < len; i++) { a = (a + out[i]) % 65521; b = (b + a) % 65521; }
+        unsigned expected = (unsigned)in[end - 4] << 24 | (unsigned)in[end - 3] << 16 | (unsigned)in[end - 2] << 8 | in[end - 1];
+        valid = expected == (b << 16 | a);
+    }
+    if (valid) { memcpy(body, out, len); body_len = len; body[len] = 0; }
+    free(out);
+    if (valid) return 0;
+bad:
+    set_status("Invalid, truncated or oversized compressed response");
+    return -1;
 }
 
 static const char *home_page =
@@ -1486,6 +1694,11 @@ static const char *js_page =
     "</script>";
 
 static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
+#ifdef BROWSER_HOST
+    extern int browser_host_fetch(const char *, char *, int, bool *);
+    int host_result = browser_host_fetch(u, location, loc_max, is_html);
+    if (host_result != -999) return host_result;
+#endif
     struct url_parts p;
     if (!parse_url(u, &p)) return -1;
     *is_html = true;
@@ -1579,7 +1792,7 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     cookie_get(p.host, cookies, sizeof(cookies));
     int rl = snprintf(req, sizeof(req),
         "%s %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: " USER_AGENT "\r\n"
-        "Accept: %s\r\nAccept-Language: ru, en\r\nConnection: close\r\n",
+        "Accept: %s\r\nAccept-Encoding: gzip, deflate\r\nAccept-Language: ru, en\r\nConnection: close\r\n",
         req_method, p.path, p.host, req_accept);
     if (cookies[0] && rl < (int)sizeof(req)) rl += snprintf(req + rl, sizeof(req) - rl, "Cookie: %s\r\n", cookies);
     if (req_body && rl < (int)sizeof(req)) rl += snprintf(req + rl, sizeof(req) - rl, "Content-Type: application/x-www-form-urlencoded\r\nContent-Length: %d\r\n", req_body_len);
@@ -1588,6 +1801,7 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     net_write(fd, req, rl);
     if (req_body && req_body_len) net_write(fd, req_body, req_body_len);
     int n, total = 0, expect = -1;                       /* expect: где кончится ответ по Content-Length */
+    int chunk_start = -1;
     unsigned last = ticks();
     bool cut = false;                                     /* оборвали по тайм-ауту или Esc */
     while (total < MAX_PAGE) {
@@ -1600,19 +1814,28 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
             char *he = strstr(body, "\r\n\r\n");
             if (he) {
                 expect = 0;
-                for (char *p2 = body; p2 < he; p2++)
-                    if ((*p2 == 'C' || *p2 == 'c') && !strncmp(p2 + 1, "ontent-", 7) &&
-                        (p2[8] == 'L' || p2[8] == 'l') && !strncmp(p2 + 9, "ength:", 6)) {
+                for (char *p2 = body; p2 < he;) {
+                    if (response_header(p2, "content-length")) {
                         int cl = atoi(p2 + 15);
-                        expect = cl > 0 ? (he - body) + 4 + cl : cl == 0 ? (he - body) + 4 : 0;
-                        if (cl == 0) expect = -2;          /* пустое тело */
-                        break;
+                        if (cl >= 0 && cl <= MAX_PAGE) expect = (he - body) + 4 + cl;
                     }
-                if (expect == -2) break;
+                    if (response_header(p2, "transfer-encoding")) {
+                        char value[64]; int k = 0;
+                        const char *v = p2 + 18;
+                        while (v < he && *v != '\r' && k < 63) value[k++] = tolower((unsigned char)*v++);
+                        value[k] = 0;
+                        if (strstr(value, "chunked")) chunk_start = (he - body) + 4;
+                    }
+                    char *next = strstr(p2, "\r\n");
+                    if (!next) break;
+                    p2 = next + 2;
+                }
+                if (chunk_start >= 0) expect = 0;          /* transfer coding overrides Content-Length */
                 /* что-то пришло — дальше ждём не дольше, чем позволяет «молчание» сервера */
             }
         }
         if (expect > 0 && total >= expect) break;           /* всё получили — не ждём закрытия */
+        if (chunk_start >= 0 && chunks_complete(body + chunk_start, total - chunk_start) == 1) break;
         if (ticks() - last > 300) {
             last = ticks();
             snprintf(msg, sizeof(msg), "Reading %s... %d KB%s", p.host, total / 1024, nav_depth ? " (Esc - stop)" : "");
@@ -1622,6 +1845,10 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     if (conn) { tls_close(conn); conn = NULL; }
     tls_idle = NULL;
     close(fd);
+    if (total == MAX_PAGE && (expect <= 0 || expect > total)) {
+        set_status("Response exceeds browser resource size limit");
+        return -1;
+    }
     if (cut) {
         snprintf(msg, sizeof(msg), "%s: %s", p.host, req_fail[0] ? req_fail : "timed out");
         set_status(msg);
@@ -1637,6 +1864,7 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
     if (sp) code = atoi(sp + 1);
     if (code <= 0) code = 200;
     bool chunked = false;
+    char encoding[64] = "";
     cp1251 = false;
     for (char *line = body; line && *line;) {
         char *eol = strstr(line, "\r\n");
@@ -1655,13 +1883,24 @@ static int http_get(const char *u, char *location, int loc_max, bool *is_html) {
             if (strstr(val, "1251")) cp1251 = true;
             if (strstr(val, "image/")) { *is_html = true; }
         }
-        if (val && !strcmp(low, "transfer-encoding") && strstr(val, "chunked")) chunked = true;
+        if (val && !strcmp(low, "transfer-encoding")) {
+            char transfer[64]; snprintf(transfer, sizeof(transfer), "%s", val);
+            for (char *q = transfer; *q; q++) *q = tolower((unsigned char)*q);
+            if (strstr(transfer, "chunked")) chunked = true;
+        }
+        if (val && !strcmp(low, "content-encoding")) {
+            snprintf(encoding, sizeof(encoding), "%s", val);
+            for (char *q = encoding; *q; q++) *q = tolower(*q);
+            int len = strlen(encoding);
+            while (len && (encoding[len - 1] == ' ' || encoding[len - 1] == '\t')) encoding[--len] = 0;
+        }
         line = eol ? eol + 2 : NULL;
     }
     int start = hend + 4;
     memmove(body, body + start, total - start);
     body_len = total - start;
     if (chunked) body_len = dechunk(body, body_len);
+    if (decode_response(encoding) < 0) return -1;
     if (cut && (code < 200 || code >= 300 || !nav_depth || !body_len)) return -1;   /* обрывок годится только как страница */
     return code;
 }
@@ -2044,6 +2283,7 @@ static unsigned last_layout;
 
 /* дерево DOM -> раскладка; keep — сохранить прокрутку и поле ввода */
 static void relayout(bool keep) {
+    dom_set_viewport(view_w(), VIEW_H);
     int len;
     char *h = dom_serialize(&len);
     if (!h) return;
@@ -2174,6 +2414,7 @@ static void navigate(const char *target, bool add_history) {
         cp1251 = false;
         set_status(dom_scripting ? "Running scripts..." : "Building page...");
         nav_depth++;
+        dom_set_viewport(view_w(), VIEW_H);
         dom_load(body, body_len, url);
         relayout(false);
         nav_depth--;
@@ -2262,7 +2503,35 @@ static void scroll_by(int d) {
     if (scroll < 0) scroll = 0;
 }
 
+/* Locate a UTF-8 character boundary in the nearest rendered text run. */
+static int text_position(int x, int y, int *byte) {
+    int best = -1, distance = 0x7fffffff;
+    y += scroll - VIEW_Y;
+    for (int i = 0; i < n_items; i++) {
+        struct item *it = &items[i];
+        if (it->kind != IT_TEXT || !it->text || !it->text[0]) continue;
+        int dy = y < it->y ? it->y - y : y >= it->y + it->h ? y - it->y - it->h + 1 : 0;
+        int dx = x < it->x ? it->x - x : x > it->x + it->w ? x - it->x - it->w : 0;
+        int d = dy * 4096 + dx;
+        if (d < distance) { distance = d; best = i; }
+    }
+    *byte = 0;
+    if (best < 0) return -1;
+    struct item *it = &items[best];
+    int prev = 0;
+    while (it->text[*byte]) {
+        int next = *byte + 1;
+        while (u8cont(it->text[next])) next++;
+        int width = item_text_width(it, next);
+        if (x - it->x < (prev + width) / 2) break;
+        *byte = next; prev = width;
+    }
+    return best;
+}
+
 static void on_click(int x, int y) {
+    input_all = false;
+    sel_item = sel_end_item = -1; text_drag = false;
     if (y < BAR_H) {
         editing_addr = false;
         if (ui_inside(x, y, 6, 6, 30, 24)) { go_history(-1); return; }
@@ -2356,6 +2625,15 @@ static void edit_string(char *s, int max, int *cur, int k) {
 
 
 static void on_key(int k) {
+    if (!editing_addr && focus_input < 0 && (k == CTRL('c') || k == KEY_COPY)) { copy_page_selection(); return; }
+    if (!editing_addr && focus_input < 0 && k == CTRL('a')) {
+        sel_item = sel_end_item = -1;
+        for (int i = 0; i < n_items; i++) if (items[i].kind == IT_TEXT && items[i].text) {
+            if (sel_item < 0) { sel_item = i; sel_byte = 0; }
+            sel_end_item = i; sel_end_byte = strlen(items[i].text);
+        }
+        redraw(); return;
+    }
     if (k == CTRL('l')) { editing_addr = true; addr_all = true; focus_input = -1; addr_cur = strlen(addr); redraw(); return; }
     if (k == CTRL('j')) {                                  /* JavaScript вкл/выкл — и перезагрузить */
         dom_scripting = !dom_scripting;
@@ -2371,6 +2649,27 @@ static void on_key(int k) {
         return;
     }
     if (editing_addr) {
+        if (k == CTRL('a')) { addr_all = true; addr_cur = strlen(addr); draw_toolbar(); win_update_rect(win, 0, 0, W, BAR_H); return; }
+        if (k == CTRL('c') || k == KEY_COPY || k == CTRL('x')) {
+            if (addr_all && clipboard_set(addr, strlen(addr)) >= 0 && k == CTRL('x')) {
+                addr[0] = 0; addr_cur = 0; addr_all = false;
+            }
+            draw_toolbar(); win_update_rect(win, 0, 0, W, BAR_H); return;
+        }
+        if (k == CTRL('v') || k == KEY_PASTE || k == (KEY_INS | KEY_SHIFT)) {
+            char *s = malloc(CLIPBOARD_MAX);
+            if (!s) return;
+            int n = clipboard_get(s, CLIPBOARD_MAX), length = strlen(addr);
+            /* A URL is a single line; stop before pasted line breaks. */
+            int count = 0;
+            while (count < n && (unsigned char)s[count] >= 32 && s[count] != 127) count++;
+            if (count > 0 && count + (addr_all ? 0 : length) < (int)sizeof(addr)) {
+                if (addr_all) { addr[0] = 0; addr_cur = length = 0; addr_all = false; }
+                memmove(addr + addr_cur + count, addr + addr_cur, length - addr_cur + 1);
+                memcpy(addr + addr_cur, s, count); addr_cur += count;
+            }
+            free(s); draw_toolbar(); win_update_rect(win, 0, 0, W, BAR_H); return;
+        }
         if (k == '\n' || k == '\r') { editing_addr = false; navigate(addr, true); return; }
         if (k == 27) { editing_addr = false; snprintf(addr, sizeof(addr), "%s", url); redraw(); return; }
         if (addr_all) {
@@ -2386,6 +2685,11 @@ static void on_key(int k) {
     if (focus_input >= 0) {
         struct input *in = &inputs[focus_input];
         bool js = page_is_dom && dom_scripting && in->node >= 0;
+        if (k == CTRL('a')) { input_all = true; redraw(); return; }
+        if (k == CTRL('c') || k == KEY_COPY || k == CTRL('x')) {
+            if (!input_all) return;
+            if (clipboard_set(in->value, strlen(in->value)) < 0 || k != CTRL('x')) return;
+        }
         if (k == '\n' || k == '\r') {
             if (js) {
                 int f = in->form;
@@ -2403,7 +2707,25 @@ static void on_key(int k) {
         char before[128];
         snprintf(before, sizeof(before), "%s", in->value);
         int cur = strlen(in->value);
-        edit_string(in->value, sizeof(in->value), &cur, k);
+        if (k == CTRL('v') || k == KEY_PASTE || k == (KEY_INS | KEY_SHIFT)) {
+            char *s = malloc(CLIPBOARD_MAX);
+            if (!s) return;
+            int n = clipboard_get(s, CLIPBOARD_MAX), count = 0;
+            while (count < n && (unsigned char)s[count] >= 32 && s[count] != 127) count++;
+            if (count > 0 && count + (input_all ? 0 : cur) < (int)sizeof(in->value)) {
+                if (input_all) cur = 0;
+                memcpy(in->value + cur, s, count); in->value[cur + count] = 0; input_all = false;
+            }
+            free(s); k = 0;
+        } else {
+            bool printable = (k >= 32 && k < 127) || (k >= 0xA0 && k < 0x10000 && (k < KEY_UP || k > KEY_INS));
+            if (input_all && (printable || k == 8 || k == 127 || k == KEY_DEL || k == CTRL('x'))) {
+                in->value[0] = 0; cur = 0;
+                if (!printable) k = 0;
+            }
+            input_all = false;
+            if (k) edit_string(in->value, sizeof(in->value), &cur, k);
+        }
         if (page_is_dom && in->node >= 0) {
             dom_key(in->node, k < 256 ? k : 0, strcmp(before, in->value) ? in->value : NULL);
             after_js();
@@ -2475,7 +2797,29 @@ int main(int argc, char **argv) {
             continue;
         }
         if (e.type == EV_CLOSE) break;
-        if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) on_click(e.x, e.y);
+        if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) {
+            int hit = item_at(e.x, e.y);
+            if (e.y >= VIEW_Y && e.y < H - STATUS_H && hit >= 0 && items[hit].kind == IT_TEXT) {
+                sel_item = sel_end_item = text_position(e.x, e.y, &sel_byte);
+                sel_end_byte = sel_byte; text_drag = true; text_dragged = false;
+                text_down_x = e.x; text_down_y = e.y;
+                editing_addr = false; focus_input = -1; redraw();
+            } else on_click(e.x, e.y);
+        }
+        else if (e.type == EV_MOUSE_MOVE && text_drag) {
+            if (e.x < text_down_x - 3 || e.x > text_down_x + 3 || e.y < text_down_y - 3 || e.y > text_down_y + 3) text_dragged = true;
+            if (text_dragged) {
+                if (e.y < VIEW_Y) scroll_by(-16);
+                if (e.y >= H - STATUS_H) scroll_by(16);
+                sel_end_item = text_position(e.x, e.y, &sel_end_byte); redraw();
+            }
+        }
+        else if (e.type == EV_MOUSE_UP && text_drag) {
+            text_drag = false;
+            if (!text_dragged) on_click(text_down_x, text_down_y);
+            else { sel_end_item = text_position(e.x, e.y, &sel_end_byte); redraw(); }
+        }
+        else if (e.type == EV_FOCUS && !e.key) text_drag = false;
         else if (e.type == EV_MOUSE_MOVE && !e.buttons) on_move(e.x, e.y);
         else if (e.type == EV_KEY) on_key(e.key);
         else if (e.type == EV_RESIZE) {                    /* новая ширина — разложить страницу заново */

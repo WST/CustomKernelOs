@@ -1,8 +1,35 @@
 /* tests/tls_test.c — проверка криптографии из user/lib/tls.c на известных ответах
  * (RFC 4231, 7748, 8439, 8448, тест-вектор GCM из NIST). Запускается на хосте: make test */
+#include <unistd.h>
+#include <errno.h>
+static ssize_t tls_test_read(int fd, void *buf, size_t length);
+#define read tls_test_read
 #define TLS_HOST
 #include "../user/lib/tls.c"
 #include "../user/lib/x509.c"
+#undef read
+static int read_mode, read_calls, idle_calls;
+static ssize_t tls_test_read(int fd, void *buf, size_t length) {
+    if (fd != 12345) return read(fd, buf, length);
+    read_calls++;
+    if (read_mode == 2) { errno = EIO; return -1; }
+    if (read_mode == 1 || read_calls == 1) { errno = ETIMEDOUT; return -1; }
+    memset(buf, 0x5a, length); return (ssize_t)length;
+}
+static int test_idle(void) { idle_calls++; return read_mode == 0; }
+static int timeout_checks(void) {
+    unsigned char out = 0;
+    tls_idle = test_idle;
+    read_mode = read_calls = idle_calls = 0;
+    int failed = read_all(12345, &out, 1) != 1 || out != 0x5a || idle_calls != 1;
+    read_mode = 1; read_calls = idle_calls = 0;
+    failed |= read_all(12345, &out, 1) != -1 || idle_calls != 1;
+    read_mode = 2; read_calls = idle_calls = 0;
+    failed |= read_all(12345, &out, 1) != -1 || idle_calls != 0;
+    tls_idle = NULL;
+    printf("TLS POSIX timeout handling: %s\n", failed ? "FAIL" : "ok");
+    return failed;
+}
 
 static int fails;
 static void unhex(const char *s, u8 *o) { for (; s[0] && s[1]; s += 2) { unsigned v; sscanf(s, "%2x", &v); *o++ = v; } }
@@ -17,6 +44,7 @@ static void check(const char *name, const u8 *got, const char *hex) {
 }
 
 int main(void) {
+    fails += timeout_checks();
     u8 o[256], a[64], b[64], c[64];
     sha256("abc", 3, o);
     check("sha256(abc)", o, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");

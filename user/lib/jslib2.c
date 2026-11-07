@@ -2242,7 +2242,7 @@ static const char typed_src[] =
     "    if (!(this instanceof C)) throw new TypeError(\"Constructor \" + name + \" requires 'new'\");\n"
     "    var arr;\n"
     "    if (a === undefined || a === null || typeof a === 'number') arr = new Array(a > 0 ? a | 0 : 0).fill(0);\n"
-    "    else if (a instanceof AB) { arr = new Array(((len !== undefined ? len * size : a.byteLength - (off | 0)) / size) | 0).fill(0); }\n"
+    "    else if (a instanceof AB) { arr = size === 1 ? a._b.slice(off | 0, len === undefined ? a.byteLength : (off | 0) + len) : new Array(((len !== undefined ? len * size : a.byteLength - (off | 0)) / size) | 0).fill(0); }\n"
     "    else arr = Array.from(a, Number);\n"
     "    Object.setPrototypeOf(arr, C.prototype);\n"
     "    Object.defineProperty(arr, 'buffer', { value: a instanceof AB ? a : new AB(arr.length * size), writable: true });\n"

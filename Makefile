@@ -49,6 +49,34 @@ OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(
 
 all: $(BUILD)/os.img install
 
+# Native clipboard/editor checks, installed only onto a disposable test disk.
+$(BUILD)/user/clipboardcheck.o: tests/clipboardcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/clipboard_editor.o: tests/clipboard_editor.c user/notepad.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/clipboard_terminal.o: tests/clipboard_terminal.c user/terminal.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/clipboardcheck: $(BUILD)/user/clipboardcheck.o $(BUILD)/user/clipboard_editor.o $(BUILD)/user/clipboard_terminal.o $(BUILD)/user/libmyos.a
+	$(LD) -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections $^ -o $@
+
+$(BUILD)/user/pr2check.o: tests/pr2check.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/pr2check: $(BUILD)/user/pr2check.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+.PHONY: pr2test
+pr2test:
+	python3 tests/pr2_smoke.py
+
+.PHONY: clipboardtest
+clipboardtest:
+	python3 tests/clipboard_smoke.py
+	python3 tests/clipboard_gui_smoke.py
+
 $(BUILD) $(BUILD)/user:
 	mkdir -p $@
 
@@ -257,6 +285,11 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /etc >/dev/null 2>&1 || true
 	@$(BUILD)/myfs $(DISK) put certs/roots.der /etc/certs.der >/dev/null
 
+	@for d in /etc/services /etc/services/enabled; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null || exit 1; done
+	@for f in services/*.service; do \
+	  $(BUILD)/myfs $(DISK) cat /etc/services/$$(basename $$f) >/dev/null 2>&1 || \
+	  $(BUILD)/myfs $(DISK) put $$f /etc/services/$$(basename $$f) >/dev/null || exit 1; done
+
 # ------------------------------------------------------------------ запуск
 
 # index=0 — primary master (загрузка), index=1 — primary slave (MyFS)
@@ -317,6 +350,7 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 	@diff -u tests/web/async.expected $(BUILD)/asynctest.out && echo "DOM async test: OK"
 	./$(BUILD)/dom-host tests/web/css.html styles > $(BUILD)/csstest.out
 	@diff -u tests/web/css.expected $(BUILD)/csstest.out && echo "CSS test: OK"
+	python3 tests/modules_test.py
 
 # Картинки и сертификаты на образцах (нужен python3 с Pillow и cryptography: pip install pillow cryptography)
 imgtest: | $(BUILD)
@@ -333,11 +367,16 @@ x509test: | $(BUILD)
 # Весь браузер (загрузка, DOM, JS, CSS, раскладка, картинки) на Linux с AddressSanitizer:
 #   build/browser-host страница.html [w 1280] [scroll] [click] [keys] [images] [timers 500] [shot f.ppm]
 browsertest: user/lib/dom_prelude.h | $(BUILD)
-	gcc -m32 -std=gnu17 -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
+	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
 	    user/lib/img.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
+	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --clipboard-test
+	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --compat-test
+	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/modules.html assert-no-errors scroll
+	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/async-generators.html timers 150 assert-no-errors
+	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/web-api.html timers 250 assert-no-errors
 
 # Сглаженная графика и шрифты на Linux: пробная картинка build/gfxtest.ppm
 gfxtest: | $(BUILD)
@@ -393,3 +432,13 @@ cptest: $(BUILD)/cc-host $(CCROOT_READY)
 .SECONDARY:
 
 
+
+$(BUILD)/user/servicecheck.o: tests/servicecheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/servicecheck: $(BUILD)/user/servicecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+.PHONY: servicetest
+servicetest:
+	python3 tests/services_smoke.py

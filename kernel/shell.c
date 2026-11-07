@@ -1,5 +1,6 @@
 /* Командная оболочка MyOS: история команд, файловые команды, перенаправление вывода. */
 #include "shell.h"
+#include "services.h"
 #include "vga.h"
 #include "keyboard.h"
 #include "timer.h"
@@ -788,6 +789,7 @@ void shell_run(void) {
         static char sh_path[] = "/bin/sh";
         char *argv[] = { sh_path };
         for (;;) {
+            while (services_console_active()) task_sleep_ticks(10);
             run_program(argv, 1);
             kprintf("Session ended. Starting login again.\n");
         }

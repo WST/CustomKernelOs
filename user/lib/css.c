@@ -17,8 +17,9 @@
 
 int dom_css = 1;
 
-#define VIEW_W 788                      /* ширина окна страницы в браузере */
-#define VIEW_H 520
+int dom_view_width = 788, dom_view_height = 520;
+#define VIEW_W dom_view_width
+#define VIEW_H dom_view_height
 
 /* ------------------------------------------------------------------ свойства */
 
@@ -26,7 +27,7 @@ enum { S_DISPLAY, S_VIS, S_COLOR, S_BG, S_FW, S_FSTYLE, S_FSIZE, S_TDEC, S_TALIG
        S_MT, S_MR, S_MB, S_ML, S_PT, S_PR, S_PB, S_PL,
        S_BTW, S_BRW, S_BBW, S_BLW, S_BTC, S_BRC, S_BBC, S_BLC, S_BTS, S_BRS, S_BBS, S_BLS,
        S_WIDTH, S_MAXW, S_HEIGHT, S_MAXH, S_OVERFLOW, S_POS, S_LEFT, S_TOP, S_CLIP, S_CLIPPATH, S_TINDENT,
-       S_FLEXDIR, S_BGIMG, S_COUNT };
+       S_FLEXDIR, S_BGIMG, S_BOXSIZING, S_COLGAP, S_ROWGAP, S_BASIS, S_FLEXWRAP, S_COUNT };
 
 /* как достать значение своего свойства из сокращённой записи */
 enum { SH_NONE, SH_BOX, SH_PAIR, SH_BG, SH_FONT, SH_BORDER, SH_LIST, SH_TDEC, SH_FIRST };
@@ -78,8 +79,13 @@ static const struct propdef props[] = {
     { "position", ONE(S_POS) }, { "left", ONE(S_LEFT) }, { "top", ONE(S_TOP) },
     { "inset", 2, { { S_TOP, SH_BOX, 0 }, { S_LEFT, SH_BOX, 3 } } },
     { "clip", ONE(S_CLIP) }, { "clip-path", ONE(S_CLIPPATH) }, { "text-indent", ONE(S_TINDENT) },
-    { "flex-direction", ONE(S_FLEXDIR) }, { "flex-flow", 1, { { S_FLEXDIR, SH_FIRST, 0 } } },
+    { "flex-direction", ONE(S_FLEXDIR) }, { "flex-flow", 2, { { S_FLEXDIR, SH_FIRST, 0 }, { S_FLEXWRAP, SH_NONE, 0 } } },
+    { "flex-wrap", ONE(S_FLEXWRAP) }, { "-ms-flex-wrap", ONE(S_FLEXWRAP) },
     { "-webkit-box-orient", ONE(S_FLEXDIR) },
+    { "box-sizing", ONE(S_BOXSIZING) }, { "-webkit-box-sizing", ONE(S_BOXSIZING) },
+    { "column-gap", ONE(S_COLGAP) }, { "row-gap", ONE(S_ROWGAP) },
+    { "gap", 2, { { S_ROWGAP, SH_PAIR, 0 }, { S_COLGAP, SH_PAIR, 1 } } },
+    { "flex-basis", ONE(S_BASIS) }, { "-ms-flex-preferred-size", ONE(S_BASIS) },
 };
 #define N_PROPS ((int)(sizeof(props) / sizeof(props[0])))
 
@@ -385,8 +391,8 @@ static int eval_term(const char **sp, struct lctx *c, double *v) {
     else if (!strcmp(u, "mm")) *v = x * 96 / 25.4;
     else if (!strcmp(u, "vw") || !strcmp(u, "dvw") || !strcmp(u, "svw") || !strcmp(u, "lvw") || !strcmp(u, "vi")) *v = x * VIEW_W / 100;
     else if (!strcmp(u, "vh") || !strcmp(u, "dvh") || !strcmp(u, "svh") || !strcmp(u, "lvh") || !strcmp(u, "vb")) *v = x * VIEW_H / 100;
-    else if (!strcmp(u, "vmin")) *v = x * VIEW_H / 100;
-    else if (!strcmp(u, "vmax")) *v = x * VIEW_W / 100;
+    else if (!strcmp(u, "vmin")) *v = x * (VIEW_W < VIEW_H ? VIEW_W : VIEW_H) / 100;
+    else if (!strcmp(u, "vmax")) *v = x * (VIEW_W > VIEW_H ? VIEW_W : VIEW_H) / 100;
     else if (!strcmp(u, "ch") || !strcmp(u, "ex")) *v = x * 8;
     else if (!strcmp(u, "lh")) *v = x * c->em * 1.2;
     else return 0;
@@ -499,7 +505,7 @@ static int media_one(const char *q, int n) {
             else if (!strcmp(name, "prefers-reduced-motion")) ok = !strcmp(val, "no-preference");
             else if (!strcmp(name, "hover") || !strcmp(name, "any-hover")) ok = !strcmp(val, "hover");
             else if (!strcmp(name, "pointer") || !strcmp(name, "any-pointer")) ok = !strcmp(val, "fine");
-            else if (!strcmp(name, "orientation")) ok = !strcmp(val, "landscape");
+            else if (!strcmp(name, "orientation")) ok = !strcmp(val, VIEW_W >= VIEW_H ? "landscape" : "portrait");
             else if (!strcmp(name, "color")) ok = 1;
             else if (strstr(name, "resolution") || strstr(name, "pixel-ratio")) {
                 double r = 0;
@@ -1020,6 +1026,31 @@ static struct cstyle *cache;
 static int cache_cap, gen = 1, cache_mut = -1;
 static double root_px = 16;
 
+void dom_set_viewport(int width, int height) {
+    if (width < 1 || height < 1 || (width == VIEW_W && height == VIEW_H)) return;
+    dom_view_width = width;
+    dom_view_height = height;
+    built = 0;                 /* @media rules must be parsed again; downloaded sheets stay cached */
+    built_mut = cache_mut = -1;
+    dom_dirty = 1;
+    if (js_global) {
+        jsval window = js_objv(js_global);
+        js_set_c(window, "innerWidth", js_num(width));
+        js_set_c(window, "innerHeight", js_num(height));
+        js_set_c(window, "outerWidth", js_num(width + 12));
+        js_set_c(window, "outerHeight", js_num(height + 56));
+    }
+}
+
+int dom_layout_children(int id) {
+    if (id < 0 || id >= d_count) return 0;
+    int count = 0;
+    for (dnode *n = d_nodes[id]->first; n; n = n->next)
+        if (n->type == DN_ELEMENT && strcmp(n->tag, "script") && strcmp(n->tag, "style") &&
+            strcmp(n->tag, "template") && !css_hidden(n)) count++;
+    return count;
+}
+
 void css_reset(void) {
     rules_free();
     built = 0;
@@ -1334,6 +1365,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     /* сброшенное */
     o->display = DS_INLINE; o->bg = -1; o->hidden = 0; o->flex_row = 0; o->bg_image = 0;
     o->width = o->max_width = -1; o->width_pct = o->max_width_pct = 0;
+    o->border_box = o->flex_wrap = 0; o->column_gap = o->row_gap = 0;
     for (int i = 0; i < 4; i++) { o->margin[i] = o->padding[i] = o->border[i] = 0; o->border_color[i] = -1; }
     struct cstyle init;
     initial_style(&init);
@@ -1440,6 +1472,8 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         const char *fd = V(S_FLEXDIR);
         o->flex_row = !fd || starts(fd, "row") || starts(fd, "horizontal") || starts(fd, "wrap") || starts(fd, "nowrap");
         if (fd && starts(fd, "row") && strstr(fd, "column")) o->flex_row = 0;
+        const char *wrap = V(S_FLEXWRAP);
+        o->flex_wrap = wrap && strstr(wrap, "wrap") && !strstr(wrap, "nowrap");
     }
     if (ps->s.flex_row && (disp == DS_BLOCK || disp == DS_LIST_ITEM || disp == DS_FLEX || disp == DS_GRID || disp == DS_TABLE))
         disp = DS_INLINE_BLOCK;                                 /* элементы flex-строки — в ряд */
@@ -1469,7 +1503,12 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
             if (o->border_color[i] < 0) o->border[i] = 0;
         }
     }
-    if ((v = V(S_WIDTH))) {
+    o->border_box = (v = V(S_BOXSIZING)) && starts(v, "border-box");
+    if ((v = V(S_COLGAP)) && parse_len(v, strlen(v), &L, &d) == 1) o->column_gap = clamp_px(d, 0, 2000);
+    if ((v = V(S_ROWGAP)) && parse_len(v, strlen(v), &L, &d) == 1) o->row_gap = clamp_px(d, 0, 2000);
+    v = ps->s.flex_row ? V(S_BASIS) : NULL;
+    if (!v || starts(v, "auto") || starts(v, "content")) v = V(S_WIDTH);
+    if (v) {
         int r = parse_len(v, strlen(v), &(struct lctx){ L.em, L.rem, -1 }, &d);
         if (r == 1) o->width = clamp_px(d, 0, 20000);
         else if (strchr(v, '%') && read_num(v, &d) && !strstr(v, "calc")) { o->width = clamp_px(d, 0, 100); o->width_pct = 1; }

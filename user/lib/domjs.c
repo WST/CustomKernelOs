@@ -352,7 +352,7 @@ static int node_get(jsobj *o, jsstr *key, jsval *out) {
         if (!strcmp(k, "className") && n->type == DN_ELEMENT) { const char *v = dn_get_attr(n, "class"); *out = js_cstr(v ? v : ""); return 1; }
         if (!strcmp(k, "classList") && n->type == DN_ELEMENT) { *out = sub_object(o, "%classList", &classlist_class, classlist_proto, n); return 1; }
         if (!strcmp(k, "checked")) { *out = js_bool(dn_get_attr(n, "checked") != NULL); return 1; }
-        if ((!strcmp(k, "clientWidth") || !strcmp(k, "clientHeight")) && n->type == DN_ELEMENT) { *out = js_num(!dn_visible(n) ? 0 : k[6] == 'W' ? 760 : 400); return 1; }
+        if ((!strcmp(k, "clientWidth") || !strcmp(k, "clientHeight")) && n->type == DN_ELEMENT) { *out = js_num(!dn_visible(n) ? 0 : k[6] == 'W' ? dom_view_width : dom_view_height); return 1; }
         if (!strcmp(k, "content") && n->type == DN_ELEMENT && !strcmp(n->tag, "template")) { *out = dn_wrap(n); return 1; }
         break;
     case 'd':
@@ -1770,12 +1770,26 @@ void dom_run_timers(void) {
 
 /* ------------------------------------------------------------------ скрипты */
 
+static int n_module_scripts;
+int dom_module_scripts(void) { return n_module_scripts; }
+static int script_is_module(dnode *e) {
+    const char *s = dn_get_attr(e, "type"), *word = "module";
+    if (!s) return 0;
+    while (*s && *word && tolower((ju8)*s) == *word) { s++; word++; }
+    return !*s && !*word;
+}
+
 static int js_type_ok(dnode *e) {
     const char *t = dn_get_attr(e, "type");
-    if (!t || !*t) return 1;
+    if (!t || !*t) return !dn_get_attr(e, "nomodule");
     char low[64];
     snprintf(low, sizeof(low), "%s", t);
     for (char *p = low; *p; p++) *p = tolower((ju8)*p);
+    if (!strcmp(low, "module")) {
+        n_module_scripts++;
+        return 1;
+    }
+    if (dn_get_attr(e, "nomodule")) return 0;
     return strstr(low, "javascript") || strstr(low, "ecmascript") || !strcmp(low, "text/jscript") || !strcmp(low, "text/livescript");
 }
 
@@ -1814,7 +1828,14 @@ void domjs_run_script(const char *src, int len, const char *name, dnode *script)
     } else if (!save_deadline) js_deadline_ms = js_now_ms() + 8000;
     jsval r;
     script_nesting++;
-    if (js_eval(src, len, name, &r) < 0) report_error(name);
+    if (script && script_is_module(script)) {
+        jsval my, fn;
+        js_get_c(js_objv(js_global), "__myos", &my);
+        js_get_c(my, "runModule", &fn);
+        jsval args[] = { js_cstr(name), len >= 0 ? js_strv(js_strn(src, len)) : js_undef() };
+        current_script = NULL;
+        if (js_call(fn, my, len >= 0 ? 2 : 1, args, &r) < 0) report_error(name);
+    } else if (js_eval(src, len, name, &r) < 0) report_error(name);
     js_run_jobs();
     script_nesting--;
     js_deadline_ms = save_deadline;
@@ -1827,8 +1848,21 @@ void domjs_run_script(const char *src, int len, const char *name, dnode *script)
 /* внешний скрипт: скачать и выполнить */
 static void run_external(dnode *e) {
     const char *src = dn_get_attr(e, "src");
+    if (!src) {
+        jsbuf b = {0}; char name[1200];
+        dn_text_content(e, &b, 0);
+        snprintf(name, sizeof(name), "%s#inline-module-%d", d_url, e->id);
+        if (b.n) domjs_run_script(b.p, b.n, name, e);
+        jb_free(&b); return;
+    }
     char url[1024];
     dn_resolve(d_url, src, url, sizeof(url));
+    if (script_is_module(e)) {
+        int before = n_errors, prevented;
+        domjs_run_script(NULL, -1, url, e);
+        domjs_fire(e, n_errors == before ? "load" : "error", 0, 0, &prevented);
+        return;
+    }
     char *data = NULL, ctype[64];
     int len = 0, status = 0;
     char msg[160];
@@ -1858,6 +1892,11 @@ void domjs_script_inserted(dnode *e) {
     if (e->script_done && !e->parser_inserted) return;
     e->script_done = 1;
     if (!dom_scripting || !js_type_ok(e)) return;
+    if (script_is_module(e)) {
+        if (e->parser_inserted && n_deferred < 128) deferred[n_deferred++] = e;
+        else timer_for_script(e);
+        return;
+    }
     if (dn_get_attr(e, "src")) {
         if (e->parser_inserted && !dn_get_attr(e, "defer") && !dn_get_attr(e, "async")) { run_external(e); return; }
         if (e->parser_inserted && n_deferred < 128) { deferred[n_deferred++] = e; return; }
@@ -2034,6 +2073,21 @@ NATIVE(My_go) {
 }
 
 NATIVE(My_media) { UNUSED; jsstr *q; TRY(js_to_string(ARG(0), &q)); *ret = js_bool(css_media_ok(q->s, -1)); return 0; }
+NATIVE(My_moduleCompile) { UNUSED; jsstr *s; TRY(js_to_string(ARG(0), &s)); return js_module_compile(s->s, s->len, ret); }
+NATIVE(My_moduleSource) {
+    UNUSED; jsstr *u; TRY(js_to_string(ARG(0), &u));
+    char *data = NULL, ctype[128]; int len = 0, status = 0;
+    if (total_js_bytes >= (6u << 20)) return js_throw("RangeError", "Module source limit exceeded");
+    if (!d_host || !d_host->fetch || d_host->fetch(u->s, "GET", NULL, 0, &data, &len, &status, ctype, sizeof(ctype)) < 0 || status < 200 || status >= 300) {
+        free(data); return js_throw("TypeError", "Cannot load module %s", u->s);
+    }
+    total_js_bytes += len;
+    if (total_js_bytes > (6u << 20)) { free(data); return js_throw("RangeError", "Module source limit exceeded"); }
+    if (!strstr(ctype, "javascript") && !strstr(ctype, "ecmascript") && strncmp(u->s, "file:", 5)) {
+        free(data); return js_throw("TypeError", "Invalid module MIME type: %s", ctype);
+    }
+    *ret = js_strv(js_strn(data, len)); free(data); return 0;
+}
 
 NATIVE(My_computed) {
     UNUSED;
@@ -2217,7 +2271,7 @@ void domjs_init_realm(void) {
     js_def_accessor(g, "location", W_location_get, W_location_set);
     const char *dims[] = { "innerWidth", "innerHeight", "outerWidth", "outerHeight", "devicePixelRatio", "scrollX", "scrollY",
                            "pageXOffset", "pageYOffset", "screenX", "screenY", "screenLeft", "screenTop" };
-    double dv[] = { 788, 520, 800, 600, 1, 0, 0, 0, 0, 0, 0, 0, 0 };
+    double dv[] = { dom_view_width, dom_view_height, dom_view_width + 12, dom_view_height + 56, 1, 0, 0, 0, 0, 0, 0, 0, 0 };
     for (int i = 0; i < 13; i++) js_define(g, dims[i], js_num(dv[i]), P_ENUM | P_WRITE);
     jsobj *scr = js_new_object();
     js_define(scr, "width", js_num(800), P_ENUM | P_WRITE);
@@ -2277,6 +2331,8 @@ void domjs_init_realm(void) {
     js_defn(my, "setUrl", My_setUrl, 1);
     js_defn(my, "go", My_go, 1);
     js_defn(my, "media", My_media, 1);
+    js_defn(my, "moduleCompile", My_moduleCompile, 1);
+    js_defn(my, "moduleSource", My_moduleSource, 1);
     js_defn(my, "computed", My_computed, 2);
     js_defn(my, "store", My_store, 2);
     js_defn(my, "load", My_load, 1);
@@ -2287,7 +2343,7 @@ void domjs_init_realm(void) {
 
 void domjs_reset(void) {
     n_timers = 0;
-    n_scripts = n_errors = 0;
+    n_scripts = n_errors = n_module_scripts = 0;
     n_deferred = 0;
     last_error[0] = 0;
     nav_requested = 0;
@@ -2441,7 +2497,8 @@ void dom_stats(char *out, int max) {
     int o;
     if (n_errors) o = snprintf(out, max, "JS: %d script%s, %d error%s", n_scripts, n_scripts == 1 ? "" : "s", n_errors, n_errors == 1 ? "" : "s");
     else o = snprintf(out, max, "JS: %d script%s", n_scripts, n_scripts == 1 ? "" : "s");
-    if (n_skipped_scripts && o < max) snprintf(out + o, max - o, ", %d skipped", n_skipped_scripts);
+    if (n_skipped_scripts && o < max) o += snprintf(out + o, max - o, ", %d skipped", n_skipped_scripts);
+    if (n_module_scripts && o < max) snprintf(out + o, max - o, ", %d modules", n_module_scripts);
 }
 
 const char *dom_last_error(void) { return last_error; }

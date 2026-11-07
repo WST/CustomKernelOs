@@ -723,6 +723,40 @@ static unsigned char *gzip_unwrap_n(const unsigned char *in, int n, char *saved,
     return g.p;
 }
 
+/* MyOS has no symlinks. Compare absolute, normalized paths so ./ and ..
+ * cannot disguise writing the decompressed output over its input. */
+static int normalized_path(const char *path, char out[256]) {
+    char joined[384];
+    if (path[0] == '/') {
+        if (strlen(path) >= sizeof joined) return -1;
+        strcpy(joined, path);
+    } else {
+        char cwd[128];
+        if (getcwd(cwd, sizeof cwd) < 0 || strlen(cwd) + strlen(path) + 2 > sizeof joined) return -1;
+        snprintf(joined, sizeof joined, "%s/%s", cwd, path);
+    }
+    int used = 1;
+    out[0] = '/'; out[1] = 0;
+    const char *p = joined;
+    while (*p) {
+        while (*p == '/') p++;
+        const char *start = p;
+        while (*p && *p != '/') p++;
+        int n = (int)(p - start);
+        if (!n || (n == 1 && start[0] == '.')) continue;
+        if (n == 2 && start[0] == '.' && start[1] == '.') {
+            while (used > 1 && out[used - 1] != '/') used--;
+            if (used > 1) used--;
+        } else {
+            if (used + n + 2 > 256) return -1;
+            if (used > 1) out[used++] = '/';
+            memcpy(out + used, start, (size_t)n); used += n;
+        }
+        out[used] = 0;
+    }
+    return 0;
+}
+
 static int decompress_file(const char *path) {
     unsigned char *in = NULL, *raw = NULL;
     int n = 0, un = 0, rc, trailing = 0;
@@ -797,6 +831,13 @@ static int decompress_file(const char *path) {
                 err_path(src, "file name too long"); free(in); free(raw); return 1;
             }
         }
+    }
+    char input_abs[256], output_abs[256];
+    if (normalized_path(src, input_abs) < 0 || normalized_path(outpath, output_abs) < 0) {
+        err_path(src, "cannot resolve input/output path"); free(in); free(raw); return 1;
+    }
+    if (!strcmp(input_abs, output_abs)) {
+        err_path(src, "input and output are the same file"); free(in); free(raw); return 1;
     }
     if (!opt_force && stat(outpath, &st) == 0) {
         err_path(outpath, "already exists");

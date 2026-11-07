@@ -653,7 +653,7 @@ static int read_all(int fd, u8 *p, int n) {                /* 1 — прочит
     while (got < n) {
         int r = read(fd, p + got, n - got);
         if (r == 0) return got ? -1 : 0;
-        if (r == -ETIMEDOUT && tls_idle && tls_idle()) continue;   /* сокет с тайм-аутом: спросить программу */
+        if (r < 0 && errno == ETIMEDOUT && tls_idle && tls_idle()) continue;   /* сокет с тайм-аутом: спросить программу */
         if (r < 0) return -1;
         got += r;
     }

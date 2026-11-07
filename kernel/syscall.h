@@ -70,9 +70,11 @@ enum {
     SYS_MKFS,
     SYS_PARTCTL,
     SYS_ACCOUNT,
+    SYS_CLIPBOARD,      /* clipboard(0 прочитать | 1 записать, buf, len) */
     SYS_LSEEK,          /* lseek(fd, offset, whence) -> новое смещение */
     SYS_FSTAT,          /* fstat(fd, &{mode, size}) */
     SYS_RENAME,         /* rename(old, new) */
+    SYS_UNITCTL,        /* unitctl(op, name|index, &info): службы */
     SYS_MMAP,           /* mmap(&{addr,len,prot,flags,fd,off}) -> адрес */
     SYS_MUNMAP,         /* munmap(addr, len) */
     SYS_MPROTECT,       /* mprotect(addr, len, prot) */
@@ -90,6 +92,7 @@ enum {
 #define ECHILD       10
 #define EAGAIN       11
 #define ENOMEM       12
+#define EBUSY        16
 #define EFAULT       14
 #define EEXIST       17
 #define ESPIPE       29

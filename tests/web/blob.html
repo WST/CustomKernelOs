@@ -1,0 +1,15 @@
+<script>
+async function test() {
+ const source = new Uint8Array([1,2,3]);
+ const b = new Blob(['Привет', source.subarray(1)], {type:'TEXT/PLAIN'});
+ source[1]=99;
+ if(b.size!==14 || b.type!=='text/plain') throw new Error('metadata');
+ if(await b.slice(0,12).text()!=='Привет') throw new Error('utf8');
+ const bytes = new Uint8Array(await b.arrayBuffer());
+ if(bytes[12]!==2 || bytes[13]!==3) throw new Error('view/copy');
+ if((await b.slice(-2).bytes())[0]!==2) throw new Error('slice');
+ if((new Blob([b])).size!==14) throw new Error('nested');
+ console.log('blob-ok');
+}
+test().catch(e=>console.log('BLOB-FAIL',e.message));
+</script>

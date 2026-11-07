@@ -590,6 +590,11 @@ int main(int argc, char **argv) {
     char line[MAX_LINE], cwd[128];
     struct cmd cmds[MAX_CMDS];
     for (;;) {
+        if (interactive && ttyctl(STDIN, TTYCTL_GETSIZE, 0) < 0) {
+            struct unit_info desktop;
+            while (unitctl(UNIT_STATUS, "desktop.service", &desktop, 0) == 0 &&
+                   (desktop.state == UNIT_ACTIVE || desktop.state == UNIT_RESTARTING)) sleep_ms(100);
+        }
         reap_background();
         if (interactive) {
             char prompt[160];

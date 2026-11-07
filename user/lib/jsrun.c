@@ -299,11 +299,15 @@ struct coro {
     jsenv *env;
     jsval transfer;
     int is_async;
+    jsobj *requests;
+    int pumping;
     struct coro *prev;
 };
 
 static jsobj *return_marker;        /* «исключение», которым return() выходит из генератора */
 jsobj *js_generator_proto;
+static jsobj *async_generator_proto;
+static jsstr *async_iterator_symbol;
 
 int js_coro_suspended(void) { return n_suspended; }
 
@@ -311,6 +315,7 @@ void js_coro_mark(void *p) {
     struct coro *c = p;
     js_mark_obj(c->fo);
     js_mark_obj(c->promise);
+    js_mark_obj(c->requests);
     js_mark_val(c->transfer);
     if (c->env) js_mark_val(js_objv((jsobj *)c->env));     /* env — тоже объект сборщика */
 }
@@ -333,6 +338,9 @@ void js_coro_stack(void *p, void **lo, void **hi) {
 }
 
 static int call_body(jsobj *fo, node *fn, jsenv *e, jsval *ret);
+static int coro_await(jsval v, jsval *out);
+static int do_await(jsval v, jsval *out);
+static int await_value(jsval v, jsval *out) { return cur_coro && cur_coro->is_async ? coro_await(v, out) : do_await(v, out); }
 
 static void coro_start(void) {
     struct coro *c = cur_coro;
@@ -343,6 +351,7 @@ static void coro_start(void) {
         js_exc = js_undef();
         st = ST_OK;
     }
+    if (st != ST_THROW && c->is_async == 2) st = coro_await(r, &r);
     c->transfer = st == ST_THROW ? js_exc : r;
     if (st == ST_THROW) js_exc = js_undef();
     c->result_kind = st == ST_THROW ? CR_THROW : CR_DONE;
@@ -420,7 +429,7 @@ static struct coro *new_coro(jsobj *fo, jsenv *env, int is_async) {
     c->env = env;
     c->is_async = is_async;
     c->transfer = js_undef();
-    c->holder = js_new_object_proto(is_async ? js_object_proto : js_generator_proto);
+    c->holder = js_new_object_proto(is_async == 2 ? async_generator_proto : is_async == 1 ? js_object_proto : js_generator_proto);
     c->holder->cls = C_CORO;
     c->holder->ptr = c;
     return c;
@@ -435,9 +444,44 @@ static jsval iter_result_obj(jsval v, int done) {
     return js_objv(r);
 }
 
+static void async_gen_pump(struct coro *c);
+static void async_gen_finish(struct coro *c, int kind, jsval value) {
+    if (kind == CR_AWAIT) return;
+    jsobj *promise = c->promise;
+    if (kind == CR_THROW) js_promise_reject_fn(promise, value);
+    else js_promise_resolve_fn(promise, iter_result_obj(value, kind == CR_DONE));
+    c->promise = NULL;
+    for (int i = 1; i < c->requests->alen; i++) c->requests->arr[i-1] = c->requests->arr[i];
+    c->requests->arr[--c->requests->alen] = js_undef();
+    async_gen_pump(c);
+}
+static void async_gen_pump(struct coro *c) {
+    if (c->pumping) return;
+    c->pumping = 1;
+    while (!c->promise && c->requests->alen) {
+    jsobj *request = c->requests->arr[0].u.o;
+    c->promise = request->iv[1].u.o;
+    jsval out;
+    jsval request_kind;
+    js_get_c(js_objv(request), "kind", &request_kind);
+    int kind = (int)request_kind.u.n;
+    if (c->state == 3) { async_gen_finish(c, kind == 1 ? CR_THROW : CR_DONE, kind ? request->iv[0] : js_undef()); continue; }
+    int result = coro_resume(c, kind, request->iv[0], &out);
+    async_gen_finish(c, result, out);
+    }
+    c->pumping = 0;
+}
+
 static int gen_step(jsval thisv, int kind, jsval v, jsval *ret) {
     if (!IS_OBJ(thisv) || thisv.u.o->cls != C_CORO || !thisv.u.o->ptr) return js_throw("TypeError", "next method called on incompatible receiver");
     struct coro *c = thisv.u.o->ptr;
+    if (c->is_async == 2) {
+        jsobj *request = js_new_object(), *promise = js_new_promise();
+        request->iv[0] = v; request->iv[1] = js_objv(promise);
+        js_define(request, "kind", js_num(kind), 0);
+        js_array_push(c->requests, js_objv(request));
+        *ret = js_objv(promise); async_gen_pump(c); return 0;
+    }
     jsval out;
     int r = coro_resume(c, kind, v, &out);
     if (r == CR_THROW) return js_throw_val(out);
@@ -457,7 +501,8 @@ static int Async_resume(jsval thisv, int argc, jsval *argv, jsval *ret, jsobj *s
     struct coro *c = self->iv[0].u.o->ptr;
     jsval out;
     int r = coro_resume(c, self->is_arrow ? 1 : 0, argc ? argv[0] : js_undef(), &out);
-    if (r == CR_DONE) js_promise_resolve_fn(c->promise, out);
+    if (c->is_async == 2) async_gen_finish(c, r, out);
+    else if (r == CR_DONE) js_promise_resolve_fn(c->promise, out);
     else if (r == CR_THROW) js_promise_reject_fn(c->promise, out);
     *ret = js_undef();
     return 0;
@@ -498,6 +543,16 @@ void coro_init_protos(void) {
     js_define_key(js_generator_proto, S_iterator, js_objv(js_new_native(Gen_iter, "[Symbol.iterator]", 0)), P_WRITE | P_CONF);
     return_marker = js_new_object();
     js_define(js_generator_proto, "%return", js_objv(return_marker), 0);
+    jsval symbol_ctor, symbol_key;
+    js_get_c(js_objv(js_global), "Symbol", &symbol_ctor);
+    js_get_c(symbol_ctor, "asyncIterator", &symbol_key);
+    async_iterator_symbol = symbol_key.u.s;
+    async_generator_proto = js_new_object();
+    js_defn(async_generator_proto, "next", Gen_next, 1);
+    js_defn(async_generator_proto, "throw", Gen_throw, 1);
+    js_defn(async_generator_proto, "return", Gen_return, 1);
+    js_define_key(async_generator_proto, async_iterator_symbol, js_objv(js_new_native(Gen_iter, "[Symbol.asyncIterator]", 0)), P_WRITE | P_CONF);
+    js_define(js_generator_proto, "%async", js_objv(async_generator_proto), 0);
 }
 
 static int call_body(jsobj *fo, node *fn, jsenv *e, jsval *ret) {
@@ -589,7 +644,7 @@ static int call_closure(jsobj *fo, jsval thisv, int argc, jsval *argv, jsval *re
         int line = js_cur_line;
         const char *file = js_cur_file;
         if (call_depth <= 64) { js_frames[call_depth - 1].file = file; js_frames[call_depth - 1].line = line; js_frames[call_depth - 1].name = fn->str; }
-        if (fn->flags & F_GENERATOR) { struct coro *c = new_coro(fo, e, 0); *ret = js_objv(c->holder); }
+        if (fn->flags & F_GENERATOR) { struct coro *c = new_coro(fo, e, fn->kind ? 2 : 0); if (fn->kind) c->requests = js_new_array(0); *ret = js_objv(c->holder); }
         else if (fn->kind) st = start_async(fo, e, ret);
         else st = call_body(fo, fn, e, ret);
         if (st != ST_THROW) { js_cur_line = line; js_cur_file = file; }
@@ -671,6 +726,15 @@ int js_iter_open(jsval v, struct js_iter *it) {
     it->kind = 3;
     return 0;
 }
+static int async_iter_open(jsval v, struct js_iter *it) {
+    jsval method;
+    if (IS_NULLISH(v)) return js_throw("TypeError", "value is not async iterable");
+    if (js_get(v, async_iterator_symbol, &method) < 0) return -1;
+    if (IS_NULLISH(method)) return js_iter_open(v, it);
+    memset(it, 0, sizeof(*it)); it->obj = v; it->kind = 4;
+    if (js_call(method, v, 0, NULL, &it->iter) < 0) return -1;
+    return js_get(it->iter, S_next, &it->next);
+}
 
 int js_iter_step(struct js_iter *it, jsval *out, int *done) {
     *done = 0;
@@ -692,6 +756,7 @@ int js_iter_step(struct js_iter *it, jsval *out, int *done) {
     }
     jsval r, d;
     if (js_call(it->next, it->iter, 0, NULL, &r) < 0) return -1;
+    if (it->kind == 4 && await_value(r, &r)) return -1;
     if (!IS_OBJ(r)) return js_throw("TypeError", "iterator result is not an object");
     if (js_get(r, S_done, &d) < 0) return -1;
     if (js_truthy(d)) { *done = 1; return 0; }
@@ -699,11 +764,11 @@ int js_iter_step(struct js_iter *it, jsval *out, int *done) {
 }
 
 void js_iter_close(struct js_iter *it) {
-    if (it->kind != 3) return;
+    if (it->kind != 3 && it->kind != 4) return;
     jsval f, r;
     if (js_get_c(it->iter, "return", &f) == 0 && js_is_callable(f)) {
         jsval save = js_exc;
-        js_call(f, it->iter, 0, NULL, &r);
+        if (js_call(f, it->iter, 0, NULL, &r) == 0 && it->kind == 4) await_value(r, &r);
         js_exc = save;
     }
 }
@@ -1304,19 +1369,21 @@ static int ev(node *n, jsenv *env, jsval *out) {
     case N_YIELD: {
         jsval v = js_undef();
         if (n->a) EV(n->a, &v);
-        if (!cur_coro || cur_coro->is_async) return js_throw("SyntaxError", "yield outside of a generator") ? ST_THROW : ST_THROW;
+        if (!cur_coro || cur_coro->is_async == 1) return js_throw("SyntaxError", "yield outside of a generator") ? ST_THROW : ST_THROW;
         if (n->op == 1) {                                     /* yield* — отдать всё из другого итератора */
             struct js_iter it;
-            TRY(js_iter_open(v, &it));
+            TRY(cur_coro->is_async == 2 ? async_iter_open(v, &it) : js_iter_open(v, &it));
             for (;;) {
                 jsval x, in;
                 int done;
                 TRY(js_iter_step(&it, &x, &done));
                 if (done) { *out = js_undef(); return ST_OK; }
+                if (cur_coro->is_async == 2) { int st = coro_await(x, &x); if (st) return st; }
                 int st = coro_suspend(CR_YIELD, x, &in);
                 if (st) { js_iter_close(&it); return st; }
             }
         }
+        if (cur_coro->is_async == 2) { int st = coro_await(v, &v); if (st) return st; }
         return coro_suspend(CR_YIELD, v, out);
     }
     case N_SUPER:
@@ -1560,13 +1627,14 @@ static int exec_loop(node *s, jsenv *env, jsval *ret, jsstr *label) {
             return ST_OK;
         }
         struct js_iter it;
-        if (js_iter_open(obj, &it) < 0) return ST_THROW;
+        if (((s->flags & F_GENERATOR) ? async_iter_open(obj, &it) : js_iter_open(obj, &it)) < 0) return ST_THROW;
         for (;;) {
             if (check_limits() < 0) return ST_THROW;
             jsval v;
             int done;
             if (js_iter_step(&it, &v, &done) < 0) return ST_THROW;
             if (done) return ST_OK;
+            if ((s->flags & F_GENERATOR) && it.kind != 4 && await_value(v, &v)) return ST_THROW;
             jsenv *e = has_scope ? js_new_env(env, s->scope->nslots) : env;
             if ((st = bind_pattern(s->a, v, e, 1))) { js_iter_close(&it); return st; }
             st = exec_stmt(s->c, e, ret);

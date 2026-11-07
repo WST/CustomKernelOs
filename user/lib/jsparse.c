@@ -42,6 +42,7 @@ struct tok {
     int line;
     jsstr *s, *s2;
     double num;
+    int start, end;
 };
 
 static jsstr *S_this, *S_arguments, *S_callee_slot, *S_empty;
@@ -240,6 +241,7 @@ static int lex_all(void) {
             break;
         }
         if (spos >= slen) { new_tok(T_EOF)->nl = 1; break; }
+        int token_start = spos;
         int c = (ju8)src[spos];
         struct tok *t;
         if (is_id_start(c) || c == '\\' || (c == '#' && spos + 1 < slen && is_id_start((ju8)src[spos + 1]))) {
@@ -364,6 +366,7 @@ static int lex_all(void) {
                 if (paren_sp > 0) paren_sp--;
             }
         }
+        t->start = token_start; t->end = spos;
         t->nl = nl;
         nl = 0;
     }
@@ -1148,7 +1151,6 @@ static node *parse_function(int flags, int is_decl) {
     in_gen = next_gen;
     if (next_gen) {
         fn->flags |= F_GENERATOR;
-        if (next_async) perror_at("async generators are not supported");
     }
     next_async = next_gen = 0;
     no_in = 0;
@@ -1278,7 +1280,8 @@ static int let_is_decl(void) {
 static node *parse_for(void) {
     int line = CUR->line;
     next();                                                 /* for */
-    if (is_kw(KW_AWAIT)) perror_at("for await is not supported");
+    int await_loop = is_kw(KW_AWAIT);
+    if (await_loop) { if (!in_async) perror_at("for await outside async function"); next(); }
     expect('(');
     node *init = NULL;
     int kind = 0;
@@ -1292,6 +1295,7 @@ static node *parse_for(void) {
         no_in = 0;
         if (is_kw(KW_OF) || is_kw(KW_IN)) {
             node *n = mk(is_kw(KW_OF) ? N_FOROF : N_FORIN);
+            if (await_loop) { if (n->type != N_FOROF) perror_at("for await requires of"); n->flags |= F_GENERATOR; }
             n->line = line;
             next();
             n->kind = kind;
@@ -1826,6 +1830,144 @@ static void res_script(node *sc) {
     sc->a = vars;
     rs_free(&tmp);
     res_list(sc->list, sc->n, &g);
+}
+
+/* Module syntax is lowered using lexer tokens, never text/regexp replacement.
+ * The browser links live bindings and executes each isolated generator once. */
+static void module_pair(jsobj *a, jsstr *x, jsstr *y) {
+    jsobj *p = js_new_array(0);
+    js_array_push(p, js_strv(x)); js_array_push(p, js_strv(y));
+    js_array_push(a, js_objv(p));
+}
+
+int js_module_compile(const char *source, int len, jsval *out) {
+    char err[200];
+    src = source; slen = len; spos = 0; sline = 1; ntok = 0; failed = 0;
+    perr = err; perrmax = sizeof(err); err[0] = 0;
+    jsobj *deps = js_new_array(0), *exports = js_new_array(0);
+    jsbuf code = {0}; int cursor = 0, depth = 0;
+    if (!lex_all()) goto fail;
+    /* EOF's offsets are not assigned by the normal lexer. */
+    toks[ntok - 1].start = toks[ntok - 1].end = len;
+    for (int i = 0; i < ntok - 1 && !failed; i++) {
+        struct tok *t = &toks[i];
+        int prev_member = i && (toks[i-1].op == '.' || toks[i-1].op == P_OPTCHAIN);
+        if (t->kw == KW_IMPORT && !prev_member && toks[i+1].op == '(') {
+            jb_add(&code, source + cursor, t->start - cursor);
+            jb_adds(&code, "__module_import"); cursor = t->end; continue;
+        }
+        if (t->kw == KW_IMPORT && !prev_member && toks[i+1].op == '.' && i+2 < ntok &&
+            toks[i+2].s && !strcmp(toks[i+2].s->s, "meta")) {
+            jb_add(&code, source + cursor, t->start - cursor);
+            jb_adds(&code, "__module_meta"); cursor = toks[i+2].end; i += 2; continue;
+        }
+        if (t->op == '{' || t->op == '(' || t->op == '[') depth++;
+        if (t->op == '}' || t->op == ')' || t->op == ']') depth--;
+        if (depth || prev_member || (t->kw != KW_IMPORT && t->kw != KW_EXPORT)) continue;
+        int start = i, j = i + 1, is_export = t->kw == KW_EXPORT;
+        jsobj *names = js_new_array(0);
+        if (is_export && toks[j].kw == KW_DEFAULT) {
+            jb_add(&code, source + cursor, t->start - cursor);
+            int k = j + 1;
+            if (toks[k].kw == KW_ASYNC) k++;
+            if (toks[k].kw == KW_FUNCTION || toks[k].kw == KW_CLASS) {
+                k++;
+                if (toks[k].op == '*') k++;
+                if (toks[k].type == T_NAME) {
+                    cursor = toks[j].end; i = j;
+                    module_pair(exports, js_perm("default"), toks[k].s);
+                    continue;
+                }
+            }
+            jb_adds(&code, "const __module_default = ");
+            cursor = toks[j].end; i = j;
+            module_pair(exports, js_perm("default"), js_perm("__module_default"));
+            continue;
+        }
+        if (is_export && (toks[j].kw == KW_VAR || toks[j].kw == KW_LET || toks[j].kw == KW_CONST ||
+            toks[j].kw == KW_FUNCTION || toks[j].kw == KW_CLASS || toks[j].kw == KW_ASYNC)) {
+            int decl = toks[j].kw;
+            if (decl == KW_ASYNC) j++;
+            j++;
+            if (toks[j].op == '*') j++;
+            if (toks[j].type != T_NAME) { lex_error("unsupported exported binding pattern"); break; }
+            module_pair(exports, toks[j].s, toks[j].s);
+            if (decl == KW_VAR || decl == KW_LET || decl == KW_CONST) {
+                int nest = 0;
+                for (int k = j+1; k < ntok-1; k++) {
+                    int op = toks[k].op;
+                    if (!nest && (op == ';' || toks[k].nl)) break;
+                    if (!nest && op == ',') {
+                        if (toks[k+1].type != T_NAME) { lex_error("unsupported exported binding pattern"); break; }
+                        module_pair(exports, toks[k+1].s, toks[k+1].s);
+                    }
+                    if (op == '(' || op == '[' || op == '{') nest++;
+                    if (op == ')' || op == ']' || op == '}') nest--;
+                }
+            }
+            jb_add(&code, source + cursor, t->start - cursor);
+            cursor = t->end; continue;
+        }
+        if (!is_export && toks[j].type == T_STR) {
+            /* import 'side-effect.js' */
+        } else {
+            if (!is_export && toks[j].type == T_NAME) {
+                module_pair(names, js_perm("default"), toks[j++].s);
+                if (toks[j].op == ',') j++;
+            }
+            if (toks[j].op == '*') {
+                j++;
+                jsstr *alias = js_perm("*");
+                if (toks[j].s && !strcmp(toks[j].s->s, "as")) { j++; alias = toks[j++].s; }
+                if (!alias || j >= ntok) { lex_error("expected namespace alias"); break; }
+                module_pair(names, js_perm("*"), alias);
+            } else if (toks[j].op == '{') {
+                j++;
+                while (j < ntok-1 && toks[j].op != '}' && !failed) {
+                    jsstr *name = toks[j].s, *alias = name;
+                    if (!name) { lex_error("expected module binding"); break; }
+                    j++;
+                    if (toks[j].s && !strcmp(toks[j].s->s, "as")) { j++; alias = toks[j++].s; }
+                    if (!alias) { lex_error("expected module alias"); break; }
+                    module_pair(names, name, alias);
+                    if (toks[j].op != ',') break;
+                    j++;
+                }
+                if (toks[j].op != '}') { lex_error("expected closing module binding list"); break; }
+                j++;
+            }
+            if (toks[j].s && !strcmp(toks[j].s->s, "from")) j++;
+            else if (!is_export) { lex_error("expected module specifier"); break; }
+        }
+        if (toks[j].type == T_STR) {
+            jsobj *dep = js_new_object();
+            js_define(dep, "url", js_strv(toks[j].s), P_ENUM);
+            js_define(dep, "names", js_objv(names), P_ENUM);
+            js_define(dep, "reexport", js_bool(is_export), P_ENUM);
+            js_array_push(deps, js_objv(dep)); j++;
+        } else if (is_export) {
+            if (toks[start+1].op != '{') { lex_error("expected re-export module specifier"); break; }
+            for (int k = 0; k < names->alen; k++) {
+                jsobj *p = names->arr[k].u.o;
+                module_pair(exports, p->arr[1].u.s, p->arr[0].u.s);
+            }
+        } else { lex_error("expected module URL string"); break; }
+        int end = toks[j-1].end;
+        if (toks[j].op == ';') { end = toks[j].end; j++; }
+        jb_add(&code, source + cursor, toks[start].start - cursor);
+        cursor = end; i = j-1;
+    }
+    if (failed) goto fail;
+    jb_add(&code, source + cursor, len - cursor);
+    jsobj *result = js_new_object();
+    js_define(result, "code", js_strv(jb_str(&code)), P_ENUM);
+    js_define(result, "deps", js_objv(deps), P_ENUM);
+    js_define(result, "exports", js_objv(exports), P_ENUM);
+    free(toks); toks = NULL; tcap = ntok = 0;
+    *out = js_objv(result); return 0;
+fail:
+    jb_free(&code); free(toks); toks = NULL; tcap = ntok = 0;
+    return js_throw("SyntaxError", "%s", err);
 }
 
 /* ------------------------------------------------------------------ вход */
