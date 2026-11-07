@@ -106,6 +106,21 @@ static int syscall3(int n, int a, int b, int c) {
         return r;
     }
     case SYS_MKDIR: return __syscall(39, a, 0755);
+    case SYS_CHDIR: return __syscall(12, a);
+    case SYS_FORK:  return __syscall(2);
+    case SYS_EXEC: {
+        static char *envp[] = { 0 };
+        return __syscall(11, a, b, (int)envp);
+    }
+    case SYS_WAITPID: {
+        int st = 0, r = __syscall(7, a, (int)&st, c);
+        if (r < 0) return r;
+        if (b) {
+            int code = (st & 0x7f) ? 128 + (st & 0x7f) : (st >> 8) & 0xff;
+            *(int *)b = code;
+        }
+        return r;
+    }
     case SYS_RENAME: return __syscall(38, a, b);
     case SYS_SBRK: {
         if (!linux_brk) linux_brk = __syscall(45, 0);
