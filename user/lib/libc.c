@@ -58,13 +58,13 @@ static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
             if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
             if (seen++ != index) continue;
             memset(o, 0, sizeof *o);
-            for (i = 0; i < 27 && name[i]; i++) o->name[i] = name[i];
+            for (i = 0; i < 255 && name[i]; i++) o->name[i] = name[i];
             if (typ == 4) o->type = 2;
             else if (typ == 2) o->type = 4;
             else if (typ == 6) o->type = 3;
             else o->type = 1;
             {
-                char full[192];
+                char full[512];
                 unsigned char st[64];
                 unsigned mode;
                 if (snprintf(full, sizeof full, "%s/%s", path, o->name) < (int)sizeof full &&
@@ -1328,7 +1328,7 @@ int remove(const char *path) {
 }
 
 struct DIR {
-    char path[128];
+    char path[1024];
     int index;
     struct dirent ent;
 };
@@ -1341,7 +1341,7 @@ DIR *opendir(const char *name) {
     if (r < 0) { errno = -r; return NULL; }
     if (info.type != 2) { errno = ENOTDIR; return NULL; }
     n = strlen(name);
-    if (n == 0 || n >= 128) { errno = n ? ENAMETOOLONG : ENOENT; return NULL; }
+    if (n == 0 || n >= 1024) { errno = n ? ENAMETOOLONG : ENOENT; return NULL; }
     d = malloc(sizeof *d);
     if (!d) { errno = ENOMEM; return NULL; }
     memcpy(d->path, name, n + 1);

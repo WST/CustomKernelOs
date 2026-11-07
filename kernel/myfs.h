@@ -4,6 +4,9 @@
 void myfs_select(int slot, int device);
 int  myfs_init(bool *formatted, bool allow_format); /* private VFS backend */
 int  myfs_format(void);
+#ifdef HOST_TEST
+int  myfs_format_legacy(void);
+#endif
 bool myfs_ready(void);
 
 int  myfs_resolve(u32 cwd, const char *path, u32 *ino);

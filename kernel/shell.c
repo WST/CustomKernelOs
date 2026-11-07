@@ -24,7 +24,7 @@ static u32  cwd = FS_ROOT;               /* текущий каталог (inode
 /* ======================================================== ввод строки */
 
 static void prompt(void) {
-    char path[128];
+    char path[FS_PATH_MAX];
     vga_set_color(LIGHT_GREEN, BLACK); vga_puts("myos");
     if (fs_ready() && fs_getpath(cwd, path, sizeof(path)) == FS_OK) {
         vga_set_color(WHITE, BLACK);      vga_putc(':');
@@ -356,7 +356,7 @@ static void cmd_halt(char *a) {
 
 static void cmd_pwd(char *a) {
     (void)a;
-    char path[128];
+    char path[FS_PATH_MAX];
     if (!fs_err("pwd", fs_getpath(cwd, path, sizeof(path)))) kprintf("%s\n", path);
 }
 
@@ -525,7 +525,7 @@ static void cmd_cp(char *a) {
     if (fs_err(argv[0], open_file(argv[0], false, &src))) return;
 
     /* cp file dir -> dir/file */
-    char target[128];
+    char target[FS_PATH_MAX];
     u32 d;
     struct fs_stat st;
     if (!fs_resolve(cwd, argv[1], &d) && !fs_stat(d, &st) && st.type == FS_TYPE_DIR) {

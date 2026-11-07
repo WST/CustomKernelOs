@@ -45,7 +45,7 @@ static char out[512];
 #define err(...) (snprintf(out, sizeof(out), __VA_ARGS__), host_error(out))
 
 static int mkdir_p(const char *path) {
-    char buf[128];
+    char buf[FS_PATH_MAX];
     u32 n = strlen(path), ino;
     if (n >= sizeof(buf)) return FS_ENAMETOOLONG;
     memcpy(buf, path, n + 1);
@@ -82,7 +82,7 @@ static int cmd_put(const char *src, const char *dst) {
     if (!data) { err("myfs: cannot read %s\n", src); return FS_EIO; }
 
     /* создать родительские каталоги */
-    char parent[128];
+    char parent[FS_PATH_MAX];
     u32 n = strlen(dst);
     if (n >= sizeof(parent)) return FS_ENAMETOOLONG;
     memcpy(parent, dst, n + 1);
@@ -108,7 +108,7 @@ static int cmd_rm(const char *path) {
 
 /* скопировать байты в уже открытый образ (образ должен быть отформатирован) */
 static int put_bytes(const char *dst, const unsigned char *data, unsigned len) {
-    char parent[128];
+    char parent[FS_PATH_MAX];
     u32 n = strlen(dst);
     if (n >= sizeof(parent)) return FS_ENAMETOOLONG;
     memcpy(parent, dst, n + 1);
@@ -165,7 +165,7 @@ static int snap_dir(u32 ino, const char *path) {
     int r;
     while ((r = myfs_readdir(ino, &pos, &de)) == 1) {
         if (!strcmp(de.name, ".") || !strcmp(de.name, "..")) continue;
-        char child[512];
+        char child[FS_PATH_MAX];
         u32 pl = strlen(path), nl = strlen(de.name);
         if (pl == 1) {                                                          /* "/" */
             if (1 + nl >= sizeof(child)) return FS_ENAMETOOLONG;

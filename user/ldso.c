@@ -337,7 +337,7 @@ static int join(char *dst, int cap, const char *dir, const char *name) {
 }
 
 static int exists(const char *path) {
-    struct { char name[28]; unsigned type, size; } st;
+    struct { char name[256]; unsigned type, size; } st;
     int r = __syscall(SYS_STAT, (int)path, (int)&st);
     return !bad(r) && st.type == 1 && st.size >= 52;
 }
@@ -374,7 +374,7 @@ static int locate(const char *name, char *path, int cap) {
 }
 
 static unsigned char *read_whole(const char *path, unsigned *sz) {
-    struct { char name[28]; unsigned type, size; } st;
+    struct { char name[256]; unsigned type, size; } st;
     unsigned char *buf;
     unsigned got = 0;
     int fd, n;

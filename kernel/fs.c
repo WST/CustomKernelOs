@@ -82,7 +82,7 @@ static int resolve_impl(u32 cwd,const char *path,u32 *out) {
     *out=cur; return 0;
 }
 static int parent_impl(u32 cwd,const char *path,u32 *parent,char *name) {
-    char buf[128]; u32 n=strlen(path); if(!n || n>=sizeof(buf)) return FS_EINVAL;
+    char buf[FS_PATH_MAX]; u32 n=strlen(path); if(!n || n>=sizeof(buf)) return FS_EINVAL;
     memcpy(buf,path,n+1); while(n>1 && buf[n-1]=='/') buf[--n]=0;
     int slash=-1; for(u32 j=0;j<n;j++) if(buf[j]=='/') slash=j;
     const char *base=buf+slash+1;
@@ -104,19 +104,26 @@ static bool protected(u32 ino) {
     return false;
 }
 static int getpath_impl(u32 ino,char *buf,u32 len) {
-    char parts[64][FS_NAME_MAX+1]; int depth=0;
+    /* Номера inode, а не сами имена: 64 имени по 256 байт не помещаются в стек ядра. */
+    u32 chain[64]; int depth=0;
     while(ino!=FS_ROOT) {
         if(depth==64) return FS_ENAMETOOLONG;
+        chain[depth++]=ino;
         u32 parent; int r=lookup(ino,"..",&parent); if(r) return r;
-        u32 pos=0; struct fs_dirent de; bool found=false;
-        while(readdir_impl(parent,&pos,&de)==1) if(de.ino==ino) { strcpy(parts[depth++],de.name); found=true; break; }
-        if(!found) return FS_ENOENT;
+        if(parent==ino) return FS_EIO;
         ino=parent;
     }
-    u32 n=1; for(int j=0;j<depth;j++) n+=strlen(parts[j])+(j!=0);
-    if(n+1>len) return FS_ENAMETOOLONG;
+    if(len<2) return FS_ENAMETOOLONG;
     u32 p=0; buf[p++]='/';
-    for(int j=depth-1;j>=0;j--) { u32 l=strlen(parts[j]); memcpy(buf+p,parts[j],l); p+=l; if(j) buf[p++]='/'; }
+    for(int i=depth-1;i>=0;i--) {
+        u32 want=chain[i], parent=i==depth-1 ? FS_ROOT : chain[i+1];
+        u32 pos=0; struct fs_dirent de; bool found=false;
+        while(readdir_impl(parent,&pos,&de)==1) if(de.ino==want) { found=true; break; }
+        if(!found) return FS_ENOENT;
+        u32 n=strlen(de.name);
+        if(p+n+(i?1u:0u)+1u>len) return FS_ENAMETOOLONG;
+        memcpy(buf+p,de.name,n); p+=n; if(i) buf[p++]='/';
+    }
     buf[p]=0; return 0;
 }
 int fs_init(bool *formatted) {
@@ -139,6 +146,14 @@ int fs_format(void) {
     if(!r) { myfs_select(0,mounts[0].device); r=myfs_format(); }
     mutex_unlock(&lock); return r;
 }
+#ifdef HOST_TEST
+int fs_format_legacy(void) {
+    mutex_lock(&lock); int r=ready ? 0 : FS_ENODEV;
+    for(int s=1;s<4;s++) if(mounts[s].used) r=FS_EBUSY;
+    if(!r) { myfs_select(0,mounts[0].device); r=myfs_format_legacy(); }
+    mutex_unlock(&lock); return r;
+}
+#endif
 int fs_mount(u32 cwd,const char *device,const char *target) {
     mutex_lock(&lock); int d=block_find(device),r=0,slot=0; u32 ino=0,parent=0;
     if(d<0) r=FS_ENODEV;
@@ -232,21 +247,21 @@ int fs_stat(u32 ino,struct fs_stat *st) { mutex_lock(&lock); int r=stat_impl(ino
 int fs_readdir(u32 dir,u32 *pos,struct fs_dirent *out) { mutex_lock(&lock); int r=readdir_impl(dir,pos,out); mutex_unlock(&lock); return r; }
 int fs_getpath(u32 ino,char *buf,u32 len) { mutex_lock(&lock); int r=getpath_impl(ino,buf,len); mutex_unlock(&lock); return r; }
 int fs_create(u32 cwd,const char *path,int type,u32 *out) {
-    mutex_lock(&lock); u32 parent=0,ino; char name[28]; int r=parent_impl(cwd,path,&parent,name);
+    mutex_lock(&lock); u32 parent=0,ino; char name[FS_NAME_MAX+1]; int r=parent_impl(cwd,path,&parent,name);
     if(!r && (isdev(parent) || (parent==FS_ROOT && !strcmp(name,"dev")))) r=FS_EROFS;
     if(!r && type!=FS_TYPE_DIR && type!=FS_TYPE_FILE) r=FS_EINVAL;
     if(!r) { r=select_inode(parent); if(!r) r=myfs_create(LOCAL(parent),name,type,&ino); if(!r && out) *out=HANDLE(SLOT(parent),ino); }
     mutex_unlock(&lock); return r;
 }
 int fs_remove(u32 cwd,const char *path) {
-    mutex_lock(&lock); u32 ino,parent; char name[28]; int r=resolve_impl(cwd,path,&ino);
+    mutex_lock(&lock); u32 ino,parent; char name[FS_NAME_MAX+1]; int r=resolve_impl(cwd,path,&ino);
     if(!r && protected(ino)) r=FS_EBUSY;
     if(!r) r=parent_impl(cwd,path,&parent,name);
     if(!r) { r=select_inode(parent); if(!r) r=myfs_remove(LOCAL(parent),name); }
     mutex_unlock(&lock); return r;
 }
 int fs_rename(u32 cwd,const char *src,const char *dst) {
-    mutex_lock(&lock); u32 ino,sp,dp,dest; char sn[28],dn[28]; int r=resolve_impl(cwd,src,&ino);
+    mutex_lock(&lock); u32 ino,sp,dp,dest; char sn[FS_NAME_MAX+1],dn[FS_NAME_MAX+1]; int r=resolve_impl(cwd,src,&ino);
     if(!r && protected(ino)) r=FS_EBUSY;
     if(!r) r=parent_impl(cwd,src,&sp,sn);
     if(!r) {
@@ -257,7 +272,7 @@ int fs_rename(u32 cwd,const char *src,const char *dst) {
     if(!r && (isdev(dp) || (dp==FS_ROOT && !strcmp(dn,"dev")))) r=FS_EROFS;
     if(!r && SLOT(sp)!=SLOT(dp)) r=FS_EXDEV;
     if(!r) {
-        char destpath[128]; r=select_inode(dp);
+        char destpath[FS_PATH_MAX]; r=select_inode(dp);
         if(!r) r=myfs_getpath(LOCAL(dp),destpath,sizeof(destpath));
         if(!r) { u32 n=strlen(destpath),l=strlen(dn);
             if(n+l+2>sizeof(destpath)) r=FS_ENAMETOOLONG;

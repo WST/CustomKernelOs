@@ -122,7 +122,7 @@ enum {
 
 /* для readdir */
 struct dirent_info {
-    char name[28];
+    char name[256];                 /* имя до 255 символов и нуль */
     unsigned type;                  /* 1 файл, 2 каталог */
     unsigned size;
 };

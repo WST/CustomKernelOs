@@ -10,10 +10,15 @@
  *   [B+1..B+I]     таблица inode (по 8 штук на блок)
  *   [...]          блоки данных
  *
- * inode 0 не используется (0 = «нет inode»), корневой каталог — inode 1. */
+ * inode 0 не используется (0 = «нет inode»), корневой каталог — inode 1.
+ * Каталог версии 1 — записи по 32 байта, имя до 27 символов.
+ * Каталог версии 2 — запись переменной длины, кратная 4 байтам:
+ * inode, длина записи, длина имени и само имя до 255 символов.
+ * format() и mkfs пишут версию 2; уже записанный том версии 1 читается как был. */
 
 #define FS_ROOT       1
-#define FS_NAME_MAX   27
+#define FS_NAME_MAX   255
+#define FS_PATH_MAX   1024
 
 enum { FS_TYPE_FREE = 0, FS_TYPE_FILE = 1, FS_TYPE_DIR = 2, FS_TYPE_BLOCK = 3, FS_TYPE_CHAR = 4 };
 
@@ -62,6 +67,9 @@ struct fs_info {
 
 int  fs_init(bool *formatted);   /* root: raw MyFS or first valid MyFS MBR partition */
 int  fs_format(void);
+#ifdef HOST_TEST
+int  fs_format_legacy(void);     /* том версии 1: записи по 32 байта */
+#endif
 bool fs_ready(void);
 
 int  fs_resolve(u32 cwd, const char *path, u32 *ino);

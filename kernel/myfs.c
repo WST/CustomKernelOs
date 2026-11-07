@@ -15,7 +15,8 @@ void *malloc(unsigned long); void free(void *);
 
 #define BS            512                       /* размер блока */
 #define MAGIC         0x5346594D                /* "MYFS" в little-endian */
-#define VERSION       1
+#define VERSION       2                       /* format() пишет её; монтирование принимает и 1 */
+#define VERSION_MIN   1
 #define NDIRECT       12
 #define NINDIRECT     (BS / 4)                  /* 128 ссылок в косвенном блоке */
 #define NDINDIRECT    (NINDIRECT * NINDIRECT)  /* 16384 блока через двойной косвенный */
@@ -45,13 +46,23 @@ struct inode {
     u32 dindirect;      /* двойной косвенный: блок ссылок на блоки ссылок (было reserved = 0) */
 } __attribute__((packed));                      /* ровно 64 байта */
 
-struct dirent {
+struct dirent_v1 {
     u32  ino;
-    char name[FS_NAME_MAX + 1];
-} __attribute__((packed));                      /* 32 байта, 16 в блоке */
+    char name[28];
+} __attribute__((packed));                      /* версия 1: 32 байта, имя до 27 символов */
+
+struct dirent_v2 {
+    u32 ino;
+    u16 reclen;                                 /* вся запись, кратна 4 */
+    u8  namelen;
+    u8  pad;
+} __attribute__((packed));
+
+#define NAME_V1 27
 
 _Static_assert(sizeof(struct inode) == 64, "inode must be 64 bytes");
-_Static_assert(sizeof(struct dirent) == 32, "dirent must be 32 bytes");
+_Static_assert(sizeof(struct dirent_v1) == 32, "dirent v1 must be 32 bytes");
+_Static_assert(sizeof(struct dirent_v2) == 8, "dirent v2 header must be 8 bytes");
 _Static_assert(sizeof(struct superblock) == BS, "superblock must be one block");
 
 struct fs_state { struct superblock super; u8 *bits; u32 bitmap_bytes, hint; bool active; u32 nblocks, ninodes; int device; };
@@ -293,58 +304,183 @@ static int dir_check(u32 dir) {
     return in.type == FS_TYPE_DIR ? FS_OK : FS_ENOTDIR;
 }
 
+static int legacy(void) { return sb.version < 2; }
+static u32 name_max(void) { return legacy() ? NAME_V1 : (u32)FS_NAME_MAX; }
+
+/* Длина записи версии 2: заголовок, имя и нуль, округление вверх до 4. */
+static u16 span_v2(unsigned namelen) {
+    unsigned n = 8 + namelen + 1;
+    return (u16)((n + 3u) & ~3u);
+}
+
+static int read_v1(u32 dir, u32 off, struct dirent_v1 *de) {
+    int n = myfs_read(dir, off, de, sizeof(*de));
+    if (n == 0) return 0;
+    if (n != (int)sizeof(*de)) return FS_EIO;
+    de->name[NAME_V1] = 0;
+    return 1;
+}
+
+static int read_v2(u32 dir, u32 off, struct dirent_v2 *h, char *name) {
+    int n = myfs_read(dir, off, h, sizeof(*h));
+    if (n == 0) return 0;
+    if (n != (int)sizeof(*h)) return FS_EIO;
+    if (h->reclen < 12 || (h->reclen & 3) || (unsigned)h->namelen + 9u > h->reclen)
+        return FS_EIO;
+    if (name) {
+        n = myfs_read(dir, off + 8, name, h->namelen + 1u);
+        if (n != (int)h->namelen + 1) return FS_EIO;
+        name[h->namelen] = 0;
+    }
+    return 1;
+}
+
+static int write_v2(u32 dir, u32 off, u32 ino, const char *name, u16 reclen) {
+    unsigned namelen = strlen(name);
+    u8 rec[8 + FS_NAME_MAX + 1];
+    if (reclen < span_v2(namelen) || reclen > sizeof(rec)) return FS_EIO;
+    memset(rec, 0, reclen);
+    rec[0] = (u8)ino; rec[1] = (u8)(ino >> 8); rec[2] = (u8)(ino >> 16); rec[3] = (u8)(ino >> 24);
+    rec[4] = (u8)reclen; rec[5] = (u8)(reclen >> 8);
+    rec[6] = (u8)namelen;
+    memcpy(rec + 8, name, namelen);
+    int w = myfs_write(dir, off, rec, reclen);
+    if (w < 0) return w;
+    return w == (int)reclen ? FS_OK : FS_EIO;
+}
+
 /* найти запись name; вернуть inode (0 — нет) и смещение записи */
 static u32 dir_lookup(u32 dir, const char *name, u32 *offset) {
-    struct dirent de;
-    for (u32 off = 0; myfs_read(dir, off, &de, sizeof(de)) == sizeof(de); off += sizeof(de)) {
-        if (de.ino && !strcmp(de.name, name)) {
-            if (offset) *offset = off;
-            return de.ino;
+    u32 off = 0;
+    if (legacy()) {
+        struct dirent_v1 de;
+        for (;;) {
+            int r = read_v1(dir, off, &de);
+            if (r <= 0) return 0;
+            if (de.ino && !strcmp(de.name, name)) {
+                if (offset) *offset = off;
+                return de.ino;
+            }
+            off += sizeof(de);
         }
     }
-    return 0;
+    for (;;) {
+        struct dirent_v2 h;
+        char got[FS_NAME_MAX + 1];
+        u32 start = off;
+        int r = read_v2(dir, off, &h, got);
+        if (r <= 0) return 0;
+        if (h.ino && h.namelen == strlen(name) && !memcmp(got, name, h.namelen)) {
+            if (offset) *offset = start;
+            return h.ino;
+        }
+        off += h.reclen;
+    }
 }
 
 static int dir_add(u32 dir, const char *name, u32 ino) {
-    struct dirent de;
+    unsigned namelen = strlen(name);
+    if (namelen > name_max()) return FS_ENAMETOOLONG;
+    if (legacy()) {
+        struct dirent_v1 de;
+        u32 off = 0;
+        for (;;) {
+            int n = myfs_read(dir, off, &de, sizeof(de));
+            if (n == 0) break;
+            if (n != (int)sizeof(de)) return FS_EIO;
+            if (!de.ino) break;
+            off += sizeof(de);
+        }
+        memset(&de, 0, sizeof(de));
+        de.ino = ino;
+        memcpy(de.name, name, namelen + 1);
+        int w = myfs_write(dir, off, &de, sizeof(de));
+        return w < 0 ? w : FS_OK;
+    }
+    u16 need = span_v2(namelen);
     u32 off = 0;
-    while (myfs_read(dir, off, &de, sizeof(de)) == sizeof(de) && de.ino) off += sizeof(de);
-    memset(&de, 0, sizeof(de));
-    de.ino = ino;
-    memcpy(de.name, name, strlen(name) + 1);
-    int r = myfs_write(dir, off, &de, sizeof(de));
-    return r < 0 ? r : FS_OK;
+    for (;;) {
+        struct dirent_v2 h;
+        u32 start = off;
+        int r = read_v2(dir, off, &h, NULL);
+        if (r < 0) return r;
+        if (r == 0) return write_v2(dir, start, ino, name, need);
+        if (!h.ino && h.reclen >= need) return write_v2(dir, start, ino, name, h.reclen);
+        off += h.reclen;
+    }
 }
 
 static int dir_set(u32 dir, u32 off, u32 ino, const char *name) {
-    struct dirent de;
-    memset(&de, 0, sizeof(de));
-    de.ino = ino;
-    if (name) memcpy(de.name, name, strlen(name) + 1);
-    int r = myfs_write(dir, off, &de, sizeof(de));
-    return r < 0 ? r : FS_OK;
+    if (legacy()) {
+        struct dirent_v1 de;
+        memset(&de, 0, sizeof(de));
+        de.ino = ino;
+        if (name) memcpy(de.name, name, strlen(name) + 1);
+        int w = myfs_write(dir, off, &de, sizeof(de));
+        return w < 0 ? w : FS_OK;
+    }
+    if (!name) {
+        u32 zero = 0;
+        int w = myfs_write(dir, off, &zero, 4);   /* inode обнулён, длина записи сохранена */
+        return w < 0 ? w : FS_OK;
+    }
+    struct dirent_v2 h;
+    int r = read_v2(dir, off, &h, NULL);
+    if (r <= 0) return r < 0 ? r : FS_EIO;
+    if (h.reclen < span_v2(strlen(name))) return FS_ENOSPC;
+    return write_v2(dir, off, ino, name, h.reclen);
 }
 
 static bool dir_empty(u32 dir) {
-    struct dirent de;
-    for (u32 off = 0; myfs_read(dir, off, &de, sizeof(de)) == sizeof(de); off += sizeof(de))
-        if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) return false;
-    return true;
+    u32 off = 0;
+    if (legacy()) {
+        struct dirent_v1 de;
+        for (;;) {
+            int r = read_v1(dir, off, &de);
+            if (r <= 0) return true;
+            if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) return false;
+            off += sizeof(de);
+        }
+    }
+    for (;;) {
+        struct dirent_v2 h;
+        char name[FS_NAME_MAX + 1];
+        int r = read_v2(dir, off, &h, name);
+        if (r <= 0) return true;
+        if (h.ino && strcmp(name, ".") && strcmp(name, "..")) return false;
+        off += h.reclen;
+    }
 }
 
 static int myfs_readdir_impl(u32 dir, u32 *pos, struct fs_dirent *out) {
-    struct dirent de;
+    u32 off = *pos;
     int r = dir_check(dir);
     if (r) return r;
-    while (myfs_read(dir, *pos, &de, sizeof(de)) == sizeof(de)) {
-        *pos += sizeof(de);
-        if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) {
+    if (legacy()) {
+        struct dirent_v1 de;
+        for (;;) {
+            r = read_v1(dir, off, &de);
+            if (r <= 0) return r < 0 ? r : 0;
+            off += sizeof(de);
+            if (!de.ino || !strcmp(de.name, ".") || !strcmp(de.name, "..")) continue;
+            *pos = off;
             out->ino = de.ino;
-            memcpy(out->name, de.name, FS_NAME_MAX + 1);
+            memcpy(out->name, de.name, NAME_V1 + 1);
             return 1;
         }
     }
-    return 0;
+    for (;;) {
+        struct dirent_v2 h;
+        char name[FS_NAME_MAX + 1];
+        r = read_v2(dir, off, &h, name);
+        if (r <= 0) return r < 0 ? r : 0;
+        off += h.reclen;
+        if (!h.ino || !strcmp(name, ".") || !strcmp(name, "..")) continue;
+        *pos = off;
+        out->ino = h.ino;
+        memcpy(out->name, name, h.namelen + 1u);
+        return 1;
+    }
 }
 
 /* ---------------------------------------------------------------- пути */
@@ -360,7 +496,7 @@ static int myfs_resolve_impl(u32 cwd, const char *path, u32 *ino) {
         if (!*path) break;
         u32 len = 0;
         while (path[len] && path[len] != '/') len++;
-        if (len > FS_NAME_MAX) return FS_ENAMETOOLONG;
+        if (len > name_max()) return FS_ENAMETOOLONG;
         memcpy(name, path, len);
         name[len] = 0;
         path += len;
@@ -377,7 +513,7 @@ static int myfs_resolve_impl(u32 cwd, const char *path, u32 *ino) {
 
 /* Разделить путь на родительский каталог и последнее имя */
 static int resolve_parent(u32 cwd, const char *path, u32 *parent, char *name) {
-    char buf[128];
+    char buf[FS_PATH_MAX];
     u32 len = strlen(path);
     if (len == 0 || len >= sizeof(buf)) return FS_EINVAL;
     memcpy(buf, path, len + 1);
@@ -388,7 +524,7 @@ static int resolve_parent(u32 cwd, const char *path, u32 *parent, char *name) {
 
     const char *base = buf + slash + 1;
     if (!*base || !strcmp(base, ".") || !strcmp(base, "..")) return FS_EINVAL;
-    if (strlen(base) > FS_NAME_MAX) return FS_ENAMETOOLONG;
+    if (strlen(base) > name_max()) return FS_ENAMETOOLONG;
     memcpy(name, base, strlen(base) + 1);
 
     int r;
@@ -501,17 +637,18 @@ static int myfs_getpath_impl(u32 ino, char *buf, u32 len) {
 
 /* ---------------------------------------------------------------- монтирование */
 
-static int myfs_format_impl(void) {
+static int myfs_format_impl(u32 version) {
     static u8 zero[BS];
     u32 total = block_get(states[selected].device)->sectors;
     if (!total) return FS_ENODEV;
+    if (version < VERSION_MIN || version > VERSION) return FS_EINVAL;
     if (total > MAX_BLOCKS) return FS_EFBIG;
     int allocation=prepare_bitmap(((total + BITS_PER_BLK - 1) / BITS_PER_BLK)*BS);
     if(allocation) return allocation;
 
     memset(&sb, 0, sizeof(sb));
     sb.magic         = MAGIC;
-    sb.version       = VERSION;
+    sb.version       = version;
     sb.total_blocks  = total;
     sb.bitmap_start  = 1;
     sb.bitmap_blocks = (total + BITS_PER_BLK - 1) / BITS_PER_BLK;
@@ -564,7 +701,7 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
         return myfs_format();
     }
 
-    if (sb.version != VERSION || sb.total_blocks > MAX_BLOCKS || sb.total_blocks > block_get(states[selected].device)->sectors ||
+    if (sb.version < VERSION_MIN || sb.version > VERSION || sb.total_blocks > MAX_BLOCKS || sb.total_blocks > block_get(states[selected].device)->sectors ||
         sb.bitmap_start != 1 || sb.bitmap_blocks != (sb.total_blocks + BITS_PER_BLK - 1) / BITS_PER_BLK ||
         sb.inode_start != 1 + sb.bitmap_blocks || (sb.inode_count < MIN_INODES || sb.inode_count > MAX_INODES || sb.inode_count % INODES_PER_BLK) ||
         sb.inode_blocks != sb.inode_count / INODES_PER_BLK || sb.data_start != sb.inode_start + sb.inode_blocks ||
@@ -607,7 +744,7 @@ const char *myfs_strerror(int err) {
     case FS_EIO:          return "disk I/O error";
     case FS_ENODEV:       return "no disk / file system not mounted";
     case FS_EFBIG:        return "file or filesystem too large";
-    case FS_ENAMETOOLONG: return "name too long (max 27 chars)";
+    case FS_ENAMETOOLONG: return "name too long";
     default:              return "unknown error";
     }
 }
@@ -618,7 +755,10 @@ const char *myfs_strerror(int err) {
  * Мьютекс рекурсивный: myfs_create внутри себя вызывает myfs_write и т.п. */
 /* Private backend: all kernel access is serialized by the VFS lock. */
 int myfs_init(bool *formatted, bool allow_format) { int r = myfs_init_impl(formatted, allow_format); return r; }
-int myfs_format(void) { int r = myfs_format_impl(); return r; }
+int myfs_format(void) { int r = myfs_format_impl(VERSION); return r; }
+#ifdef HOST_TEST
+int myfs_format_legacy(void) { int r = myfs_format_impl(1); return r; }
+#endif
 int myfs_resolve(u32 cwd, const char *path, u32 *ino) { int r = myfs_resolve_impl(cwd, path, ino); return r; }
 int myfs_create(u32 cwd, const char *path, int type, u32 *out) { int r = myfs_create_impl(cwd, path, type, out); return r; }
 int myfs_remove(u32 cwd, const char *path) { int r = myfs_remove_impl(cwd, path); return r; }

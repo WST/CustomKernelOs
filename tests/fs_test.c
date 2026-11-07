@@ -73,6 +73,47 @@ int main(){
   for(int i=0;i<100;i++){ name[0]='n'; name[1]='0'+i/10; name[2]='0'+i%10; name[3]=0; CHECK(fs_create(1,name,FS_TYPE_FILE,0)==0);}
   u32 pos=0,cnt=0; struct fs_dirent de; while(fs_readdir(1,&pos,&de)==1) cnt++; CHECK(cnt==103);
   CHECK(fs_resolve(1,"n77",&up)==0);
+  /* Версия 2: имя длиннее 27 символов и путь длиннее 128. */
+  {
+    char longn[41], too[257], comp[181], nested[200], got[256];
+    u32 dir;
+    memset(longn, 'a', 40); longn[40] = 0;
+    CHECK(fs_create(1, longn, FS_TYPE_FILE, &up)==0);
+    CHECK(fs_resolve(1, longn, &up)==0);
+    pos = 0; cnt = 0;
+    while (fs_readdir(1, &pos, &de)==1) if (!strcmp(de.name, longn)) cnt++;
+    CHECK(cnt==1);
+    CHECK(fs_remove(1, longn)==0);
+    CHECK(fs_resolve(1, longn, &up)==FS_ENOENT);
+    CHECK(fs_create(1, longn, FS_TYPE_FILE, &up)==0);
+    CHECK(fs_resolve(1, longn, &up)==0);
+    CHECK(fs_remove(1, longn)==0);
+    memset(too, 'b', 256); too[256] = 0;
+    CHECK(fs_create(1, too, FS_TYPE_FILE, 0)==FS_ENAMETOOLONG);
+    memset(comp, 'c', 180); comp[180] = 0;
+    CHECK(fs_create(1, comp, FS_TYPE_DIR, &dir)==0);
+    CHECK(fs_getpath(dir, got, sizeof got)==0 && strlen(got)==181);
+    memcpy(nested, comp, 180);
+    memcpy(nested + 180, "/z", 3);
+    CHECK(strlen(nested) > 128);
+    CHECK(fs_create(1, nested, FS_TYPE_FILE, &up)==0);
+    CHECK(fs_init(&f)==0 && !f);
+    CHECK(fs_resolve(1, nested, &up)==0);
+  }
+  /* Версия 1 сохраняет записи по 32 байта и предел в 27 символов. */
+  CHECK(fs_format_legacy()==0);
+  {
+    char n27[28], n28[29];
+    memset(n27, 'n', 27); n27[27] = 0;
+    memset(n28, 'm', 28); n28[28] = 0;
+    CHECK(fs_create(1, "ok", FS_TYPE_FILE, &up)==0);
+    CHECK(fs_create(1, n27, FS_TYPE_FILE, &up)==0);
+    CHECK(fs_create(1, n28, FS_TYPE_FILE, 0)==FS_ENAMETOOLONG);
+    CHECK(fs_init(&f)==0 && !f);
+    CHECK(fs_resolve(1, n27, &up)==0);
+    CHECK(fs_remove(1, "ok")==0);
+    CHECK(fs_resolve(1, "ok", &up)==FS_ENOENT);
+  }
   CHECK(lock_depth == 0 && lock_calls > 0);
   printf("fs mutex: %d lock calls, all balanced, max nesting %d\n", lock_calls, max_depth);
   /* Virtual devices: byte reads, EOF and read-only raw access. */

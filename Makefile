@@ -365,6 +365,17 @@ test: | $(BUILD)
 	./$(BUILD)/x509-test
 	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c -o $(BUILD)/fs_test
 	./$(BUILD)/fs_test
+	$(MAKE) $(BUILD)/myfs
+	dd if=/dev/zero of=$(BUILD)/v1.img bs=512 count=4096 status=none
+	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/v1_seed.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $(BUILD)/v1_seed
+	./$(BUILD)/v1_seed $(BUILD)/v1.img
+	./$(BUILD)/myfs $(BUILD)/v1.img grow 4
+	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/note | grep -q v1-ok
+	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==2, v'
+	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
+	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
+	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
 	gcc -std=gnu17 -O1 -w -fno-builtin -Ikernel -include tests/host_env.h \
 	    tests/heap_test.c kernel/heap.c kernel/string.c -o $(BUILD)/heap_test
 	./$(BUILD)/heap_test
