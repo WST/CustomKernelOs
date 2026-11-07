@@ -3,9 +3,10 @@
  * остальное — открыть в Блокноте. Backspace или «Up» — на уровень выше. */
 #include "win.h"
 
-static int W = 560, H = 420;
-#define BAR_H 34
-#define ROW_H 22
+static int W = 720, H = 460;
+#define BAR_H 46
+#define SIDE_W 160
+#define ROW_H 28
 #define LIST_Y (BAR_H + 22)
 #define STATUS_H 22
 #define VIS ((H - LIST_Y - STATUS_H) / ROW_H)
@@ -17,6 +18,9 @@ static int n_ents, sel = -1, top;
 static unsigned last_click;
 static int last_idx = -1;
 static char status[80];
+static char home[128] = "/";
+static const char *places[] = { "Home", "File System", "Users", "Applications" };
+static const char *targets[] = { home, "/", "/home", "/bin" };
 
 static int cmp_ent(struct dirent_info *a, struct dirent_info *b) {
     if (a->type != b->type) return a->type == 2 ? -1 : 1;     /* папки сначала */
@@ -24,6 +28,12 @@ static int cmp_ent(struct dirent_info *a, struct dirent_info *b) {
 }
 
 static void read_dir(void) {
+    if(chdir(cwd)<0) {
+        getcwd(cwd,sizeof(cwd));
+        snprintf(status,sizeof(status),"Cannot open folder");
+        return;
+    }
+    getcwd(cwd,sizeof(cwd));
     n_ents = 0;
     struct dirent_info e;
     for (int i = 0; n_ents < 256 && dirread(cwd, i, &e) == 1; i++) {
@@ -32,7 +42,7 @@ static void read_dir(void) {
         while (j > 0 && cmp_ent(&e, &ents[j - 1]) < 0) { ents[j] = ents[j - 1]; j--; }
         ents[j] = e;
     }
-    sel = -1; top = 0;
+    sel = -1; top = 0; last_idx = -1;
     snprintf(status, sizeof(status), "%d items", n_ents);
     char t[64];
     snprintf(t, sizeof(t), "%s - Files", cwd);
@@ -53,9 +63,9 @@ static void go_up(void) {
 
 /* маленькие значки 16x16 — сглаженные, как в Yaru */
 static void icon_folder(int x, int y) {
-    gfx_round_rect(x + 1, y + 2, 7, 4, 1, RGB(196, 80, 38));
-    gfx_round_rect(x + 1, y + 3, 14, 11, 2, RGB(196, 80, 38));
-    gfx_round_rect(x + 1, y + 5, 14, 9, 2, RGB(240, 120, 64));
+    gfx_round_rect(x + 1, y + 2, 7, 4, 1, RGB(54, 147, 218));
+    gfx_round_rect(x + 1, y + 3, 14, 11, 2, RGB(54, 147, 218));
+    gfx_round_rect(x + 1, y + 5, 14, 9, 2, RGB(95, 192, 245));
 }
 static void icon_file(int x, int y, bool program) {
     if (program) {
@@ -70,28 +80,37 @@ static void icon_file(int x, int y, bool program) {
 }
 
 static bool is_program(const char *name) {
-    if (!strncmp(cwd, "/bin", 4)) return true;
-    return !strchr(name, '.');                    /* без расширения — скорее всего программа */
+    if (!strcmp(cwd, "/bin")) return true;
+    (void)name; return false;                    /* без расширения — скорее всего программа */
 }
 
 static void draw(void) {
-    gfx_fill_rect(0, 0, W, BAR_H, UI_FACE);
-    ui_button(6, 4, 50, 26, "Up", false);
-    ui_sunken(62, 4, W - 68, 26, C_WHITE);
-    ui_text(72, 4 + (26 - text_line_h(FONT_UI, UI_FONT_SIZE)) / 2, cwd, UI_TEXT);
-    gfx_fill_rect(0, BAR_H, W, H - BAR_H, C_WHITE);
-    gfx_fill_rect(0, BAR_H, W, 22, RGB(250, 250, 250));
-    text_draw(FONT_UI_MEDIUM, 13, 34, BAR_H + 3, "Name", UI_DARK);
-    text_draw(FONT_UI_MEDIUM, 13, W - 120, BAR_H + 3, "Size", UI_DARK);
-    gfx_fill_rect(0, LIST_Y - 1, W, 1, RGB(230, 230, 230));
+    gfx_fill_rect(0, 0, W, H, C_WHITE);
+    gfx_fill_rect(0, 0, W, BAR_H, RGB(246,246,248));
+    ui_button(10, 10, 44, 26, "Up", false);
+    ui_button(62, 10, 58, 26, "Home", false);
+    ui_text(SIDE_W+16, 15, cwd, UI_TEXT);
+    gfx_fill_rect(0, BAR_H, SIDE_W, H-BAR_H, RGB(237,240,245));
+    text_draw(FONT_UI_MEDIUM, 13, 18, BAR_H+16, "Favorites", UI_DARK);
+    for(int i=0;i<4;i++) {
+        int y=BAR_H+44+i*34;
+        if(!strcmp(cwd,targets[i])) gfx_round_rect(8,y,SIDE_W-16,30,6,RGB(211,222,239));
+        icon_folder(18,y+7);
+        ui_text(42,y+7,places[i],UI_TEXT);
+    }
+    gfx_fill_rect(SIDE_W, BAR_H, 1, H-BAR_H, RGB(215,219,225));
+    gfx_fill_rect(SIDE_W+1, BAR_H, W-SIDE_W-1, 22, RGB(250,250,252));
+    text_draw(FONT_UI_MEDIUM, 13, SIDE_W+38, BAR_H+3, "Name", UI_DARK);
+    text_draw(FONT_UI_MEDIUM, 13, W-120, BAR_H+3, "Size", UI_DARK);
+    gfx_fill_rect(SIDE_W, LIST_Y-1, W-SIDE_W, 1, RGB(230,230,234));
     for (int i = 0; i < VIS && top + i < n_ents; i++) {
         struct dirent_info *e = &ents[top + i];
         int y = LIST_Y + i * ROW_H;
         bool s_ = top + i == sel;
-        if (s_) gfx_round_rect(4, y + 1, W - 20, ROW_H - 2, 5, UI_ACCENT);
-        if (e->type == 2) icon_folder(10, y + 3); else icon_file(10, y + 3, is_program(e->name));
+        if (s_) gfx_round_rect(SIDE_W+6, y+1, W-SIDE_W-20, ROW_H-2, 5, RGB(55,126,231));
+        if (e->type == 2) icon_folder(SIDE_W+14, y+6); else icon_file(SIDE_W+14, y+6, is_program(e->name));
         int ty = y + (ROW_H - text_line_h(FONT_UI, UI_FONT_SIZE)) / 2;
-        ui_text(34, ty, e->name, s_ ? C_WHITE : UI_TEXT);
+        ui_text(SIDE_W+38, ty, e->name, s_ ? C_WHITE : UI_TEXT);
         char sz[24];
         if (e->type == 2) strcpy(sz, "folder");
         else if (e->size < 10240) snprintf(sz, sizeof(sz), "%u B", e->size);
@@ -124,7 +143,7 @@ static void open_entry(int i) {
     struct dirent_info *e = &ents[i];
     char p[160];
     full_path(p, sizeof(p), e->name);
-    if (e->type == 2) { strcpy(cwd, p); read_dir(); return; }
+    if (e->type == 2) { if(strlen(p)>=sizeof(cwd)) { strcpy(status,"Path too long"); return; } strcpy(cwd,p); read_dir(); return; }
     if (is_program(e->name)) {
         launch(p, NULL);
         snprintf(status, sizeof(status), "started %s (console programs show nothing here)", e->name);
@@ -143,7 +162,13 @@ static void scroll_to_sel(void) {
 int main(int argc, char **argv) {
     win = win_create("Files", W, H);
     if (!win) { dprintf(STDERR, "files: the desktop is not running\n"); return 1; }
-    win_set_resizable(win, 360, 220);
+    win_set_resizable(win, 540, 300);
+    char username[24]={0};
+    if(account(5,username,NULL)==0) {
+        if(!strcmp(username,"root")) strcpy(home,"/root");
+        else snprintf(home,sizeof(home),"/home/%s",username);
+    }
+    snprintf(cwd,sizeof(cwd),"%s",home);
     if (argc > 1) snprintf(cwd, sizeof(cwd), "%s", argv[1]);
     read_dir();
     draw();
@@ -151,8 +176,13 @@ int main(int argc, char **argv) {
     while (win_event(&e, -1)) {
         if (e.type == EV_CLOSE) break;
         if (e.type == EV_MOUSE_DOWN) {
-            if (ui_inside(e.x, e.y, 6, 4, 50, 26)) go_up();
-            else if (e.y >= LIST_Y && e.y < H - STATUS_H) {
+            if (ui_inside(e.x, e.y, 10, 10, 44, 26)) go_up();
+            else if(ui_inside(e.x,e.y,62,10,58,26)) { strcpy(cwd,home); read_dir(); }
+            else if(e.x<SIDE_W && e.y>=BAR_H+44 && e.y<BAR_H+44+4*34) {
+                int place=(e.y-BAR_H-44)/34;
+                strcpy(cwd,targets[place]); read_dir();
+            }
+            else if (e.x > SIDE_W && e.y >= LIST_Y && e.y < H - STATUS_H) {
                 if (e.x >= W - 12 && n_ents > VIS) {           /* клик по полосе — страница вверх/вниз */
                     top += e.y < (LIST_Y + H - STATUS_H) / 2 ? -VIS : VIS;
                     if (top > n_ents - VIS) top = n_ents - VIS;

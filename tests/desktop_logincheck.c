@@ -13,10 +13,13 @@ int observed_account(int op, const char *name, const char *password) {
 static int failures;
 #define CHECK(x) do { if (!(x)) { printf("LOGIN FAIL %d: %s\n",__LINE__,#x); failures++; } } while(0)
 int main(int argc, char **argv) {
-    char name[24];
+    char name[24], path[128]; struct dirent_info st;
     if (account(0,NULL,NULL)>0) CHECK(account(3,"root","review123")==0);
     CHECK(account(1,"root","review123")==0);
+    CHECK(getcwd(path,sizeof(path))==0 && !strcmp(path,"/root"));
+    CHECK(dirstat("/root",&st)==0 && st.type==2);
     if (account_list(name,1)==-ENOENT) CHECK(account(2,"alice","alice123")==0);
+    CHECK(dirstat("/home/alice",&st)==0 && st.type==2);
     if (argc>1 && !strcmp(argv[1],"desktop")) {
         CHECK(account(6,NULL,NULL)==0);
         puts("DESKTOP READY");
@@ -35,10 +38,12 @@ int main(int argc, char **argv) {
     ttymode(TTY_RAW|TTY_NONBLOCK|TTY_NOSIG);
     puts("LOGIN READY");
     bool ok=desktop_login();
+    CHECK(dirstat("/home/alice",&st)==0 && st.type==2);
     if (argc>1 && !strcmp(argv[1],"cancel")) {
         CHECK(!ok && account(4,NULL,NULL)==-EPERM);
     } else {
         CHECK(ok);
+        CHECK(getcwd(path,sizeof(path))==0 && !strcmp(path,"/home/alice"));
         CHECK(account(4,NULL,NULL)==1);
         CHECK(account(5,name,NULL)==0 && !strcmp(name,"alice"));
         CHECK(account(2,"intruder","test")==-EPERM);
