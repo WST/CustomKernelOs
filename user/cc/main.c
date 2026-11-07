@@ -4,8 +4,11 @@
  *   cc -o /bin/hi a.c b.c      -> несколько файлов в одну программу
  *   cc -E hello.c              -> показать текст после препроцессора
  *
- * Заголовки (#include <myos.h>, <gfx.h>) берутся из /include, библиотеки —
- * исходники /lib/libc.c и /lib/gfx.c — компилируются вместе с программой. */
+ *   cc -c a.c && cc a.o -lz    -> объектный файл, потом программа с /lib/libz.a
+ *
+ * Заголовки (#include <myos.h>, <gfx.h>) берутся из /include. Библиотеки —
+ * /lib/libgfx.a и /lib/libc.a; если их нет, вместе с программой компилируются
+ * исходники /lib/libc.c, gfx.c, vec.c, font.c, win.c. */
 #include "cc.h"
 
 char **include_paths;
@@ -127,14 +130,17 @@ static void add_include(char *path) {
 
 static void usage(void) {
     dprintf(STDERR,
-        "usage: cc [-c] [-o out] [-E] [-I dir] [-nostdlib] file.c... file.o...\n"
+        "usage: cc [-c] [-o out] [-E] [-I dir] [-L dir] [-l name] [-nostdlib] file.c... file.o... lib.a...\n"
         "  -c          only compile: each file.c -> file.o (ELF relocatable object)\n"
         "  -o out      name of the program or, with -c and one file, of the object\n"
         "              (default: first file without .c or .o)\n"
         "  -E          only preprocess, print the result\n"
         "  -I dir      also look for #include files in dir\n"
-        "  -nostdlib   do not add /lib/libc.c, gfx.c, vec.c, font.c, win.c\n"
-        "Objects (.o) may come from cc -c or from gcc -m32 -fno-pic.\n");
+        "  -L dir      also look for -l libraries in dir (before /lib and /usr/lib)\n"
+        "  -l name     link with the library libname.a\n"
+        "  -nostdlib   do not link /lib/libgfx.a and /lib/libc.a\n"
+        "              (without them on disk: /lib/gfx.c, vec.c, font.c, win.c, libc.c)\n"
+        "Objects (.o) may come from cc -c or from gcc -m32 -fno-pic; libraries (.a) from ar.\n");
     exit(2);
 }
 
@@ -149,17 +155,47 @@ static Obj *compile(const char *path) {
     return parse(preprocess(tok));
 }
 
-static char **roots;
-static int n_roots, cap_roots;
+/* растущий список строк */
+typedef struct { char **v; int n, cap; } StrList;
 
-static void add_root(char *name) {
-    if (n_roots == cap_roots) {
-        cap_roots = cap_roots ? cap_roots * 2 : 64;
-        char **p = xcalloc(sizeof(char *) * cap_roots);
-        if (roots) memcpy(p, roots, sizeof(char *) * n_roots);
-        roots = p;
+static void push(StrList *l, char *s) {
+    if (l->n == l->cap) {
+        l->cap = l->cap ? l->cap * 2 : 16;
+        char **p = xcalloc(sizeof(char *) * l->cap);
+        if (l->v) memcpy(p, l->v, sizeof(char *) * l->n);
+        l->v = p;
     }
-    roots[n_roots++] = name;
+    l->v[l->n++] = s;
+}
+
+static bool file_exists(const char *path) {
+#ifdef CC_HOST
+    int fd = open(path, O_RDONLY);
+#else
+    struct dirent_info st;
+    if (dirstat(path, &st) < 0 || st.type != 1) return false;
+    int fd = open(path, O_READ);
+#endif
+    if (fd < 0) return false;
+    close(fd);
+    return true;
+}
+
+static StrList lib_dirs;
+
+/* -lname -> первый найденный libname.a в каталогах -L, потом в /lib и /usr/lib */
+static char *find_lib(const char *name) {
+    for (int i = 0; i < lib_dirs.n; i++) {
+        char *p = format("%s/lib%s.a", lib_dirs.v[i], name);
+        if (file_exists(p)) return p;
+    }
+    error("cannot find -l%s", name);
+}
+
+static Archive *open_lib(const char *path) {
+    Archive *a = archive_read(path);
+    if (!a) error("%s: no such file", path);
+    return a;
 }
 
 static void print_tokens(Token *tok) {
@@ -186,30 +222,37 @@ static char *default_output(const char *src, const char *ext) {
 int main(int argc, char **argv) {
     char *out = NULL, *first = NULL;
     bool opt_E = false, opt_c = false, nostdlib = false;
-    char **srcs = xcalloc(sizeof(char *) * (argc + 8));
-    char **objs = xcalloc(sizeof(char *) * (argc + 1));
-    int n_srcs = 0, n_objs = 0;
+    StrList srcs = {0}, objs = {0}, libs = {0}, lnames = {0};
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "-o") && i + 1 < argc) { out = argv[++i]; continue; }
-        if (!strcmp(argv[i], "-c")) { opt_c = true; continue; }
-        if (!strcmp(argv[i], "-E")) { opt_E = true; continue; }
-        if (!strcmp(argv[i], "-linux")) { opt_linux = true; continue; }
-        if (!strcmp(argv[i], "-nostdlib")) { nostdlib = true; continue; }
-        if (!strcmp(argv[i], "-B") && i + 1 < argc) { base_dir = argv[++i]; continue; }
-        if (!strcmp(argv[i], "-I") && i + 1 < argc) { add_include(argv[++i]); continue; }
-        if (!strncmp(argv[i], "-I", 2) && argv[i][2]) { add_include(argv[i] + 2); continue; }
-        if (argv[i][0] == '-') usage();
-        if (!first) first = argv[i];
-        if (has_suffix(argv[i], ".o")) objs[n_objs++] = argv[i];
-        else srcs[n_srcs++] = argv[i];
+        char *a = argv[i];
+        if (!strcmp(a, "-o") && i + 1 < argc) { out = argv[++i]; continue; }
+        if (!strcmp(a, "-c")) { opt_c = true; continue; }
+        if (!strcmp(a, "-E")) { opt_E = true; continue; }
+        if (!strcmp(a, "-linux")) { opt_linux = true; continue; }
+        if (!strcmp(a, "-nostdlib")) { nostdlib = true; continue; }
+        if (!strcmp(a, "-B") && i + 1 < argc) { base_dir = argv[++i]; continue; }
+        if (!strcmp(a, "-I") && i + 1 < argc) { add_include(argv[++i]); continue; }
+        if (!strncmp(a, "-I", 2) && a[2]) { add_include(a + 2); continue; }
+        if (!strcmp(a, "-L") && i + 1 < argc) { push(&lib_dirs, argv[++i]); continue; }
+        if (!strncmp(a, "-L", 2) && a[2]) { push(&lib_dirs, a + 2); continue; }
+        /* -l ищется после разбора всех -L: место в списке библиотек запоминаем сразу */
+        if (!strcmp(a, "-l") && i + 1 < argc) { push(&lnames, argv[++i]); push(&libs, NULL); continue; }
+        if (!strncmp(a, "-l", 2) && a[2]) { push(&lnames, a + 2); push(&libs, NULL); continue; }
+        if (a[0] == '-') usage();
+        if (!first) first = a;
+        if (has_suffix(a, ".o")) push(&objs, a);
+        else if (has_suffix(a, ".a")) push(&libs, a);
+        else push(&srcs, a);
     }
     if (!first) usage();
     add_include(format("%s/include", base_dir));
+    push(&lib_dirs, format("%s/lib", base_dir));
+    push(&lib_dirs, format("%s/usr/lib", base_dir));
 
     if (opt_E) {
-        for (int i = 0; i < n_srcs; i++) {
-            Token *tok = tokenize_file(srcs[i]);
-            if (!tok) error("%s: no such file", srcs[i]);
+        for (int i = 0; i < srcs.n; i++) {
+            Token *tok = tokenize_file(srcs.v[i]);
+            if (!tok) error("%s: no such file", srcs.v[i]);
             print_tokens(preprocess(tok));
         }
         return 0;
@@ -217,46 +260,59 @@ int main(int argc, char **argv) {
 
     /* -c: каждый .c — в свой .o, без библиотеки и без компоновки */
     if (opt_c) {
-        if (!n_srcs) error("-c: no C files to compile");
-        if (out && n_srcs > 1) error("-o with -c needs exactly one C file");
-        for (int i = 0; i < n_srcs; i++)
-            obj_write(codegen(compile(srcs[i]), srcs[i], NULL, 0, true), out ? out : default_output(srcs[i], ".o"));
+        if (!srcs.n) error("-c: no C files to compile");
+        if (out && srcs.n > 1) error("-o with -c needs exactly one C file");
+        for (int i = 0; i < srcs.n; i++)
+            obj_write(codegen(compile(srcs.v[i]), srcs.v[i], NULL, 0, true), out ? out : default_output(srcs.v[i], ".o"));
         return 0;
     }
 
-    /* Все .c (вместе с библиотекой) компилируются в один объект: из него сразу
-     * выбрасывается всё, до чего не дойти от main и от ссылок из файлов .o. */
-    ObjFile **files = xcalloc(sizeof(ObjFile *) * (n_objs + 1));
-    int n_files = 1;
-    add_root("__libc_start");
-    add_root("main");
-    add_root("exit");
-    for (int i = 0; i < n_objs; i++) {
-        ObjFile *f = obj_read(objs[i]);
-        if (!f) error("%s: no such file", objs[i]);
-        files[n_files++] = f;
-        for (int j = 0; j < f->n_syms; j++)
-            if (f->syms[j].bind != BIND_LOCAL && f->syms[j].sec == SYM_UNDEF) add_root(f->syms[j].name);
-    }
+    for (int i = 0, k = 0; i < libs.n; i++)
+        if (!libs.v[i]) libs.v[i] = find_lib(lnames.v[k++]);
+
+    /* Стандартные библиотеки: готовые .a, а если их нет — исходники */
+    StrList libsrcs = {0};
     if (!nostdlib) {
-        srcs[n_srcs++] = format("%s/lib/libc.c", base_dir);
-        static const char *extra[] = { "gfx.c", "vec.c", "font.c", "win.c" };      /* есть на диске — добавляем */
-        for (int k = 0; k < 4; k++) {
-            char *g = format("%s/lib/%s", base_dir, extra[k]);
-            int len;
-            char *s = read_file(g, &len);
-            if (s) { free(s); srcs[n_srcs++] = g; }
+        char *gfx_a = format("%s/lib/libgfx.a", base_dir), *libc_a = format("%s/lib/libc.a", base_dir);
+        if (file_exists(gfx_a)) push(&libs, gfx_a);
+        else {
+            static const char *extra[] = { "gfx.c", "vec.c", "font.c", "win.c" };  /* есть на диске — добавляем */
+            for (int k = 0; k < 4; k++) {
+                char *g = format("%s/lib/%s", base_dir, extra[k]);
+                if (file_exists(g)) push(&libsrcs, g);
+            }
         }
+        if (file_exists(libc_a)) push(&libs, libc_a);
+        else push(&libsrcs, format("%s/lib/libc.c", base_dir));
     }
     if (!out) out = default_output(first, "");
 
-    Obj *prog = NULL, **tail = &prog;
-    for (int i = 0; i < n_srcs; i++) {
-        *tail = compile(srcs[i]);
-        while (*tail) tail = &(*tail)->next;
+    /* Все .c программы компилируются в один объект, исходники библиотеки — в
+     * другой. Объекты содержат все определения: на них могут сослаться другие
+     * файлы (библиотека — на main или на свой malloc вместо библиотечного), а
+     * лишнее отсеет компоновщик. */
+    ObjFile **files = xcalloc(sizeof(ObjFile *) * (objs.n + 2));
+    int n_files = 0;
+    for (int i = 0; i < objs.n; i++) {
+        ObjFile *f = obj_read(objs.v[i]);
+        if (!f) error("%s: no such file", objs.v[i]);
+        files[n_files++] = f;
     }
-    if (prog) files[0] = codegen(prog, "", roots, n_roots, false);
-    if (files[0]) link_program(files, n_files, out);
-    else link_program(files + 1, n_files - 1, out);
+    Archive **archives = xcalloc(sizeof(Archive *) * (libs.n + 1));
+    for (int i = 0; i < libs.n; i++) archives[i] = open_lib(libs.v[i]);
+
+    for (int pass = 0; pass < 2; pass++) {
+        StrList *list = pass ? &libsrcs : &srcs;
+        Obj *prog = NULL, **tail = &prog;
+        for (int i = 0; i < list->n; i++) {
+            *tail = compile(list->v[i]);
+            while (*tail) tail = &(*tail)->next;
+        }
+        if (!prog) continue;
+        ObjFile *f = codegen(prog, pass ? "standard library" : "", NULL, 0, true);
+        f->from_lib = pass;
+        files[n_files++] = f;
+    }
+    link_program(files, n_files, archives, libs.n, out);
     return 0;
 }

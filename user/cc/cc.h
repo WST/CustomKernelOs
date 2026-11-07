@@ -8,8 +8,8 @@
  *
  * Ассемблера нет: компилятор сам кодирует инструкции в байты. Свой компоновщик
  * (link.c) раскладывает код и данные по адресам (код с 0x40000000) и принимает
- * .o — свои и от gcc. Библиотеку (libc, gfx) cc компилирует вместе с программой
- * из исходников в /lib.
+ * .o — свои и от gcc — и библиотеки .a (/lib/libc.a, /lib/libgfx.a). Если архивов
+ * нет, библиотеку cc компилирует из исходников в /lib.
  *
  * Собирается и для MyOS (gcc в WSL), и для Linux (CC_HOST) — так его удобно тестировать. */
 #ifndef CC_H
@@ -324,7 +324,13 @@ struct ObjFile {
     int n_secs, cap_secs;
     LinkSym *syms;
     int n_syms, cap_syms;
+    bool from_lib;          /* часть библиотеки: определения уступают определениям программы */
 };
+
+/* Статическая библиотека (.a, формат ar): из неё в программу попадают только те
+ * члены, которые определяют ещё не найденные символы. Определения из библиотек
+ * уступают определениям из .c и .o программы: так свой malloc заменяет библиотечный. */
+typedef struct Archive Archive;
 
 ObjFile *obj_new(const char *name);
 int  obj_add_section(ObjFile *f, char *name, int kind, int align, unsigned char *data, int size);
@@ -332,7 +338,8 @@ int  obj_add_sym(ObjFile *f, char *name, int bind, int type, int sec, unsigned v
 void obj_add_reloc(Section *s, int offset, int type, int sym);
 void obj_write(ObjFile *f, const char *path);       /* ELF ET_REL */
 ObjFile *obj_read(const char *path);                /* NULL — нет такого файла */
-void link_program(ObjFile **files, int n_files, const char *out_path);
+Archive *archive_read(const char *path);            /* NULL — нет такого файла */
+void link_program(ObjFile **files, int n_files, Archive **libs, int n_libs, const char *out_path);
 void write_file(const char *path, Buf *b);
 
 /* roots — имена, которые нужны снаружи (точка входа, ссылки из .o);

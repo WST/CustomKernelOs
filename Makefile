@@ -173,6 +173,44 @@ $(BUILD)/cc-host: $(CC_SRC) user/cc/cc.h | $(BUILD)
 
 programs: $(UBINS)
 
+# Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
+# /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
+CCROOT    := $(BUILD)/ccroot
+CC_HDRS   := user/lib/myos.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
+CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
+GFX_PARTS := gfx vec font win
+
+$(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp $(CC_LIBSRC) $(CCROOT)/lib/
+	@touch $@
+
+$(BUILD)/libobj-linux/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -c $< -o $@
+
+$(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -c $< -o $@
+
+$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c
+
+$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(CCROOT)/lib/libgfx.a: $(patsubst %,$(BUILD)/libobj-linux/%.o,$(GFX_PARTS))
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a
+
 # ------------------------------------------------------------------ утилита myfs (хост)
 
 $(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/myfs.c kernel/myfs.h kernel/block.c kernel/block.h kernel/fs.h kernel/string.c | $(BUILD)
@@ -186,10 +224,11 @@ $(DISK):
 
 # Установить программы в /bin (остальные файлы на диске не трогаются).
 # Сторонние утилиты ставятся в /ext/bin командой ext, по файлам /ext/instructions.
-install: $(UBINS) $(BUILD)/myfs | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/ar /bin/ranlib || exit 1
 	@echo "==> инструкции сторонних программ в /ext/instructions"
 	@$(BUILD)/myfs $(DISK) mkdir /ext/bin >/dev/null
 	@$(BUILD)/myfs $(DISK) mkdir /ext/instructions >/dev/null
@@ -206,6 +245,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -303,13 +343,7 @@ gfxtest: | $(BUILD)
 	./$(BUILD)/gfx-host fonts > $(BUILD)/gfxtest.ppm && echo "==> $(BUILD)/gfxtest.ppm"
 
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
-CCROOT := $(BUILD)/ccroot
-cctest: $(BUILD)/cc-host
-	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@mkdir -p $(CCROOT)/include/sys
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
@@ -327,7 +361,8 @@ cctest: $(BUILD)/cc-host
 	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)" && \
-	sh tests/cclink.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclink.sh $(BUILD)/cct_cc2 $(CCROOT)
+	sh tests/cclink.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclink.sh $(BUILD)/cct_cc2 $(CCROOT) && \
+	sh tests/cclib.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclib.sh $(BUILD)/cct_cc2 $(CCROOT)
 
 vfstest: all
 	python3 tests/vfs_smoke.py
@@ -338,28 +373,16 @@ largetest: | $(BUILD)
 	python3 tests/run_large_fs.py $(BUILD)/large-fs-test
 
 # ext без сети: разбор инструкций, каталоги, отказ на неизвестной команде.
-exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/ext
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
 
 # gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
-gztest: $(BUILD)/cc-host
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+gztest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
 	@sh tests/gzip.sh $(BUILD)/gzip-linux
 
-cptest: $(BUILD)/cc-host
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
 	@sh tests/cp.sh $(BUILD)/cp-linux
 

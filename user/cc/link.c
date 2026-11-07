@@ -3,8 +3,10 @@
  * Объектный файл в памяти (ObjFile, cc.h) один и тот же, откуда бы он ни взялся:
  * из генератора (gen.c), из своего .o или из .o, собранного gcc (-m32 -fno-pic).
  * obj_write пишет его как ELF ET_REL — такие файлы понимают и binutils (ld, objdump).
- * link_program собирает из нескольких файлов программу ET_EXEC:
- *   1. общие символы: одно определение на имя (слабое уступает обычному, COMMON — любому);
+ * archive_read читает библиотеку .a (формат ar). link_program собирает программу ET_EXEC:
+ *   0. из библиотек — только члены, которые определяют ещё не найденные символы;
+ *   1. общие символы: одно определение на имя (библиотечное уступает слабому, слабое —
+ *      обычному, COMMON — любому);
  *   2. отсев: остаются только секции, до которых можно дойти от точки входа;
  *   3. раскладка: код и константы с TEXT_BASE, данные и bss — с новой страницы;
  *   4. перемещения: R_386_32 = S + A, R_386_PC32 = S + A - P (A лежит в самих байтах). */
@@ -267,14 +269,11 @@ static bool comdat_add(char *sig) {
         if (comdat_seen) memcpy(p, comdat_seen, sizeof(char *) * n_comdat);
         comdat_seen = p;
     }
-    comdat_seen[n_comdat++] = sig;
+    comdat_seen[n_comdat++] = strndup2(sig, strlen(sig));     /* буфер файла освободят */
     return true;
 }
 
-ObjFile *obj_read(const char *path) {
-    int len;
-    unsigned char *d = (unsigned char *)read_file(path, &len);
-    if (!d) return NULL;
+static ObjFile *obj_parse(const char *path, unsigned char *d, int len) {
     if (len < 52 || memcmp(d, "\x7f" "ELF", 4) || d[4] != 1 || d[5] != 1)
         error("%s: not an ELF32 little-endian file", path);
     if (rd16(d + 16) != 1) error("%s: not a relocatable object file (ET_REL)", path);
@@ -366,16 +365,158 @@ ObjFile *obj_read(const char *path) {
     #undef SH
     free(secmap);
     free(dropped);
+    return f;
+}
+
+ObjFile *obj_read(const char *path) {
+    int len;
+    unsigned char *d = (unsigned char *)read_file(path, &len);
+    if (!d) return NULL;
+    ObjFile *f = obj_parse(path, d, len);
     free(d);
     return f;
 }
 
+/* ------------------------------------------------------------ архивы .a */
+
+typedef struct ArMember {
+    char *name;
+    int   off, size;            /* данные члена в Archive.data */
+    bool  loaded;
+} ArMember;
+
+typedef struct IndexSym {
+    char *name;
+    int   member;
+} IndexSym;
+
+struct Archive {
+    char *path;
+    unsigned char *data;
+    int   len;
+    ArMember *members;
+    int   n_members;
+    IndexSym *index;
+    int   n_index;
+};
+
+static int ar_num(const unsigned char *p, int n) {
+    int v = 0;
+    for (int i = 0; i < n && p[i] >= '0' && p[i] <= '9'; i++) v = v * 10 + (p[i] - '0');
+    return v;
+}
+
+static unsigned rd32be(const unsigned char *p) {
+    return ((unsigned)p[0] << 24) | (p[1] << 16) | (p[2] << 8) | p[3];
+}
+
+/* индекс "/" — номера заголовков членов; если его нет, символы берём из самих членов */
+Archive *archive_read(const char *path) {
+    int len;
+    unsigned char *d = (unsigned char *)read_file(path, &len);
+    if (!d) return NULL;
+    if (len < 8 || memcmp(d, "!<arch>\n", 8)) error("%s: not an archive", path);
+    Archive *a = xcalloc(sizeof(Archive));
+    a->path = strndup2(path, strlen(path));
+    a->data = d;
+    a->len = len;
+
+    int cap = 0, pos = 8;
+    const unsigned char *idx = NULL, *longnames = NULL;
+    int idx_size = 0, longnames_len = 0;
+    int *hdr_off = NULL;
+    while (pos + 60 <= len) {
+        unsigned char *h = d + pos;
+        if (h[58] != '`' || h[59] != '\n') error("%s: broken archive member header", path);
+        int size = ar_num(h + 48, 10), here = pos;
+        unsigned char *data = h + 60;
+        if (pos + 60 + size > len) error("%s: truncated archive", path);
+        pos += 60 + size + (size & 1);
+        if (h[0] == '/' && h[1] == ' ') { idx = data; idx_size = size; continue; }
+        if (!memcmp(h, "/SYM64/", 7)) continue;
+        if (h[0] == '/' && h[1] == '/') { longnames = data; longnames_len = size; continue; }
+        char *name;
+        if (h[0] == '/' && h[1] >= '0' && h[1] <= '9') {
+            int off = ar_num(h + 1, 15), e = off;
+            if (!longnames || off >= longnames_len) error("%s: bad long member name", path);
+            while (e < longnames_len && longnames[e] != '/' && longnames[e] != '\n') e++;
+            name = strndup2((char *)longnames + off, e - off);
+        } else if (!memcmp(h, "#1/", 3)) {
+            int n = ar_num(h + 3, 13);
+            if (n > size) error("%s: bad member name", path);
+            name = strndup2((char *)data, n);
+            data += n;
+            size -= n;
+        } else {
+            int n = 0;
+            while (n < 16 && h[n] != '/' && h[n] != ' ') n++;
+            name = strndup2((char *)h, n);
+        }
+        if (a->n_members == cap) {
+            cap = cap ? cap * 2 : 16;
+            ArMember *m = xcalloc(sizeof(ArMember) * cap);
+            int *o = xcalloc(sizeof(int) * cap);
+            if (a->members) { memcpy(m, a->members, sizeof(ArMember) * a->n_members); memcpy(o, hdr_off, sizeof(int) * a->n_members); }
+            a->members = m;
+            hdr_off = o;
+        }
+        a->members[a->n_members].name = name;
+        a->members[a->n_members].off = data - d;
+        a->members[a->n_members].size = size;
+        hdr_off[a->n_members] = here;
+        a->n_members++;
+    }
+
+    if (idx && idx_size >= 4) {
+        int n = rd32be(idx);
+        if (4 + 4 * n > idx_size) error("%s: broken symbol index", path);
+        a->index = xcalloc(sizeof(IndexSym) * (n + 1));
+        const char *s = (const char *)idx + 4 + 4 * n, *end = (const char *)idx + idx_size;
+        for (int i = 0; i < n && s < end; i++) {
+            int off = rd32be(idx + 4 + 4 * i), m = 0;
+            while (m < a->n_members && hdr_off[m] != off) m++;
+            int sl = strlen(s);
+            if (m < a->n_members) {
+                a->index[a->n_index].name = (char *)s;
+                a->index[a->n_index].member = m;
+                a->n_index++;
+            }
+            s += sl + 1;
+        }
+    } else {
+        int icap = 0;
+        for (int m = 0; m < a->n_members; m++) {
+            unsigned char *md = d + a->members[m].off;
+            if (a->members[m].size < 4 || memcmp(md, "\x7f" "ELF", 4)) continue;
+            ObjFile *f = obj_parse(format("%s(%s)", path, a->members[m].name), md, a->members[m].size);
+            for (int j = 0; j < f->n_syms; j++) {
+                LinkSym *s = &f->syms[j];
+                if (s->bind == BIND_LOCAL || s->sec == SYM_UNDEF) continue;
+                if (a->n_index == icap) {
+                    icap = icap ? icap * 2 : 64;
+                    IndexSym *p = xcalloc(sizeof(IndexSym) * icap);
+                    if (a->index) memcpy(p, a->index, sizeof(IndexSym) * a->n_index);
+                    a->index = p;
+                }
+                a->index[a->n_index].name = s->name;
+                a->index[a->n_index].member = m;
+                a->n_index++;
+            }
+        }
+    }
+    free(hdr_off);
+    return a;
+}
+
 /* ------------------------------------------------------------ компоновщик */
+
+/* насколько определение «сильное»: побеждает большее, два обычных — ошибка */
+enum { DEF_NONE, DEF_COMMON, DEF_LIBRARY, DEF_WEAK, DEF_STRONG };
 
 struct GSym {
     GSym *next;
     char *name;
-    int   state;                /* 0 — не определён, 1 — COMMON, 2 — слабое, 3 — обычное определение */
+    int   state;                /* DEF_* */
     ObjFile *file;              /* где определение */
     int   idx;
     unsigned common_size, common_align;
@@ -401,7 +542,9 @@ static GSym *gsym_get(char *name, bool create) {
 
 static const char *file_name(ObjFile *f) { return *f->name ? f->name : "C sources"; }
 
+/* файл из библиотеки: его определения уступают всем остальным */
 static void add_globals(ObjFile *f) {
+    bool from_lib = f->from_lib;
     for (int i = 0; i < f->n_syms; i++) {
         LinkSym *s = &f->syms[i];
         if (s->bind == BIND_LOCAL) continue;
@@ -409,15 +552,15 @@ static void add_globals(ObjFile *f) {
         s->global = g;
         if (s->sec == SYM_UNDEF) continue;
         if (s->sec == SYM_COMMON) {
-            if (g->state == 0) { g->state = 1; g->file = f; g->idx = i; }
-            if (g->state == 1) {
+            if (g->state == DEF_NONE) { g->state = DEF_COMMON; g->file = f; g->idx = i; }
+            if (g->state == DEF_COMMON) {
                 if (s->size > g->common_size) g->common_size = s->size;
                 if (s->value > g->common_align) g->common_align = s->value;
             }
             continue;
         }
-        int st = s->bind == BIND_WEAK ? 2 : 3;
-        if (g->state == 3 && st == 3)
+        int st = from_lib ? DEF_LIBRARY : s->bind == BIND_WEAK ? DEF_WEAK : DEF_STRONG;
+        if (g->state == DEF_STRONG && st == DEF_STRONG)
             error("multiple definition of '%s' (%s and %s)", s->name, file_name(g->file), file_name(f));
         if (g->state >= st) continue;
         g->state = st;
@@ -433,8 +576,8 @@ static bool sym_target(ObjFile *f, int idx, Section **sec, unsigned *value) {
     *value = 0;
     if (s->bind != BIND_LOCAL) {
         GSym *g = s->global;
-        if (g->state == 0) return s->bind == BIND_WEAK;         /* слабая ссылка без определения = 0 */
-        if (g->state == 1) { *sec = g->common; return true; }
+        if (g->state == DEF_NONE) return s->bind == BIND_WEAK;  /* слабая ссылка без определения = 0 */
+        if (g->state == DEF_COMMON) { *sec = g->common; return true; }
         f = g->file;
         s = &f->syms[g->idx];
     }
@@ -489,15 +632,48 @@ static unsigned file_off(Section *s, unsigned data_vaddr, unsigned data_off) {
     return data_off + (s->addr - data_vaddr);
 }
 
-void link_program(ObjFile **files, int n_files, const char *out_path) {
-    for (int i = 0; i < n_files; i++) add_globals(files[i]);
+void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char *out_path) {
+    int n_files = n_in, cap_files = n_in + 16;
+    ObjFile **files = xcalloc(sizeof(ObjFile *) * (cap_files + 1));
+    for (int i = 0; i < n_in; i++) {
+        files[i] = in[i];
+        add_globals(files[i]);
+    }
+    gsym_get("__libc_start", true);                             /* на неё ссылается заглушка входа */
+
+    /* Библиотеки: брать члены, пока они определяют что-то нужное и ещё не найденное.
+     * Новый член может сослаться на символ из уже просмотренной библиотеки — поэтому по кругу. */
+    for (bool more = true; more; ) {
+        more = false;
+        for (int l = 0; l < n_libs; l++) {
+            Archive *a = libs[l];
+            for (int e = 0; e < a->n_index; e++) {
+                ArMember *m = &a->members[a->index[e].member];
+                if (m->loaded) continue;
+                GSym *g = gsym_get(a->index[e].name, false);
+                if (!g || g->state != DEF_NONE) continue;
+                m->loaded = true;
+                if (n_files == cap_files) {
+                    cap_files *= 2;
+                    ObjFile **p = xcalloc(sizeof(ObjFile *) * (cap_files + 1));
+                    memcpy(p, files, sizeof(ObjFile *) * n_files);
+                    files = p;
+                }
+                ObjFile *f = obj_parse(format("%s(%s)", a->path, m->name), a->data + m->off, m->size);
+                f->from_lib = true;
+                files[n_files++] = f;
+                add_globals(f);
+                more = true;
+            }
+        }
+    }
 
     /* COMMON: место в bss — в порядке первого появления, чтобы раскладка не зависела от хеша */
     ObjFile *common = obj_new("COMMON");
     for (int i = 0; i < n_files; i++)
         for (int j = 0; j < files[i]->n_syms; j++) {
             GSym *g = files[i]->syms[j].global;
-            if (!g || g->state != 1 || g->common || g->file != files[i] || g->idx != j) continue;
+            if (!g || g->state != DEF_COMMON || g->common || g->file != files[i] || g->idx != j) continue;
             int s = obj_add_section(common, g->name, SEC_BSS, g->common_align, NULL, g->common_size);
             g->common = common->secs[s];
         }
@@ -506,7 +682,7 @@ void link_program(ObjFile **files, int n_files, const char *out_path) {
     GSym *start = gsym_get("__libc_start", false);
     Section *start_sec;
     unsigned start_val;
-    if (!start || !start->state) error("undefined reference to '__libc_start'");
+    if (start->state == DEF_NONE) error("undefined reference to '__libc_start'");
     sym_target(start->file, start->idx, &start_sec, &start_val);
     mark(start_sec);
     mark_from_relocs();
