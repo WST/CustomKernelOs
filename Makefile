@@ -392,7 +392,8 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	    echo "32-bit programs cannot run here - only checking that tests and cc itself compile"; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_x || exit 1; done; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_x || exit 1; done; \
-	    $(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && echo "compile-only: OK"; \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
+	    sh tests/ccshared.sh $(BUILD)/cc-host $(CCROOT) && echo "compile-only: OK"; \
 	    exit 0; \
 	fi; \
 	for t in tests/cc/*.c; do \
@@ -410,7 +411,8 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)" && \
 	sh tests/cclink.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclink.sh $(BUILD)/cct_cc2 $(CCROOT) && \
-	sh tests/cclib.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclib.sh $(BUILD)/cct_cc2 $(CCROOT)
+	sh tests/cclib.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclib.sh $(BUILD)/cct_cc2 $(CCROOT) && \
+	sh tests/ccshared.sh $(BUILD)/cc-host $(CCROOT) && sh tests/ccshared.sh $(BUILD)/cct_cc2 $(CCROOT)
 
 vfstest: all
 	python3 tests/vfs_smoke.py

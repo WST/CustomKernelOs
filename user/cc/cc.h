@@ -50,6 +50,9 @@ extern char **include_paths;
 extern int    n_include_paths;
 extern bool   opt_linux;                            /* -linux: ELF для Linux (тесты на хосте) */
 extern bool   opt_pic;                              /* -fPIC: код не зависит от адреса загрузки */
+extern bool   opt_shared;                           /* -shared: собрать ET_DYN */
+extern bool   opt_static;                           /* -static: не искать .so, даже если они есть */
+extern char  *opt_soname;                           /* -soname: DT_SONAME, иначе имя файла -o */
 
 /* ------------------------------------------------------------ токены (lex.c) */
 
@@ -288,6 +291,10 @@ enum { STY_NOTYPE, STY_OBJECT, STY_FUNC, STY_SECTION };
 #define R_386_PC32   2
 #define R_386_GOT32  3              /* смещение ячейки GOT от _GLOBAL_OFFSET_TABLE_ */
 #define R_386_PLT32  4              /* как PC32, но цель — элемент PLT */
+#define R_386_COPY     5            /* в программе: скопировать объект из .so */
+#define R_386_GLOB_DAT 6            /* записать адрес символа в ячейку GOT */
+#define R_386_JMP_SLOT 7            /* то же для ячейки, через которую прыгает PLT */
+#define R_386_RELATIVE 8            /* прибавить к слову смещение загрузки */
 #define R_386_GOTOFF 9              /* адрес символа минус адрес GOT */
 #define R_386_GOTPC  10             /* адрес GOT минус адрес поля перемещения */
 
@@ -311,6 +318,7 @@ typedef struct Section {
     ObjFile *file;
     bool  live;                 /* компоновщик: до неё можно дойти от точки входа */
     unsigned addr;
+    int   shndx;                /* динамический ELF: номер в таблице секций, 0 — ещё не назначен */
 } Section;
 
 typedef struct LinkSym {
@@ -343,7 +351,8 @@ void obj_add_reloc(Section *s, int offset, int type, int sym);
 void obj_write(ObjFile *f, const char *path);       /* ELF ET_REL */
 ObjFile *obj_read(const char *path);                /* NULL — нет такого файла */
 Archive *archive_read(const char *path);            /* NULL — нет такого файла */
-void link_program(ObjFile **files, int n_files, Archive **libs, int n_libs, const char *out_path);
+void link_program(ObjFile **files, int n_files, Archive **libs, int n_libs,
+                  char **so_paths, int n_so, const char *out_path);
 void write_file(const char *path, Buf *b);
 
 /* roots — имена, которые нужны снаружи (точка входа, ссылки из .o);

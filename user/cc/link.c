@@ -13,7 +13,9 @@
  *      R_386_32 = S + A,  R_386_PC32 и R_386_PLT32 = S + A - P,
  *      R_386_GOTPC = GOT + A - P,  R_386_GOTOFF = S + A - GOT,
  *      R_386_GOT32 = смещение ячейки GOT. Для обычной программы PLT не строится:
- *      PLT32 считается как PC32, а ячейки GOT заполняются абсолютными адресами. */
+ *      PLT32 считается как PC32, а ячейки GOT заполняются абсолютными адресами.
+ * -shared и программа, которой нужна .so, идут другим путём (ET_DYN или ET_EXEC
+ * с PT_INTERP). Пока .so нет и -shared не задан, байты программы те же. */
 #include "cc.h"
 
 #define SHT_PROGBITS      1
@@ -21,6 +23,9 @@
 #define SHT_STRTAB        3
 #define SHT_RELA          4
 #define SHT_NOBITS        8
+#define SHT_HASH          5
+#define SHT_DYNAMIC       6
+#define SHT_DYNSYM        11
 #define SHT_REL           9
 #define SHT_INIT_ARRAY    14
 #define SHT_FINI_ARRAY    15
@@ -525,6 +530,10 @@ struct GSym {
     int   idx;
     unsigned common_size, common_align;
     Section *common;            /* выделенное место для COMMON */
+    int saw_call, saw_addr;     /* живая ссылка: вызов или взятие адреса */
+    int dyn;                    /* DYN_*: участие в динамической таблице */
+    int plt_index;              /* 0 — нет PLT, иначе номер заглушки с единицы */
+    unsigned dyn_size;          /* размер объекта из .so, для COPY */
 };
 
 #define GBUCKETS 4096
@@ -621,7 +630,7 @@ static bool reloc_ok(int type) {
     return type == R_386_32 || type == R_386_PC32 || type == R_386_PLT32 || is_pic_reloc(type);
 }
 
-static void mark_from_relocs(void) {
+static void mark_from_relocs(bool allow_undef) {
     while (n_work) {
         Section *s = work[--n_work];
         for (int i = 0; i < s->n_rels; i++) {
@@ -631,8 +640,10 @@ static void mark_from_relocs(void) {
                 error("unsupported relocation type %d in %s", r->type, where(s));
             Section *t;
             unsigned v;
-            if (!sym_target(s->file, r->sym, &t, &v))
+            if (!sym_target(s->file, r->sym, &t, &v)) {
+                if (allow_undef) continue;
                 error("undefined reference to '%s' in %s", s->file->syms[r->sym].name, where(s));
+            }
             mark(t);
         }
     }
@@ -721,13 +732,17 @@ static void fill_got(ObjFile **files, int n, ObjFile *common) {
     }
 }
 
+static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
+                     char **so_paths, int n_so, const char *out_path);
+
 /* файловое смещение секции в готовой программе */
 static unsigned file_off(Section *s, unsigned data_vaddr, unsigned data_off) {
     if (s->kind == SEC_TEXT || s->kind == SEC_RODATA) return s->addr - TEXT_BASE;
     return data_off + (s->addr - data_vaddr);
 }
 
-void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char *out_path) {
+void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs,
+                  char **so_paths, int n_so, const char *out_path) {
     int n_files = n_in, cap_files = n_in + 16;
     ObjFile **files = xcalloc(sizeof(ObjFile *) * (cap_files + 1));
     for (int i = 0; i < n_in; i++) {
@@ -774,6 +789,9 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char
         }
     got_sec = NULL;
     n_got_slots = 0;
+    /* .so меняет результат только когда она и правда нужна. Иначе — тот же статический файл. */
+    if ((opt_shared || n_so) && link_dyn(files, n_files, common, so_paths, n_so, out_path))
+        return;
     if (any_pic(files, n_files)) ensure_got(common);
 
     /* точка входа: заглушка зовёт __libc_start(argc, argv) */
@@ -783,7 +801,7 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char
     if (start->state == DEF_NONE) error("undefined reference to '__libc_start'");
     sym_target(start->file, start->idx, &start_sec, &start_val);
     mark(start_sec);
-    mark_from_relocs();
+    mark_from_relocs(false);
     fill_got(files, n_files, common);
 
     /* место под заголовки ELF: 52 + 2*32 = 116 байт, код с 0x80 */
@@ -891,4 +909,951 @@ void link_program(ObjFile **in, int n_in, Archive **libs, int n_libs, const char
     buf_u32(&h, data_len); buf_u32(&h, bss_end); buf_u32(&h, 6); buf_u32(&h, 0x1000);
     memcpy(o, h.data, h.len);
     write_file(out_path, &out);
+}
+
+/* ------------------------------------------------------------ динамическая компоновка
+ *
+ * -shared: ET_DYN с базой 0 (смещение в файле совпадает с виртуальным адресом).
+ * Программа с .so: обычный ET_EXEC с TEXT_BASE, PT_INTERP = /lib/ld.so и PT_DYNAMIC.
+ * PLT не ленивый: в библиотеке это jmp *смещение(%ebx) — ebx уже указывает на GOT, —
+ * в программе jmp *абсолютный адрес ячейки. DT_BIND_NOW обязателен.
+ * Объект из .so, на который ссылается программа, копируется в её bss (R_386_COPY).
+ * Загрузчик при COPY ищет определение в библиотеках, а не эту копию. */
+
+#define DT_NULL     0
+#define DT_NEEDED   1
+#define DT_PLTRELSZ 2
+#define DT_PLTGOT   3
+#define DT_HASH     4
+#define DT_STRTAB   5
+#define DT_SYMTAB   6
+#define DT_STRSZ    10
+#define DT_SYMENT   11
+#define DT_SONAME   14
+#define DT_REL      17
+#define DT_RELSZ    18
+#define DT_RELENT   19
+#define DT_PLTREL   20
+#define DT_JMPREL   23
+#define DT_BIND_NOW 24
+#define DT_FLAGS    30
+#define DF_BIND_NOW 8
+
+enum { DYN_NONE, DYN_PLT, DYN_COPY, DYN_SO };
+enum { PREL_REL = 1, PREL_ABS, PREL_GLOB, PREL_JMP, PREL_COPY, PREL_GOT0 };
+
+typedef struct {
+    char *name;
+    unsigned value, size;
+    int info;
+} SoSym;
+
+typedef struct {
+    unsigned char *bytes;
+    char *path;
+    char *soname;
+    SoSym *syms;
+    int n, cap;
+    bool used;
+    int need_off;
+} SoFile;
+
+typedef struct {
+    char *name;
+    GSym *g;
+    Section *sec;
+    unsigned value, size;
+    int info, name_off;
+    bool undef;
+} DSym;
+
+typedef struct {
+    Section *sec;
+    int offset, kind;
+    GSym *g;
+} Pend;
+
+static Pend *pends;
+static int npend, cap_pend;
+
+static unsigned elf_hash(const char *name) {
+    unsigned h = 0;
+    while (*name) {
+        unsigned g;
+        h = (h << 4) + (unsigned char)*name++;
+        g = h & 0xf0000000u;
+        if (g) h ^= g >> 24;
+        h &= ~g;
+    }
+    return h;
+}
+
+static const char *base_name(const char *path) {
+    const char *s = strrchr(path, '/');
+    return s && s[1] ? s + 1 : path;
+}
+
+static unsigned char *read_bin(const char *path, int *out_len) {
+#ifdef CC_HOST
+    int fd = open(path, O_RDONLY);
+#else
+    int fd = open(path, O_READ);
+#endif
+    if (fd < 0) return NULL;
+    int cap = 4096, len = 0;
+    unsigned char *buf = xcalloc(cap);
+    for (;;) {
+        if (len + 4096 > cap) {
+            cap *= 2;
+            unsigned char *nb = xcalloc(cap);
+            memcpy(nb, buf, len);
+            free(buf);
+            buf = nb;
+        }
+        int n = read(fd, buf + len, cap - len);
+        if (n < 0) { close(fd); free(buf); return NULL; }
+        if (n == 0) break;
+        len += n;
+    }
+    close(fd);
+    *out_len = len;
+    return buf;
+}
+
+/* Виртуальный адрес загружаемого сегмента -> смещение в файле. -1, если адрес не в файле. */
+static int elf_v2off(unsigned char *d, int len, unsigned vaddr) {
+    if (len < 52) return -1;
+    unsigned phoff = rd32(d + 28), phsz = rd16(d + 42), phnum = rd16(d + 44);
+    if (phsz < 32) return -1;
+    for (unsigned i = 0; i < phnum; i++) {
+        unsigned off = phoff + i * phsz;
+        if (off + 32 > (unsigned)len) return -1;
+        if (rd32(d + off) != 1) continue;
+        unsigned poff = rd32(d + off + 4), pv = rd32(d + off + 8), filesz = rd32(d + off + 16);
+        if (vaddr >= pv && vaddr - pv < filesz) {
+            unsigned fo = poff + (vaddr - pv);
+            if (fo >= (unsigned)len) return -1;
+            return (int)fo;
+        }
+    }
+    return -1;
+}
+
+static char *elf_name(unsigned char *d, int len, int base, int size, unsigned name_off) {
+    if ((int)name_off >= size || size < 0 || base < 0) return NULL;
+    int off = base + (int)name_off;
+    int lim = base + size;
+    if (off < 0 || off >= len || lim > len) return NULL;
+    int end = off;
+    while (end < lim && d[end]) end++;
+    if (end >= lim) return NULL;
+    return (char *)(d + off);
+}
+
+static bool so_load(const char *path, SoFile *sf) {
+    int len = 0;
+    unsigned char *d = read_bin(path, &len);
+    if (!d) return false;
+    sf->bytes = d;
+    sf->path = (char *)path;
+    sf->need_off = -1;
+    if (len < 52 || d[0] != 0x7f || d[1] != 'E' || d[2] != 'L' || d[3] != 'F' || d[4] != 1 || d[5] != 1)
+        error("%s: not an ELF file", path);
+    if (rd16(d + 16) != 3 || rd16(d + 18) != 3)
+        error("%s: not an i386 shared library", path);
+    unsigned phoff = rd32(d + 28), phsz = rd16(d + 42), phnum = rd16(d + 44);
+    if (phsz < 32 || phnum > 64 || phoff + phnum * phsz > (unsigned)len)
+        error("%s: bad program headers", path);
+    unsigned dyn_off = 0, dyn_sz = 0;
+    for (unsigned i = 0; i < phnum; i++) {
+        unsigned off = phoff + i * phsz;
+        if (rd32(d + off) != 2) continue;
+        dyn_off = rd32(d + off + 4);
+        dyn_sz = rd32(d + off + 16);
+    }
+    if (!dyn_sz || dyn_off + dyn_sz > (unsigned)len || (dyn_sz % 8))
+        error("%s: no dynamic segment", path);
+    unsigned str_addr = 0, sym_addr = 0, hash_addr = 0, strsz = 0, syment = 16, soname_off = 0;
+    bool have_soname = false;
+    for (unsigned i = 0; i + 8 <= dyn_sz; i += 8) {
+        unsigned tag = rd32(d + dyn_off + i), val = rd32(d + dyn_off + i + 4);
+        if (tag == DT_NULL) break;
+        if (tag == DT_STRTAB) str_addr = val;
+        else if (tag == DT_SYMTAB) sym_addr = val;
+        else if (tag == DT_HASH) hash_addr = val;
+        else if (tag == DT_STRSZ) strsz = val;
+        else if (tag == DT_SYMENT) syment = val;
+        else if (tag == DT_SONAME) { soname_off = val; have_soname = true; }
+    }
+    if (syment != 16) error("%s: unexpected symbol size", path);
+    if (!str_addr || !sym_addr || !hash_addr || !strsz) error("%s: dynamic symbol table is incomplete", path);
+    int str_off = elf_v2off(d, len, str_addr);
+    int sym_off = elf_v2off(d, len, sym_addr);
+    int hash_off = elf_v2off(d, len, hash_addr);
+    if (str_off < 0 || sym_off < 0 || hash_off < 0 || hash_off + 8 > len)
+        error("%s: cannot locate dynamic sections", path);
+    unsigned nchain = rd32(d + hash_off + 4);
+    if (nchain < 1 || nchain > 100000 || sym_off + nchain * 16 > (unsigned)len)
+        error("%s: bad symbol hash", path);
+    if (have_soname) {
+        sf->soname = elf_name(d, len, str_off, (int)strsz, soname_off);
+        if (!sf->soname) error("%s: bad DT_SONAME", path);
+    } else sf->soname = (char *)base_name(path);
+    for (unsigned i = 1; i < nchain; i++) {
+        unsigned char *p = d + sym_off + i * 16;
+        unsigned name_off = rd32(p);
+        int info = p[12];
+        int stt = info & 0xf;
+        unsigned shndx = rd16(p + 14);
+        if (!shndx || stt == 3 || stt == 4) continue;
+        char *name = elf_name(d, len, str_off, (int)strsz, name_off);
+        if (!name || !name[0]) continue;
+        if (sf->n == sf->cap) {
+            sf->cap = sf->cap ? sf->cap * 2 : 16;
+            SoSym *ns = xcalloc(sizeof(SoSym) * sf->cap);
+            if (sf->syms) memcpy(ns, sf->syms, sizeof(SoSym) * sf->n);
+            free(sf->syms);
+            sf->syms = ns;
+        }
+        sf->syms[sf->n].name = name;
+        sf->syms[sf->n].value = rd32(p + 4);
+        sf->syms[sf->n].size = rd32(p + 8);
+        sf->syms[sf->n].info = info;
+        sf->n++;
+    }
+    return true;
+}
+
+static SoSym *so_find(SoFile *sos, int n, const char *name, int *idx) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < sos[i].n; j++)
+            if (!strcmp(sos[i].syms[j].name, name)) {
+                if (idx) *idx = i;
+                return &sos[i].syms[j];
+            }
+    return NULL;
+}
+
+static bool so_is_needed(ObjFile **files, int n, SoFile *sos, int nso) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            for (int r = 0; r < s->n_rels; r++) {
+                LinkSym *ls = &s->file->syms[s->rels[r].sym];
+                if (ls->bind != BIND_GLOBAL || !ls->global || ls->global->state != DEF_NONE) continue;
+                if (so_find(sos, nso, ls->name, NULL)) return true;
+            }
+        }
+    return false;
+}
+
+static void sort_gsyms(GSym **a, int n) {
+    for (int i = 1; i < n; i++) {
+        GSym *key = a[i];
+        int j = i;
+        while (j > 0 && strcmp(a[j - 1]->name, key->name) > 0) { a[j] = a[j - 1]; j--; }
+        a[j] = key;
+    }
+}
+
+static void sort_dsyms(DSym *a, int n) {
+    for (int i = 2; i < n; i++) {
+        DSym key = a[i];
+        int j = i;
+        while (j > 1 && strcmp(a[j - 1].name, key.name) > 0) { a[j] = a[j - 1]; j--; }
+        a[j] = key;
+    }
+}
+
+static GSym **gsym_all(int *out_n) {
+    int n = 0;
+    for (int b = 0; b < GBUCKETS; b++)
+        for (GSym *g = gtab[b]; g; g = g->next) n++;
+    GSym **a = xcalloc(sizeof(GSym *) * (n + 1));
+    int k = 0;
+    for (int b = 0; b < GBUCKETS; b++)
+        for (GSym *g = gtab[b]; g; g = g->next) a[k++] = g;
+    *out_n = k;
+    return a;
+}
+
+static void pend_add(Section *sec, int offset, int kind, GSym *g) {
+    if (npend == cap_pend) {
+        cap_pend = cap_pend ? cap_pend * 2 : 64;
+        Pend *p = xcalloc(sizeof(Pend) * cap_pend);
+        if (pends) memcpy(p, pends, sizeof(Pend) * npend);
+        free(pends);
+        pends = p;
+    }
+    pends[npend].sec = sec;
+    pends[npend].offset = offset;
+    pends[npend].kind = kind;
+    pends[npend].g = g;
+    npend++;
+}
+
+static Section *new_sec(ObjFile *file, char *name, int kind, int align, unsigned char *data, int size) {
+    Section *s = file->secs[obj_add_section(file, name, kind, align, data, size)];
+    mark(s);
+    return s;
+}
+
+/* 1 — RELATIVE, 2 — динамический R_386_32, 0 — решается сейчас, -1 — так в .so нельзя. */
+static int abs_kind(Section *s, LinkSym *ls, bool shared) {
+    bool local = ls->bind == BIND_LOCAL || !ls->global;
+    bool wr = s->kind == SEC_DATA || s->kind == SEC_BSS;
+    if (shared) {
+        if (!wr) return -1;
+        return local ? 1 : 2;
+    }
+    if (!local && wr && ls->global && (ls->global->dyn == DYN_PLT || ls->global->dyn == DYN_SO))
+        return 2;
+    return 0;
+}
+
+static bool slot_globdat(GSym *g) {
+    if (opt_shared) return true;
+    return g->dyn == DYN_PLT || g->dyn == DYN_SO;
+}
+
+static unsigned plt_vaddr(Section *plt, GSym *g) {
+    if (!plt || !g->plt_index) error("internal: no PLT entry for '%s'", g->name);
+    return plt->addr + (unsigned)(g->plt_index - 1) * 16u;
+}
+
+static int dsym_find(DSym *ds, int n, GSym *g) {
+    for (int i = 1; i < n; i++) if (ds[i].g == g) return i;
+    return 0;
+}
+
+static int dsym_add(DSym *ds, int *n, int cap, GSym *g, Section *sec, unsigned value,
+                    unsigned size, int info, bool undef) {
+    int have = dsym_find(ds, *n, g);
+    if (have) return have;
+    if (*n >= cap) error("too many dynamic symbols");
+    ds[*n].name = g->name;
+    ds[*n].g = g;
+    ds[*n].sec = sec;
+    ds[*n].value = value;
+    ds[*n].size = size;
+    ds[*n].info = info;
+    ds[*n].undef = undef;
+    return (*n)++;
+}
+
+static void export_file(DSym *ds, int *nd, int cap, ObjFile *f) {
+    if (!f) return;
+    for (int j = 0; j < f->n_syms; j++) {
+        LinkSym *ls = &f->syms[j];
+        GSym *g = ls->global;
+        if (!g || ls->bind == BIND_LOCAL || g->file != f || g->idx != j || g->state == DEF_NONE) continue;
+        if (!strcmp(g->name, "_GLOBAL_OFFSET_TABLE_")) continue;
+        Section *sec = NULL;
+        unsigned val = 0;
+        if (!sym_target(f, j, &sec, &val)) continue;
+        if (sec && !sec->live) continue;
+        unsigned sz = (g->dyn == DYN_COPY && g->dyn_size) ? g->dyn_size : ls->size;
+        dsym_add(ds, nd, cap, g, sec, val, sz, (ls->bind << 4) | ls->type, false);
+    }
+}
+
+static Section *ref_site(ObjFile **files, int n, GSym *g) {
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            if (!s->live) continue;
+            for (int r = 0; r < s->n_rels; r++)
+                if (s->file->syms[s->rels[r].sym].global == g) return s;
+        }
+    return NULL;
+}
+
+static unsigned dyn_foff(Section *s, unsigned base, unsigned data_vaddr, unsigned data_off) {
+    if (s->kind == SEC_TEXT || s->kind == SEC_RODATA) return s->addr - base;
+    return data_off + (s->addr - data_vaddr);
+}
+
+static void put_tag(unsigned char *p, int *n, unsigned tag, unsigned val) {
+    wr32(p + *n, tag);
+    wr32(p + *n + 4, val);
+    *n += 8;
+}
+
+static void shdr(Buf *b, unsigned name, unsigned type, unsigned flags, unsigned addr, unsigned off,
+                 unsigned size, unsigned link, unsigned info, unsigned align, unsigned entsize) {
+    buf_u32(b, name); buf_u32(b, type); buf_u32(b, flags); buf_u32(b, addr);
+    buf_u32(b, off); buf_u32(b, size); buf_u32(b, link); buf_u32(b, info);
+    buf_u32(b, align); buf_u32(b, entsize);
+}
+
+static void phdr(Buf *b, unsigned type, unsigned off, unsigned addr, unsigned filesz,
+                 unsigned memsz, unsigned flags, unsigned align) {
+    buf_u32(b, type); buf_u32(b, off); buf_u32(b, addr); buf_u32(b, addr);
+    buf_u32(b, filesz); buf_u32(b, memsz); buf_u32(b, flags); buf_u32(b, align);
+}
+
+static void apply_dyn(unsigned char *image, unsigned load_end, ObjFile **all, int n_all,
+                      Section *plt, unsigned base, unsigned data_vaddr, unsigned data_off) {
+    unsigned got = got_sec ? got_sec->addr : 0;
+    for (int i = 0; i < n_all; i++)
+        for (int j = 0; j < all[i]->n_secs; j++) {
+            Section *s = all[i]->secs[j];
+            if (!s->live || s->kind == SEC_BSS) continue;
+            unsigned fo = dyn_foff(s, base, data_vaddr, data_off);
+            for (int r = 0; r < s->n_rels; r++) {
+                LinkReloc *rl = &s->rels[r];
+                if (rl->type == R_386_NONE) continue;
+                if (!reloc_ok(rl->type))
+                    error("unsupported relocation type %d in %s", rl->type, where(s));
+                if (fo + (unsigned)rl->offset + 4 > load_end)
+                    error("internal: relocation past the end of the file in %s", s->name);
+                unsigned char *p = image + fo;
+                LinkSym *ls = &s->file->syms[rl->sym];
+                GSym *g = (ls->bind != BIND_LOCAL && ls->global) ? ls->global : NULL;
+                unsigned A = rd32(p + rl->offset);
+                unsigned P = s->addr + (unsigned)rl->offset;
+                Section *t = NULL;
+                unsigned v = 0, S = 0;
+                switch (rl->type) {
+                case R_386_PC32:
+                case R_386_PLT32: {
+                    bool via = false;
+                    if (g && g->dyn == DYN_PLT) {
+                        if (rl->type == R_386_PLT32) via = true;
+                        else if (g->state == DEF_NONE) {
+                            if (opt_shared)
+                                error("relocation R_386_PC32 against '%s' in %s; compile with -fPIC",
+                                      ls->name, where(s));
+                            via = true;
+                        }
+                    }
+                    if (via) S = plt_vaddr(plt, g);
+                    else if (!sym_target(s->file, rl->sym, &t, &v))
+                        error("undefined reference to '%s' in %s", ls->name, where(s));
+                    else S = (t ? t->addr : 0) + v;
+                    wr32(p + rl->offset, S + A - P);
+                    break;
+                }
+                case R_386_GOTPC:
+                case R_386_GOTOFF:
+                    if (!got) error("relocation against the GOT in %s, but there is no GOT", where(s));
+                    if (rl->type == R_386_GOTOFF && !sym_target(s->file, rl->sym, &t, &v))
+                        error("undefined reference to '%s' in %s", ls->name, where(s));
+                    S = (t ? t->addr : 0) + v;
+                    wr32(p + rl->offset, rl->type == R_386_GOTPC ? got + A - P : S + A - got);
+                    break;
+                case R_386_GOT32:
+                    wr32(p + rl->offset, (unsigned)got_slot_off(s->file, rl->sym) + A);
+                    break;
+                case R_386_32: {
+                    int ak = abs_kind(s, ls, opt_shared);
+                    if (ak < 0)
+                        error("relocation R_386_32 against '%s' in %s; a shared library needs -fPIC",
+                              ls->name ? ls->name : "a local symbol", where(s));
+                    if (ak == 2) break;
+                    if (g && g->dyn == DYN_PLT && g->state == DEF_NONE) S = plt_vaddr(plt, g);
+                    else if (!sym_target(s->file, rl->sym, &t, &v))
+                        error("undefined reference to '%s' in %s", ls->name, where(s));
+                    else S = (t ? t->addr : 0) + v;
+                    wr32(p + rl->offset, S + A);
+                    break;
+                }
+                default:
+                    error("unsupported relocation type %d in %s", rl->type, where(s));
+                }
+            }
+        }
+}
+
+static bool link_dyn(ObjFile **files, int n_files, ObjFile *common,
+                     char **so_paths, int n_so, const char *out_path) {
+    npend = 0;
+    if (n_so > 64) error("too many shared libraries");
+    SoFile *sos = NULL;
+    int nso = 0;
+    if (n_so) {
+        sos = xcalloc(sizeof(SoFile) * n_so);
+        for (int i = 0; i < n_so; i++)
+            if (!so_load(so_paths[i], &sos[i])) error("cannot read %s", so_paths[i]);
+        nso = n_so;
+    }
+    if (!opt_shared && !so_is_needed(files, n_files, sos, nso)) return false;
+
+    if (opt_shared) {
+        for (int i = 0; i < n_files; i++) {
+            if (files[i]->from_lib) continue;
+            for (int j = 0; j < files[i]->n_syms; j++) {
+                LinkSym *ls = &files[i]->syms[j];
+                if (ls->bind == BIND_LOCAL) continue;
+                if (ls->sec >= 0) mark(files[i]->secs[ls->sec]);
+                else if (ls->sec == SYM_COMMON && ls->global && ls->global->common)
+                    mark(ls->global->common);
+            }
+        }
+    } else {
+        GSym *st = gsym_get("__libc_start", false);
+        if (st && st->state != DEF_NONE) {
+            Section *ss = NULL;
+            unsigned sv = 0;
+            if (!sym_target(st->file, st->idx, &ss, &sv))
+                error("undefined reference to '__libc_start'");
+            mark(ss);
+        }
+    }
+    mark_from_relocs(true);
+
+    for (int i = 0; i < n_files; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            if (!s->live) continue;
+            for (int r = 0; r < s->n_rels; r++) {
+                LinkSym *ls = &s->file->syms[s->rels[r].sym];
+                if (ls->bind == BIND_LOCAL || !ls->global) continue;
+                if (ls->bind == BIND_WEAK && ls->global->state == DEF_NONE) continue;
+                int ty = s->rels[r].type;
+                if (ty == R_386_PC32 || ty == R_386_PLT32) ls->global->saw_call = 1;
+                else if (ty == R_386_32 || ty == R_386_GOT32) ls->global->saw_addr = 1;
+            }
+        }
+    GSym *start = gsym_get("__libc_start", false);
+    if (!opt_shared && start && start->state == DEF_NONE) start->saw_call = 1;
+
+    int ng = 0;
+    GSym **allg = gsym_all(&ng);
+    for (int i = 0; i < ng; i++) {
+        GSym *g = allg[i];
+        if (!g->saw_call && !g->saw_addr) continue;
+        if (g->state != DEF_NONE) {
+            if (opt_shared && g->saw_call && g->state != DEF_COMMON) {
+                LinkSym *ls = &g->file->syms[g->idx];
+                if (ls->type == STY_OBJECT) error("'%s' is not a function", g->name);
+                g->dyn = DYN_PLT;
+            }
+            continue;
+        }
+        int si = -1;
+        SoSym *so = so_find(sos, nso, g->name, &si);
+        if (!so) {
+            Section *site = ref_site(files, n_files, g);
+            if (site) error("undefined reference to '%s' in %s", g->name, where(site));
+            error("undefined reference to '%s'", g->name);
+        }
+        int stt = so->info & 0xf;
+        bool data = stt == STY_OBJECT || (stt != STY_FUNC && !g->saw_call);
+        if (data && g->saw_call) error("'%s' is not a function", g->name);
+        sos[si].used = true;
+        g->dyn_size = so->size;
+        if (data && !opt_shared) g->dyn = DYN_COPY;
+        else if (data) g->dyn = DYN_SO;
+        else g->dyn = DYN_PLT;
+    }
+    if (!opt_shared) {
+        bool need = false;
+        for (int i = 0; i < ng; i++) if (allg[i]->dyn != DYN_NONE) need = true;
+        if (!need) {
+            for (int i = 0; i < n_files; i++)
+                for (int j = 0; j < files[i]->n_secs; j++) files[i]->secs[j]->live = false;
+            for (int j = 0; j < common->n_secs; j++) common->secs[j]->live = false;
+            for (int i = 0; i < ng; i++) {
+                allg[i]->dyn = DYN_NONE;
+                allg[i]->saw_call = allg[i]->saw_addr = allg[i]->plt_index = 0;
+                allg[i]->dyn_size = 0;
+            }
+            n_work = 0;
+            return false;
+        }
+    }
+
+    GSym **copies = xcalloc(sizeof(GSym *) * (ng + 1));
+    int ncopy = 0;
+    for (int i = 0; i < ng; i++) if (allg[i]->dyn == DYN_COPY) copies[ncopy++] = allg[i];
+    sort_gsyms(copies, ncopy);
+    for (int i = 0; i < ncopy; i++) {
+        GSym *g = copies[i];
+        unsigned sz = g->dyn_size ? g->dyn_size : 4;
+        if (sz > 1024u * 1024u) error("symbol '%s' is too large to copy", g->name);
+        int al = sz <= 4 ? 4 : sz <= 8 ? 8 : 16;
+        int si = obj_add_section(common, g->name, SEC_BSS, al, NULL, (int)sz);
+        mark(common->secs[si]);
+        int idx = obj_add_sym(common, g->name, BIND_GLOBAL, STY_OBJECT, si, 0, sz);
+        common->syms[idx].global = g;
+        g->state = DEF_STRONG;
+        g->file = common;
+        g->idx = idx;
+        g->dyn_size = sz;
+        pend_add(common->secs[si], 0, PREL_COPY, g);
+    }
+
+    ensure_got(common);
+    mark(got_sec);
+    for (int i = 0; i < n_files; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            if (!s->live) continue;
+            for (int r = 0; r < s->n_rels; r++) {
+                if (s->rels[r].type != R_386_GOT32) continue;
+                LinkSym *ls = &s->file->syms[s->rels[r].sym];
+                if (ls->bind == BIND_LOCAL || !ls->global)
+                    error("R_386_GOT32 against local symbol '%s' in %s", ls->name, where(s));
+                got_add(ls->global);
+            }
+        }
+    GSym **plt_gs = xcalloc(sizeof(GSym *) * (ng + 1));
+    int nplt = 0;
+    for (int i = 0; i < ng; i++) if (allg[i]->dyn == DYN_PLT) plt_gs[nplt++] = allg[i];
+    sort_gsyms(plt_gs, nplt);
+    for (int i = 0; i < nplt; i++) plt_gs[i]->plt_index = i + 1;
+    int gsz = 12 + n_got_slots * 4 + nplt * 4;
+    free(got_sec->data);
+    got_sec->data = xcalloc(gsz);
+    got_sec->size = gsz;
+    {
+        GSym *gg = gsym_get("_GLOBAL_OFFSET_TABLE_", false);
+        if (gg && gg->file) gg->file->syms[gg->idx].size = (unsigned)gsz;
+    }
+    Section *plt = nplt ? new_sec(common, ".plt", SEC_TEXT, 16, NULL, nplt * 16) : NULL;
+
+    if (opt_shared) {
+        for (int i = 0; i < n_files; i++)
+            for (int j = 0; j < files[i]->n_secs; j++) {
+                Section *s = files[i]->secs[j];
+                if (!s->live || s->kind != SEC_RODATA) continue;
+                for (int r = 0; r < s->n_rels; r++)
+                    if (s->rels[r].type == R_386_32) { s->kind = SEC_DATA; break; }
+            }
+    }
+    for (int i = 0; i < n_files; i++)
+        for (int j = 0; j < files[i]->n_secs; j++) {
+            Section *s = files[i]->secs[j];
+            if (!s->live) continue;
+            for (int r = 0; r < s->n_rels; r++) {
+                if (s->rels[r].type != R_386_32) continue;
+                LinkSym *ls = &s->file->syms[s->rels[r].sym];
+                int ak = abs_kind(s, ls, opt_shared);
+                if (ak < 0)
+                    error("relocation R_386_32 against '%s' in %s; a shared library needs -fPIC",
+                          ls->name ? ls->name : "a local symbol", where(s));
+                if (!ak) continue;
+                GSym *g = (ls->bind != BIND_LOCAL && ls->global) ? ls->global : NULL;
+                if (ak == 2 && !g) error("internal: absolute relocation without a symbol in %s", where(s));
+                pend_add(s, s->rels[r].offset, ak == 1 ? PREL_REL : PREL_ABS, g);
+            }
+        }
+    for (int i = 0; i < n_got_slots; i++)
+        if (slot_globdat(got_slots[i].g))
+            pend_add(got_sec, got_slots[i].off, PREL_GLOB, got_slots[i].g);
+    for (int i = 0; i < nplt; i++)
+        pend_add(got_sec, 12 + n_got_slots * 4 + i * 4, PREL_JMP, plt_gs[i]);
+    if (opt_shared) pend_add(got_sec, 0, PREL_GOT0, NULL);
+
+    int dcap = ng + common->n_syms + 2;
+    for (int i = 0; i < n_files; i++) dcap += files[i]->n_syms;
+    DSym *ds = xcalloc(sizeof(DSym) * dcap);
+    ds[0].name = "";
+    ds[0].undef = true;
+    int nd = 1;
+    for (int i = 0; i < n_files; i++) export_file(ds, &nd, dcap, files[i]);
+    export_file(ds, &nd, dcap, common);
+    for (int i = 0; i < ng; i++) {
+        GSym *g = allg[i];
+        if (g->dyn == DYN_NONE || dsym_find(ds, nd, g)) continue;
+        if (g->state != DEF_NONE) {
+            Section *sec = NULL;
+            unsigned val = 0;
+            if (!sym_target(g->file, g->idx, &sec, &val) || (sec && !sec->live))
+                error("internal: '%s' has no dynamic symbol", g->name);
+            LinkSym *ls = &g->file->syms[g->idx];
+            unsigned sz = (g->dyn == DYN_COPY && g->dyn_size) ? g->dyn_size : ls->size;
+            dsym_add(ds, &nd, dcap, g, sec, val, sz, (ls->bind << 4) | ls->type, false);
+        } else {
+            int stt = g->dyn == DYN_PLT ? STY_FUNC : STY_OBJECT;
+            dsym_add(ds, &nd, dcap, g, NULL, 0, g->dyn_size, (BIND_GLOBAL << 4) | stt, true);
+        }
+    }
+    sort_dsyms(ds, nd);
+
+    const char *soname = opt_soname ? opt_soname : base_name(out_path);
+    Buf str = {0};
+    buf_byte(&str, 0);
+    int soname_off = 0;
+    if (opt_shared) {
+        soname_off = str.len;
+        buf_put(&str, soname, (int)strlen(soname) + 1);
+    }
+    int nneed = 0;
+    for (int i = 0; i < nso; i++) if (sos[i].used) {
+        sos[i].need_off = str.len;
+        buf_put(&str, sos[i].soname, (int)strlen(sos[i].soname) + 1);
+        nneed++;
+    }
+    for (int i = 1; i < nd; i++) {
+        ds[i].name_off = str.len;
+        buf_put(&str, ds[i].name, (int)strlen(ds[i].name) + 1);
+    }
+    Section *dynstr = new_sec(common, ".dynstr", SEC_RODATA, 1, str.data, str.len);
+    int nbucket = nd;
+    Section *hash = new_sec(common, ".hash", SEC_RODATA, 4, NULL, (2 + nbucket * 2) * 4);
+    wr32(hash->data, (unsigned)nbucket);
+    wr32(hash->data + 4, (unsigned)nd);
+    for (int i = 1; i < nd; i++) {
+        unsigned h = elf_hash(ds[i].name) % (unsigned)nbucket;
+        unsigned next = rd32(hash->data + 8 + (int)h * 4);
+        wr32(hash->data + 8 + nbucket * 4 + i * 4, next);
+        wr32(hash->data + 8 + (int)h * 4, (unsigned)i);
+    }
+    Section *dynsym = new_sec(common, ".dynsym", SEC_RODATA, 4, NULL, nd * 16);
+    int nrel = 0, njmp = 0;
+    for (int i = 0; i < npend; i++)
+        if (pends[i].kind == PREL_JMP) njmp++;
+        else nrel++;
+    if (njmp != nplt) error("internal: PLT relocation count");
+    Section *reldyn = nrel ? new_sec(common, ".rel.dyn", SEC_RODATA, 4, NULL, nrel * 8) : NULL;
+    Section *relplt = njmp ? new_sec(common, ".rel.plt", SEC_RODATA, 4, NULL, njmp * 8) : NULL;
+    int ntags = nneed + (opt_shared ? 1 : 0) + 6 + (nrel ? 3 : 0) + (nplt ? 3 : 0) + 3;
+    Section *dynamic = new_sec(common, ".dynamic", SEC_DATA, 4, NULL, ntags * 8);
+    char interp_buf[12] = "/lib/ld.so";
+    Section *interp = opt_shared ? NULL : new_sec(common, ".interp", SEC_RODATA, 1, (unsigned char *)interp_buf, 12);
+
+    int phnum = opt_shared ? 3 : 4;
+    unsigned rx_org = align_up(52u + 32u * (unsigned)phnum, 16);
+    unsigned base = opt_shared ? 0 : TEXT_BASE;
+    const unsigned char *stub = NULL;
+    int stub_len = 0;
+    unsigned entry_off = 0;
+    unsigned pos = rx_org;
+    if (!opt_shared) {
+        static const unsigned char stub_myos[] = { 0xFF, 0x74, 0x24, 0x08, 0xFF, 0x74, 0x24, 0x08 };
+        static const unsigned char stub_linux[] = { 0x8B, 0x04, 0x24, 0x8D, 0x4C, 0x24, 0x04, 0x51, 0x50 };
+        stub = opt_linux ? stub_linux : stub_myos;
+        stub_len = opt_linux ? (int)sizeof(stub_linux) : (int)sizeof(stub_myos);
+        entry_off = pos;
+        pos = align_up(pos + (unsigned)stub_len + 7, 16);
+    }
+    ObjFile **all = xcalloc(sizeof(ObjFile *) * (n_files + 1));
+    for (int i = 0; i < n_files; i++) all[i] = files[i];
+    all[n_files] = common;
+    int n_all = n_files + 1;
+    static const int order[] = { SEC_TEXT, SEC_RODATA, SEC_DATA, SEC_BSS };
+    unsigned text_filesz = 0, data_filesz = 0, data_vaddr = 0, bss_end = 0;
+    for (int k = 0; k < 4; k++) {
+        if (order[k] == SEC_DATA) {
+            text_filesz = pos;
+            data_vaddr = align_up(base + pos, 4096);
+            pos = 0;
+        }
+        if (order[k] == SEC_BSS) {
+            if (!pos) pos = 4;
+            data_filesz = pos;
+        }
+        for (int i = 0; i < n_all; i++)
+            for (int j = 0; j < all[i]->n_secs; j++) {
+                Section *s = all[i]->secs[j];
+                if (!s->live || s->kind != order[k]) continue;
+                pos = align_up(pos, (unsigned)s->align);
+                s->addr = (k < 2 ? base : data_vaddr) + pos;
+                pos += (unsigned)s->size;
+            }
+    }
+    bss_end = pos;
+    unsigned data_off = align_up(text_filesz, 4096);
+    if (text_filesz < rx_org) error("internal: text segment does not cover the header");
+
+    int ntab = 0;
+    for (int i = 0; i < n_all; i++)
+        for (int j = 0; j < all[i]->n_secs; j++)
+            if (all[i]->secs[j]->live) ntab++;
+    if (ntab + 2 > 65535) error("too many sections");
+    Section **tab = xcalloc(sizeof(Section *) * (ntab + 1));
+    for (int i = 0, k = 0; i < n_all; i++)
+        for (int j = 0; j < all[i]->n_secs; j++)
+            if (all[i]->secs[j]->live) tab[k++] = all[i]->secs[j];
+    for (int i = 0; i < ntab; i++) tab[i]->shndx = i + 1;
+
+    for (int i = 0; i < nd; i++) {
+        unsigned S = 0;
+        int ndx = 0;
+        if (i && !ds[i].undef && ds[i].sec) {
+            S = ds[i].sec->addr + ds[i].value;
+            ndx = ds[i].sec->shndx;
+            if (!ndx) error("internal: section of '%s' was not emitted", ds[i].name);
+        } else if (i && !ds[i].undef) {
+            S = ds[i].value;
+            ndx = 0xfff1;
+        }
+        unsigned char *p = dynsym->data + i * 16;
+        wr32(p, i ? (unsigned)ds[i].name_off : 0);
+        wr32(p + 4, S);
+        wr32(p + 8, ds[i].size);
+        p[12] = (unsigned char)ds[i].info;
+        p[14] = (unsigned char)ndx;
+        p[15] = (unsigned char)(ndx >> 8);
+    }
+    int idyn = 0, iplt = 0;
+    for (int i = 0; i < npend; i++) {
+        Pend *r = &pends[i];
+        unsigned off = r->sec->addr + (unsigned)r->offset;
+        int sym = 0, typ = R_386_RELATIVE;
+        if (r->kind != PREL_REL && r->kind != PREL_GOT0) {
+            sym = dsym_find(ds, nd, r->g);
+            if (!sym) error("internal: '%s' is missing from .dynsym", r->g->name);
+        }
+        if (r->kind == PREL_ABS) typ = R_386_32;
+        else if (r->kind == PREL_GLOB) typ = R_386_GLOB_DAT;
+        else if (r->kind == PREL_JMP) typ = R_386_JMP_SLOT;
+        else if (r->kind == PREL_COPY) typ = R_386_COPY;
+        Section *dest = r->kind == PREL_JMP ? relplt : reldyn;
+        if (!dest) error("internal: missing relocation section");
+        int at = r->kind == PREL_JMP ? iplt : idyn;
+        if (at + 8 > dest->size) error("internal: relocation overflow");
+        wr32(dest->data + at, off);
+        wr32(dest->data + at + 4, ((unsigned)sym << 8) | (unsigned)typ);
+        if (r->kind == PREL_JMP) iplt += 8;
+        else idyn += 8;
+    }
+    if (reldyn && idyn != reldyn->size) error("internal: .rel.dyn size");
+    if (relplt && iplt != relplt->size) error("internal: .rel.plt size");
+    wr32(got_sec->data, dynamic->addr);
+    for (int i = 0; i < n_got_slots; i++) {
+        if (slot_globdat(got_slots[i].g)) continue;
+        Section *t = NULL;
+        unsigned v = 0;
+        GSym *g = got_slots[i].g;
+        if (!sym_target(g->file, g->idx, &t, &v)) error("undefined reference to '%s'", g->name);
+        wr32(got_sec->data + got_slots[i].off, (t ? t->addr : 0) + v);
+    }
+    for (int i = 0; i < nplt; i++) {
+        unsigned char *p = plt->data + i * 16;
+        unsigned slot = (unsigned)(12 + n_got_slots * 4 + i * 4);
+        if (opt_shared) { p[0] = 0xff; p[1] = 0xa3; wr32(p + 2, slot); }
+        else { p[0] = 0xff; p[1] = 0x25; wr32(p + 2, got_sec->addr + slot); }
+        for (int k = 6; k < 16; k++) p[k] = 0x90;
+    }
+    {
+        int n = 0;
+        unsigned char *p = dynamic->data;
+        for (int i = 0; i < nso; i++) if (sos[i].used) put_tag(p, &n, DT_NEEDED, (unsigned)sos[i].need_off);
+        if (opt_shared) put_tag(p, &n, DT_SONAME, (unsigned)soname_off);
+        put_tag(p, &n, DT_SYMTAB, dynsym->addr);
+        put_tag(p, &n, DT_SYMENT, 16);
+        put_tag(p, &n, DT_STRTAB, dynstr->addr);
+        put_tag(p, &n, DT_STRSZ, (unsigned)dynstr->size);
+        put_tag(p, &n, DT_HASH, hash->addr);
+        put_tag(p, &n, DT_PLTGOT, got_sec->addr);
+        if (reldyn) {
+            put_tag(p, &n, DT_REL, reldyn->addr);
+            put_tag(p, &n, DT_RELSZ, (unsigned)reldyn->size);
+            put_tag(p, &n, DT_RELENT, 8);
+        }
+        if (relplt) {
+            put_tag(p, &n, DT_JMPREL, relplt->addr);
+            put_tag(p, &n, DT_PLTRELSZ, (unsigned)relplt->size);
+            put_tag(p, &n, DT_PLTREL, DT_REL);
+        }
+        put_tag(p, &n, DT_BIND_NOW, 0);
+        put_tag(p, &n, DT_FLAGS, DF_BIND_NOW);
+        put_tag(p, &n, DT_NULL, 0);
+        if (n != dynamic->size) error("internal: dynamic section size");
+    }
+
+    Buf shstr = {0};
+    buf_byte(&shstr, 0);
+    int *nameoff = xcalloc(sizeof(int) * (ntab + 1));
+    for (int i = 0; i < ntab; i++) {
+        nameoff[i] = shstr.len;
+        buf_put(&shstr, tab[i]->name, (int)strlen(tab[i]->name) + 1);
+    }
+    int shstr_name = shstr.len;
+    buf_put(&shstr, ".shstrtab", 10);
+
+    if (data_off + data_filesz > 64u * 1024u * 1024u) error("output is too large");
+    int load_end = (int)(data_off + data_filesz);
+    int shstr_off = (load_end + 3) & ~3;
+    int shnum = ntab + 2;
+    int shdr_off = shstr_off + shstr.len;
+    int tail = shdr_off + shnum * 40;
+    unsigned char *image = xcalloc(tail);
+    for (int i = 0; i < n_all; i++)
+        for (int j = 0; j < all[i]->n_secs; j++) {
+            Section *s = all[i]->secs[j];
+            if (!s->live || s->kind == SEC_BSS) continue;
+            unsigned fo = dyn_foff(s, base, data_vaddr, data_off);
+            if (fo + (unsigned)s->size > (unsigned)load_end)
+                error("internal: section '%s' does not fit", s->name);
+            if (s->size && s->data) memcpy(image + fo, s->data, (unsigned)s->size);
+        }
+    if (!opt_shared) {
+        unsigned char *ip = image + entry_off;
+        memcpy(ip, stub, (unsigned)stub_len);
+        ip[stub_len] = 0xE8;
+        unsigned target;
+        if (start->dyn == DYN_PLT) target = plt_vaddr(plt, start);
+        else {
+            Section *ss = NULL;
+            unsigned sv = 0;
+            if (!start || !sym_target(start->file, start->idx, &ss, &sv))
+                error("undefined reference to '__libc_start'");
+            target = (ss ? ss->addr : 0) + sv;
+        }
+        wr32(ip + stub_len + 1, target - (base + entry_off + (unsigned)stub_len + 5));
+        ip[stub_len + 5] = 0xEB;
+        ip[stub_len + 6] = 0xFE;
+    }
+    apply_dyn(image, (unsigned)load_end, all, n_all, plt, base, data_vaddr, data_off);
+
+    Buf shb = {0};
+    shdr(&shb, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+    for (int i = 0; i < ntab; i++) {
+        Section *s = tab[i];
+        unsigned type = SHT_PROGBITS, link = 0, info = 0, entsize = 0;
+        unsigned flags = SHF_ALLOC;
+        if (s->kind == SEC_DATA || s->kind == SEC_BSS) flags |= SHF_WRITE;
+        if (s->kind == SEC_TEXT) flags |= SHF_EXECINSTR;
+        if (s == dynsym) { type = SHT_DYNSYM; link = (unsigned)dynstr->shndx; info = 1; entsize = 16; }
+        else if (s == dynstr) type = SHT_STRTAB;
+        else if (s == hash) { type = SHT_HASH; link = (unsigned)dynsym->shndx; entsize = 4; }
+        else if (s == reldyn) { type = SHT_REL; link = (unsigned)dynsym->shndx; entsize = 8; }
+        else if (s == relplt) {
+            type = SHT_REL; link = (unsigned)dynsym->shndx;
+            info = plt ? (unsigned)plt->shndx : 0; entsize = 8;
+        } else if (s == dynamic) { type = SHT_DYNAMIC; link = (unsigned)dynstr->shndx; entsize = 8; }
+        else if (s->kind == SEC_BSS) type = SHT_NOBITS;
+        shdr(&shb, (unsigned)nameoff[i], type, flags, s->addr, dyn_foff(s, base, data_vaddr, data_off),
+             (unsigned)s->size, link, info, (unsigned)s->align, entsize);
+    }
+    shdr(&shb, (unsigned)shstr_name, SHT_STRTAB, 0, 0, (unsigned)shstr_off, (unsigned)shstr.len, 0, 0, 1, 0);
+    if (shb.len != shnum * 40) error("internal: section header size");
+    memcpy(image + shstr_off, shstr.data, (unsigned)shstr.len);
+    memcpy(image + shdr_off, shb.data, (unsigned)shb.len);
+
+    Buf h = {0};
+    buf_put(&h, "\x7f" "ELF\x01\x01\x01\0\0\0\0\0\0\0\0\0", 16);
+    buf_u16(&h, opt_shared ? 3 : 2);
+    buf_u16(&h, 3);
+    buf_u32(&h, 1);
+    buf_u32(&h, opt_shared ? 0 : base + entry_off);
+    buf_u32(&h, 52);
+    buf_u32(&h, (unsigned)shdr_off);
+    buf_u32(&h, 0);
+    buf_u16(&h, 52);
+    buf_u16(&h, 32);
+    buf_u16(&h, (unsigned)phnum);
+    buf_u16(&h, 40);
+    buf_u16(&h, (unsigned)shnum);
+    buf_u16(&h, (unsigned)(ntab + 1));
+    if (interp)
+        phdr(&h, 3, dyn_foff(interp, base, data_vaddr, data_off), interp->addr,
+             (unsigned)interp->size, (unsigned)interp->size, 4, 1);
+    phdr(&h, 1, 0, base, text_filesz, text_filesz, 5, 0x1000);
+    phdr(&h, 1, data_off, data_vaddr, data_filesz, bss_end, 6, 0x1000);
+    phdr(&h, 2, dyn_foff(dynamic, base, data_vaddr, data_off), dynamic->addr,
+         (unsigned)dynamic->size, (unsigned)dynamic->size, 6, 4);
+    if (h.len != 52 + 32 * phnum) error("internal: program header size");
+    memcpy(image, h.data, (unsigned)h.len);
+
+    Buf out = {0};
+    out.data = image;
+    out.len = tail;
+    out.cap = tail;
+    write_file(out_path, &out);
+    return true;
 }

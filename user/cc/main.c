@@ -15,6 +15,8 @@ char **include_paths;
 int    n_include_paths;
 bool   opt_linux;
 bool   opt_pic;
+bool   opt_shared, opt_static;
+char  *opt_soname;
 
 static char *base_dir = "";         /* -B: где искать include/ и lib/ (по умолчанию корень MyOS) */
 
@@ -131,18 +133,22 @@ static void add_include(char *path) {
 
 static void usage(void) {
     dprintf(STDERR,
-        "usage: cc [-c] [-fPIC] [-o out] [-E] [-I dir] [-L dir] [-l name] [-nostdlib] file.c... file.o... lib.a...\n"
+        "usage: cc [-c] [-fPIC] [-shared] [-static] [-soname name] [-o out] [-E]\n"
+        "          [-I dir] [-L dir] [-l name] [-nostdlib] file.c... file.o... lib.a... lib.so...\n"
         "  -c          only compile: each file.c -> file.o (ELF relocatable object)\n"
-        "  -fPIC       position-independent code (GOT, PLT); still links into a normal program\n"
-        "  -o out      name of the program or, with -c and one file, of the object\n"
+        "  -fPIC       position-independent code (GOT, PLT)\n"
+        "  -shared     build a shared library (.so); implies -fPIC\n"
+        "  -static     do not link shared libraries\n"
+        "  -soname name  DT_SONAME of a shared library (default: the -o file name)\n"
+        "  -o out      name of the program or library or, with -c and one file, of the object\n"
         "              (default: first file without .c or .o)\n"
         "  -E          only preprocess, print the result\n"
         "  -I dir      also look for #include files in dir\n"
         "  -L dir      also look for -l libraries in dir (before /lib and /usr/lib)\n"
-        "  -l name     link with the library libname.a\n"
+        "  -l name     link libname.so if it exists, otherwise libname.a (-static: only .a)\n"
         "  -nostdlib   do not link /lib/libgfx.a and /lib/libc.a\n"
         "              (without them on disk: /lib/gfx.c, vec.c, font.c, win.c, libc.c)\n"
-        "Objects (.o) may come from cc -c or from gcc -m32 -fno-pic; libraries (.a) from ar.\n");
+        "Objects (.o) may come from cc -c or from gcc -m32 -fno-pic; libraries from ar or cc -shared.\n");
     exit(2);
 }
 
@@ -185,11 +191,16 @@ static bool file_exists(const char *path) {
 
 static StrList lib_dirs;
 
-/* -lname -> первый найденный libname.a в каталогах -L, потом в /lib и /usr/lib */
+/* -lname: сначала libname.so (если не -static), потом libname.a.
+ * Каталоги: -L, затем /lib и /usr/lib. */
 static char *find_lib(const char *name) {
-    for (int i = 0; i < lib_dirs.n; i++) {
-        char *p = format("%s/lib%s.a", lib_dirs.v[i], name);
-        if (file_exists(p)) return p;
+    int passes = opt_static ? 1 : 2;
+    for (int pass = 0; pass < passes; pass++) {
+        const char *ext = (!opt_static && pass == 0) ? ".so" : ".a";
+        for (int i = 0; i < lib_dirs.n; i++) {
+            char *p = format("%s/lib%s%s", lib_dirs.v[i], name, ext);
+            if (file_exists(p)) return p;
+        }
     }
     error("cannot find -l%s", name);
 }
@@ -223,16 +234,19 @@ static char *default_output(const char *src, const char *ext) {
 
 int main(int argc, char **argv) {
     char *out = NULL, *first = NULL;
-    bool opt_E = false, opt_c = false, nostdlib = false;
-    StrList srcs = {0}, objs = {0}, libs = {0}, lnames = {0};
+    bool opt_E = false, opt_c = false, nostdlib = false, saw_nopic = false;
+    StrList srcs = {0}, objs = {0}, libs = {0}, lnames = {0}, sos = {0};
     for (int i = 1; i < argc; i++) {
         char *a = argv[i];
         if (!strcmp(a, "-o") && i + 1 < argc) { out = argv[++i]; continue; }
         if (!strcmp(a, "-c")) { opt_c = true; continue; }
         if (!strcmp(a, "-E")) { opt_E = true; continue; }
         if (!strcmp(a, "-linux")) { opt_linux = true; continue; }
+        if (!strcmp(a, "-shared")) { opt_shared = true; continue; }
+        if (!strcmp(a, "-static")) { opt_static = true; continue; }
+        if (!strcmp(a, "-soname") && i + 1 < argc) { opt_soname = argv[++i]; continue; }
         if (!strcmp(a, "-fPIC") || !strcmp(a, "-fpic")) { opt_pic = true; continue; }
-        if (!strcmp(a, "-fno-pic") || !strcmp(a, "-fno-PIC")) { opt_pic = false; continue; }
+        if (!strcmp(a, "-fno-pic") || !strcmp(a, "-fno-PIC")) { opt_pic = false; saw_nopic = true; continue; }
         if (!strcmp(a, "-nostdlib")) { nostdlib = true; continue; }
         if (!strcmp(a, "-B") && i + 1 < argc) { base_dir = argv[++i]; continue; }
         if (!strcmp(a, "-I") && i + 1 < argc) { add_include(argv[++i]); continue; }
@@ -246,9 +260,13 @@ int main(int argc, char **argv) {
         if (!first) first = a;
         if (has_suffix(a, ".o")) push(&objs, a);
         else if (has_suffix(a, ".a")) push(&libs, a);
+        else if (has_suffix(a, ".so")) push(&sos, a);
         else push(&srcs, a);
     }
     if (!first) usage();
+    if (opt_shared && opt_static) error("-shared and -static cannot be used together");
+    if (opt_shared && saw_nopic) error("-shared requires -fPIC");
+    if (opt_shared && !saw_nopic) opt_pic = true;
     add_include(format("%s/include", base_dir));
     push(&lib_dirs, format("%s/lib", base_dir));
     push(&lib_dirs, format("%s/usr/lib", base_dir));
@@ -264,6 +282,7 @@ int main(int argc, char **argv) {
 
     /* -c: каждый .c — в свой .o, без библиотеки и без компоновки */
     if (opt_c) {
+        if (opt_shared) error("-shared cannot be used with -c");
         if (!srcs.n) error("-c: no C files to compile");
         if (out && srcs.n > 1) error("-o with -c needs exactly one C file");
         for (int i = 0; i < srcs.n; i++)
@@ -271,8 +290,14 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    for (int i = 0, k = 0; i < libs.n; i++)
-        if (!libs.v[i]) libs.v[i] = find_lib(lnames.v[k++]);
+    int lw = 0, lk = 0;
+    for (int i = 0; i < libs.n; i++) {
+        char *p = libs.v[i] ? libs.v[i] : find_lib(lnames.v[lk++]);
+        if (has_suffix(p, ".so")) { push(&sos, p); continue; }
+        libs.v[lw++] = p;
+    }
+    libs.n = lw;
+    if (opt_static && sos.n) error("cannot link a shared library with -static");
 
     /* Стандартные библиотеки: готовые .a, а если их нет — исходники */
     StrList libsrcs = {0};
@@ -317,6 +342,6 @@ int main(int argc, char **argv) {
         f->from_lib = pass;
         files[n_files++] = f;
     }
-    link_program(files, n_files, archives, libs.n, out);
+    link_program(files, n_files, archives, libs.n, sos.v, sos.n, out);
     return 0;
 }

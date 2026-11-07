@@ -959,7 +959,8 @@ static char thunk_name[] = "__x86.get_pc_thunk.bx";
 static char got_name[] = "_GLOBAL_OFFSET_TABLE_";
 static bool need_thunk;
 
-/* Глобальные данные требуют GOT. Прямой вызов функции — нет: это смещение от EIP. */
+/* Глобальные данные требуют GOT. Прямой вызов не-static функции тоже: в
+ * разделяемой библиотеке он идёт через PLT, а PLT читает ячейку как смещение от ebx. */
 static bool needs_got(Node *n) {
     if (!n) return false;
     if (n->kind == ND_VAR && n->var && !n->var->is_local) return true;
@@ -968,7 +969,7 @@ static bool needs_got(Node *n) {
             if (needs_got(a)) return true;
         if (!(n->lhs && n->lhs->kind == ND_VAR && n->lhs->var && n->lhs->var->ty->kind == TY_FUNC))
             return needs_got(n->lhs);
-        return false;
+        return !n->lhs->var->is_static;
     }
     if (needs_got(n->lhs) || needs_got(n->rhs) || needs_got(n->cond) || needs_got(n->then) ||
         needs_got(n->els) || needs_got(n->init) || needs_got(n->inc))

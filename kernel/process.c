@@ -146,7 +146,16 @@ static int map_elf(u8 *file, u32 size, u32 dir, u32 bias, bool reuse, u32 *pages
     if (entry < USER_BASE || entry >= SHM_BASE) return PROC_ENOEXEC;
     out->base = bias;
     out->entry = entry;
-    out->phdr = bias + eh->phoff;
+    /* e_phoff — смещение в файле. У ET_EXEC виртуальный адрес заголовков — это
+     * vaddr сегмента, в который они попали, а не само смещение. */
+    u32 phdr = bias + eh->phoff;
+    for (u32 i = 0; i < eh->phnum; i++) {
+        if (ph[i].type != PT_LOAD || !ph[i].filesz) continue;
+        if (eh->phoff < ph[i].offset || eh->phoff >= ph[i].offset + ph[i].filesz) continue;
+        phdr = bias + ph[i].vaddr + (eh->phoff - ph[i].offset);
+        break;
+    }
+    out->phdr = phdr;
     out->phnum = eh->phnum;
     out->end = end_max;
     return 0;
