@@ -11,6 +11,7 @@
 #   build/myfs disk.img ls /bin            — посмотреть диск с компьютера
 #   build/myfs disk.img put file.txt /f    — положить свой файл на диск
 #   build/myfs disk.img cat /etc/display   — вывести файл с диска
+#   build/myfs disk.img grow 128           — расширить ФС до 128 МБ, старый образ остаётся как disk.img.bak
 
 # На macOS (и вообще не на x86-Linux) системный gcc — это clang под arm64/x86_64-darwin,
 # он не умеет собирать 32-битный ELF. Нужен кросс-тулчейн:
