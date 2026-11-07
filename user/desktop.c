@@ -63,10 +63,11 @@ static const struct app apps[] = {
     { "Battleship", "battle", true, "морской бой корабли игра game" },
     { "Task Manager", "taskmgr", true, "диспетчер задач процессы process" },
     { "Display", "display", false, "экран дисплей разрешение settings настройки" },
+    { "Code", "code", false, "код программирование code editor IDE редактор" },
     { "About MyOS", "about", false, "о системе версия" },
 };
 #define N_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
-enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_ABOUT };
+enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_CODE, APP_ABOUT };
 
 static struct { int pid, app; } launched[32];
 static int n_launched;
@@ -229,6 +230,7 @@ static void draw_app_icon(int app, int x, int y, int size) {
         rr_grad(4, 18, 40, 25, 4, RGB(250, 145, 88), RGB(229, 92, 38));
         ln(20, 70, 76, 70, 2, RGB(255, 196, 160));
         break;
+    case APP_CODE:
     case APP_NOTEPAD:
         rr(8, 4, 32, 41, 4, RGB(170, 170, 170));
         rr(9, 5, 30, 39, 3, RGB(252, 252, 252));
@@ -805,6 +807,7 @@ static int win_radius(struct win *w) { return w->maximized ? 0 : RADIUS; }
 static void draw_frame(int idx) {
     struct win *w = &wins[idx];
     bool active = idx == focus;
+    bool code_theme = w->app == APP_CODE;
     int ow = outer_w(w), oh = outer_h(w), rad = win_radius(w);
     /* тень и тонкая обводка (у развёрнутого — не нужны: вокруг панель и док) */
     if (!w->maximized) {
@@ -816,22 +819,22 @@ static void draw_frame(int idx) {
         gfx_fill_rect_a(w->x - 1, w->y + oh, ow + 2, 1, C_BLACK, 40);
     }
     /* заголовок */
-    color_t hb = active ? RGB(235, 235, 235) : RGB(250, 250, 250);
+    color_t hb = code_theme ? RGB(24,24,24) : active ? RGB(235, 235, 235) : RGB(250, 250, 250);
     if (rad) gfx_round_rect_ex(w->x, w->y, ow, HEAD_H, rad, 3, hb, 255);
     else gfx_fill_rect(w->x, w->y, ow, HEAD_H, hb);
-    gfx_fill_rect(w->x, w->y + HEAD_H - 1, ow, 1, active ? RGB(214, 214, 214) : RGB(228, 228, 228));
+    gfx_fill_rect(w->x, w->y + HEAD_H - 1, ow, 1, code_theme ? RGB(43,43,43) : active ? RGB(214, 214, 214) : RGB(228, 228, 228));
     int cxc, cxx, cxm, cy;
     btn_centers(w, &cxc, &cxx, &cxm, &cy);
-    color_t ic = active ? RGB(46, 52, 54) : RGB(150, 150, 150);
+    color_t ic = code_theme ? RGB(205,205,205) : active ? RGB(46, 52, 54) : RGB(150, 150, 150);
     /* закрыть */
     bool hc = hover_close == idx;
-    gfx_disc16(cxc * 16, cy * 16, BTN_R * 16, hc ? RGB(233, 84, 32) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+    gfx_disc16(cxc * 16, cy * 16, BTN_R * 16, hc ? RGB(196,43,28) : code_theme ? RGB(24,24,24) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
     color_t xc = hc ? C_WHITE : ic;
     gfx_line16((cxc - 4) * 16, (cy - 4) * 16, (cxc + 4) * 16, (cy + 4) * 16, 26, xc, 255);
     gfx_line16((cxc + 4) * 16, (cy - 4) * 16, (cxc - 4) * 16, (cy + 4) * 16, 26, xc, 255);
     /* развернуть: квадрат; у развёрнутого — два квадрата («вернуть») */
     if (w->resizable) {
-        if (hover_max == idx) gfx_disc16(cxx * 16, cy * 16, BTN_R * 16, active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+        if (hover_max == idx) gfx_disc16(cxx * 16, cy * 16, BTN_R * 16, code_theme ? RGB(60,60,60) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
         int q = w->maximized ? 3 : 4, ox = w->maximized ? -1 : 0, oy = w->maximized ? 1 : 0;
         int x0 = (cxx - q + ox) * 16, y0 = (cy - q + oy) * 16, x1 = (cxx + q + ox) * 16, y1 = (cy + q + oy) * 16;
         gfx_line16(x0, y0, x1, y0, 24, ic, 255); gfx_line16(x1, y0, x1, y1, 24, ic, 255);
@@ -842,7 +845,7 @@ static void draw_frame(int idx) {
         }
     }
     /* свернуть */
-    if (hover_min == idx) gfx_disc16(cxm * 16, cy * 16, BTN_R * 16, active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+    if (hover_min == idx) gfx_disc16(cxm * 16, cy * 16, BTN_R * 16, code_theme ? RGB(60,60,60) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
     gfx_line16((cxm - 5) * 16, (cy + 3) * 16 + 8, (cxm + 5) * 16, (cy + 3) * 16 + 8, 26, ic, 255);
     /* название — по центру, жирным */
     int pad = w->x + ow - (cxm - BTN_R) + 8;                     /* справа заняты кнопки — столько же слева */
@@ -851,7 +854,7 @@ static void draw_frame(int idx) {
         int tw = text_width(FONT_UI_BOLD, 14, w->title);
         if (tw > avail) tw = avail;
         text_draw_fit(FONT_UI_BOLD, 14, w->x + (ow - tw) / 2, w->y + (HEAD_H - text_line_h(FONT_UI_BOLD, 14)) / 2,
-                      w->title, avail, active ? RGB(46, 52, 54) : RGB(140, 140, 140));
+                      w->title, avail, code_theme ? RGB(205,205,205) : active ? RGB(46, 52, 54) : RGB(140, 140, 140));
     }
 }
 

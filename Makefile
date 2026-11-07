@@ -133,6 +133,8 @@ $(BUILD)/user/font.o: user/lib/font.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/
 $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
+$(BUILD)/user/code.o: user/code_features.h user/code_index.h user/code_workspace.h user/code_chrome.h user/code_signature.h
+
 $(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
@@ -234,6 +236,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -415,3 +418,10 @@ $(BUILD)/user/servicecheck: $(BUILD)/user/servicecheck.o $(ULIB) user/user.ld
 .PHONY: servicetest
 servicetest:
 	python3 tests/services_smoke.py
+
+.PHONY: codetest
+codetest: | $(BUILD)
+	$(HOSTCC) -std=gnu11 -g -O1 -Wall -Wextra -fsanitize=address,undefined tests/code_features.c -o $(BUILD)/code-features-test
+	./$(BUILD)/code-features-test user/lib/myos.h user/lib/gfx.h user/lib/win.h
+	$(HOSTCC) -std=gnu11 -DMYOS_HOST_LIBC -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections -Iuser/lib tests/code_document.c -Wl,--gc-sections -o $(BUILD)/code-document-test
+	./$(BUILD)/code-document-test
