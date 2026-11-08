@@ -5,6 +5,7 @@ static void entry(const struct dirent_info *e, const char *shown) {
     if (e->type == 2) printf("   <DIR>  " ANSI_BLUE ANSI_BOLD "%s/" ANSI_RESET "\n", shown);
     else if(e->type==3) printf(" <BLOCK>  %s\n",shown);
     else if(e->type==4) printf("  <CHAR>  %s\n",shown);
+    else if(e->type==5) printf("   <LNK>  %s\n", shown);
     else              printf("%8u  %s\n", e->size, shown);
 }
 

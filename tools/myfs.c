@@ -71,6 +71,7 @@ static int cmd_ls(const char *path) {
     while (fs_readdir(dir, &pos, &de) == 1) {
         if (fs_stat(de.ino, &st)) continue;
         if (st.type == FS_TYPE_DIR) say("   <DIR>  %s/\n", de.name);
+        else if (st.type == FS_TYPE_LINK) say("   <LNK>  %s\n", de.name);
         else                        say("%8u  %s\n", st.size, de.name);
     }
     return FS_OK;
@@ -135,13 +136,14 @@ static int put_bytes(const char *dst, const unsigned char *data, unsigned len) {
 struct snap {
     char *path;
     bool dir;
+    bool link;
     unsigned char *data;
     u32 len;
 };
 static struct snap *snaps;
 static int n_snaps, cap_snaps;
 
-static int snap_add(const char *path, bool dir, unsigned char *data, u32 len) {
+static int snap_add(const char *path, bool dir, bool link, unsigned char *data, u32 len) {
     if (n_snaps == cap_snaps) {
         cap_snaps = cap_snaps ? cap_snaps * 2 : 64;
         struct snap *p = host_alloc(sizeof(struct snap) * cap_snaps);
@@ -153,6 +155,7 @@ static int snap_add(const char *path, bool dir, unsigned char *data, u32 len) {
     snaps[n_snaps].path = host_alloc(n + 1);
     memcpy(snaps[n_snaps].path, path, n + 1);
     snaps[n_snaps].dir = dir;
+    snaps[n_snaps].link = link;
     snaps[n_snaps].data = data;
     snaps[n_snaps].len = len;
     n_snaps++;
@@ -180,8 +183,8 @@ static int snap_dir(u32 ino, const char *path) {
         struct fs_stat st;
         if ((r = myfs_stat(de.ino, &st))) return r;
         if (st.type == FS_TYPE_DIR) {
-            if ((r = snap_add(child, true, NULL, 0)) || (r = snap_dir(de.ino, child))) return r;
-        } else if (st.type == FS_TYPE_FILE) {
+            if ((r = snap_add(child, true, false, NULL, 0)) || (r = snap_dir(de.ino, child))) return r;
+        } else if (st.type == FS_TYPE_LINK || st.type == FS_TYPE_FILE) {
             unsigned char *data = NULL;
             if (st.size) {
                 data = host_alloc(st.size);
@@ -193,7 +196,7 @@ static int snap_dir(u32 ino, const char *path) {
                     off += n;
                 }
             }
-            if ((r = snap_add(child, false, data, st.size))) return r;
+            if ((r = snap_add(child, false, st.type == FS_TYPE_LINK, data, st.size))) return r;
         } else {
             err("myfs: cannot copy %s\n", child);
             return FS_EINVAL;
@@ -232,7 +235,15 @@ static int cmd_grow(const char *image, const char *mb_text) {
     if (!r && !formatted) r = FS_EINVAL;            /* новый образ обязан быть пустым */
     for (int i = 0; !r && i < n_snaps; i++) {
         if (snaps[i].dir) r = mkdir_p(snaps[i].path);
-        else r = put_bytes(snaps[i].path, snaps[i].data, snaps[i].len);
+        else if (snaps[i].link) {
+            char target[FS_PATH_MAX];
+            if (!snaps[i].len || snaps[i].len >= sizeof(target)) r = FS_EINVAL;
+            else {
+                memcpy(target, snaps[i].data, snaps[i].len);
+                target[snaps[i].len] = 0;
+                r = fs_symlink(FS_ROOT, target, snaps[i].path);
+            }
+        } else r = put_bytes(snaps[i].path, snaps[i].data, snaps[i].len);
     }
     myfs_select(0, 0);
     for (int i = 0; !r && i < n_snaps; i++) {
@@ -242,7 +253,9 @@ static int cmd_grow(const char *image, const char *mb_text) {
         if (!r) r = myfs_stat(ino, &st);
         if (r) break;
         if (snaps[i].dir) { if (st.type != FS_TYPE_DIR) r = FS_EIO; continue; }
-        if (st.type != FS_TYPE_FILE || st.size != snaps[i].len) { r = FS_EIO; break; }
+        if (snaps[i].link) {
+            if (st.type != FS_TYPE_LINK || st.size != snaps[i].len) { r = FS_EIO; break; }
+        } else if (st.type != FS_TYPE_FILE || st.size != snaps[i].len) { r = FS_EIO; break; }
         if (!snaps[i].len) continue;
         unsigned char *got = host_alloc(snaps[i].len);
         u32 off = 0;

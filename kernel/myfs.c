@@ -828,6 +828,7 @@ const char *myfs_strerror(int err) {
     case FS_ENODEV:       return "no disk / file system not mounted";
     case FS_EFBIG:        return "file or filesystem too large";
     case FS_ENAMETOOLONG: return "name too long";
+    case FS_ELOOP:        return "too many levels of symbolic links";
     default:              return "unknown error";
     }
 }

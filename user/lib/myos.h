@@ -45,7 +45,8 @@ enum {
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
     SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL,
-    SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT
+    SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
+    SYS_SYMLINK, SYS_READLINK, SYS_LSTAT
 };
 
 #define PROT_READ  1
@@ -91,6 +92,7 @@ extern int errno;
 #define EPIPE 32
 #define ENAMETOOLONG 36
 #define ENOTEMPTY 39
+#define ELOOP 40
 #define EMSGSIZE 90
 #define EADDRINUSE 98
 #define ENETDOWN 100
@@ -105,7 +107,7 @@ extern int errno;
 
 struct dirent_info {
     char name[256];                 /* имя до 255 символов и нуль */
-    unsigned type;                  /* 1 файл, 2 каталог */
+    unsigned type;                  /* 1 файл, 2 каталог, 5 символическая ссылка */
     unsigned size;
 };
 
@@ -178,6 +180,8 @@ int   mkdir(const char *path);
 int   unlink(const char *path);
 int   ps(struct proc_info *buf, int max);
 int   dirstat(const char *path, struct dirent_info *out);   /* 0 или -errno */
+int   symlink(const char *target, const char *linkpath);
+ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
 /* ---- терминал ---- */
 int  term_cols(void);           /* размер терминала: 128x48 в графике, 80x25 в тексте */

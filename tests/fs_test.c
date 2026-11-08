@@ -107,6 +107,51 @@ int main(){
     CHECK(fs_init(&f)==0 && !f);
     CHECK(fs_resolve(1, nested, &up)==0);
   }
+  /* Символическая ссылка: цель в теле файла, последний компонент раскрывается
+   * при поиске и не раскрывается при unlink, rename и readlink. */
+  {
+    char tbuf[16], prev[8];
+    u32 hello, a;
+    CHECK(fs_create(1, "hello", FS_TYPE_FILE, &hello)==0);
+    CHECK(fs_write(hello, 0, "hi", 2)==2);
+    CHECK(fs_symlink(1, "", "empty")==FS_EINVAL);
+    CHECK(fs_symlink(1, "hello", "alias")==0);
+    CHECK(fs_readlink(1, "alias", tbuf, sizeof tbuf)==5 && !memcmp(tbuf, "hello", 5));
+    CHECK(fs_readlink(1, "hello", tbuf, sizeof tbuf)==FS_EINVAL);
+    CHECK(fs_resolve(1, "alias", &a)==0 && a==hello && fs_read(a, 0, rd, 2)==2 && !memcmp(rd, "hi", 2));
+    CHECK(fs_resolve_nofollow(1, "alias", &a)==0 && fs_stat(a, &st)==0 && st.type==FS_TYPE_LINK && st.size==5);
+    CHECK(fs_symlink(1, "alias", "again")==0);
+    CHECK(fs_readlink(1, "again", tbuf, sizeof tbuf)==5 && !memcmp(tbuf, "alias", 5));
+    CHECK(fs_resolve(1, "again", &a)==0 && a==hello);
+    CHECK(fs_symlink(1, "../hello", "b/up")==0 && fs_resolve(1, "b/up", &a)==0 && a==hello);
+    CHECK(fs_symlink(1, "/hello", "abs")==0 && fs_resolve(1, "abs", &a)==0 && a==hello);
+    CHECK(fs_resolve(1, "alias/", &a)==FS_ENOTDIR);
+    CHECK(fs_symlink(1, "b", "blink")==0);
+    CHECK(fs_rename(1, "hello", "blink")==FS_EEXIST && fs_resolve(1, "hello", &a)==0 && a==hello);
+    CHECK(fs_create(1, "blink/via", FS_TYPE_FILE, &a)==0 && fs_resolve(1, "b/via", &a)==0);
+    CHECK(fs_rename(1, "alias", "alias2")==0);
+    CHECK(fs_readlink(1, "alias2", tbuf, sizeof tbuf)==5 && fs_resolve(1, "alias", &a)==FS_ENOENT);
+    CHECK(fs_remove(1, "alias2")==0 && fs_read(hello, 0, rd, 2)==2);
+    CHECK(fs_symlink(1, "missing", "dangling")==0);
+    CHECK(fs_resolve(1, "dangling", &a)==FS_ENOENT && fs_readlink(1, "dangling", tbuf, sizeof tbuf)==7);
+    CHECK(fs_create(1, "dangling", FS_TYPE_FILE, &a)==FS_EEXIST);
+    CHECK(fs_remove(1, "dangling")==0 && fs_resolve(1, "hello", &a)==0);
+    CHECK(fs_symlink(1, "loop", "loop")==0 && fs_resolve(1, "loop", &a)==FS_ELOOP);
+    CHECK(fs_symlink(1, "c2", "c1")==0 && fs_symlink(1, "c1", "c2")==0 && fs_resolve(1, "c1", &a)==FS_ELOOP);
+    memcpy(prev, "t00", 4);
+    CHECK(fs_create(1, prev, FS_TYPE_FILE, &a)==0);
+    for (int i = 1; i <= 41; i++) {
+      char name[8];
+      name[0] = 't'; name[1] = '0' + i / 10; name[2] = '0' + i % 10; name[3] = 0;
+      CHECK(fs_symlink(1, prev, name)==0);
+      memcpy(prev, name, 4);
+    }
+    CHECK(fs_resolve(1, "t40", &a)==0);
+    CHECK(fs_resolve(1, "t41", &a)==FS_ELOOP);
+    char bigtarget[FS_PATH_MAX + 1];
+    memset(bigtarget, 't', FS_PATH_MAX); bigtarget[FS_PATH_MAX] = 0;
+    CHECK(fs_symlink(1, bigtarget, "toolong")==FS_ENAMETOOLONG);
+  }
   /* Версия 1 сохраняет записи по 32 байта и предел в 27 символов. */
   CHECK(fs_format_legacy()==0);
   {
@@ -114,6 +159,12 @@ int main(){
     memset(n27, 'n', 27); n27[27] = 0;
     memset(n28, 'm', 28); n28[28] = 0;
     CHECK(fs_create(1, "ok", FS_TYPE_FILE, &up)==0);
+    u32 ok = up;
+    CHECK(fs_symlink(1, "ok", "oklink")==0);
+    char linkgot[8];
+    CHECK(fs_readlink(1, "oklink", linkgot, sizeof linkgot)==2 && !memcmp(linkgot, "ok", 2));
+    CHECK(fs_resolve(1, "oklink", &up)==0 && up==ok);
+    CHECK(fs_resolve_nofollow(1, "oklink", &up)==0 && fs_stat(up, &st)==0 && st.type==FS_TYPE_LINK);
     CHECK(fs_create(1, n27, FS_TYPE_FILE, &up)==0);
     CHECK(fs_create(1, n28, FS_TYPE_FILE, 0)==FS_ENAMETOOLONG);
     CHECK(fs_create(1, "bigv1", FS_TYPE_FILE, &up)==0);

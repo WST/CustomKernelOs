@@ -62,6 +62,7 @@ static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
             if (typ == 4) o->type = 2;
             else if (typ == 2) o->type = 4;
             else if (typ == 6) o->type = 3;
+            else if (typ == 10) o->type = 5;
             else o->type = 1;
             {
                 char full[512];
@@ -74,6 +75,7 @@ static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
                     if ((mode & 0170000) == 0040000) o->type = 2;
                     else if ((mode & 0170000) == 0020000) o->type = 4;
                     else if ((mode & 0170000) == 0060000) o->type = 3;
+                    else if ((mode & 0170000) == 0120000) o->type = 5;
                     else o->type = 1;
                 }
             }
@@ -145,9 +147,29 @@ static int syscall3(int n, int a, int b, int c) {
         if ((mode & 0170000) == 0040000) o->type = 2;
         else if ((mode & 0170000) == 0020000) o->type = 4;
         else if ((mode & 0170000) == 0060000) o->type = 3;
+        else if ((mode & 0170000) == 0120000) o->type = 5;
         else o->type = 1;
         return 0;
     }
+    case SYS_LSTAT: {
+        unsigned char st[64];
+        int r = __syscall(107, a, (int)st, 0);
+        unsigned mode;
+        struct dirent_info *o;
+        if (r < 0) return r;
+        mode = *(unsigned short *)(st + 8);
+        o = (struct dirent_info *)b;
+        memset(o, 0, sizeof *o);
+        o->size = *(unsigned *)(st + 20);
+        if ((mode & 0170000) == 0040000) o->type = 2;
+        else if ((mode & 0170000) == 0020000) o->type = 4;
+        else if ((mode & 0170000) == 0060000) o->type = 3;
+        else if ((mode & 0170000) == 0120000) o->type = 5;
+        else o->type = 1;
+        return 0;
+    }
+    case SYS_SYMLINK: return __syscall(83, a, b);
+    case SYS_READLINK: return __syscall(85, a, b, c);
     case SYS_READDIR: return linux_dir_at((const char *)a, b, (struct dirent_info *)c);
     default: return -38;
     }
@@ -403,6 +425,7 @@ const char *strerror(int e) {
     case EPIPE:     return "broken pipe";
     case ENAMETOOLONG: return "file name too long";
     case ENOTEMPTY: return "directory not empty";
+    case ELOOP:     return "too many levels of symbolic links";
     case EMSGSIZE:  return "message too long";
     case EADDRINUSE:   return "address already in use";
     case ENETDOWN:     return "network is down";
@@ -1315,9 +1338,33 @@ int stat(const char *path, struct stat *st) {
     if (info.type == 2) st->st_mode = S_IFDIR;
     else if (info.type == 4) st->st_mode = S_IFCHR;
     else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 5) st->st_mode = S_IFLNK;
     else st->st_mode = S_IFREG;
     st->st_size = info.size;
     return 0;
+}
+
+int lstat(const char *path, struct stat *st) {
+    struct dirent_info info;
+    int r = syscall3(SYS_LSTAT, (int)path, (int)&info, 0);
+    if (r < 0) { errno = -r; return -1; }
+    if (info.type == 2) st->st_mode = S_IFDIR;
+    else if (info.type == 4) st->st_mode = S_IFCHR;
+    else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 5) st->st_mode = S_IFLNK;
+    else st->st_mode = S_IFREG;
+    st->st_size = info.size;
+    return 0;
+}
+
+int symlink(const char *target, const char *linkpath) {
+    return ioerr(syscall3(SYS_SYMLINK, (int)target, (int)linkpath, 0));
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    int r = syscall3(SYS_READLINK, (int)path, (int)buf, (int)bufsiz);
+    if (r < 0) { errno = -r; return -1; }
+    return r;
 }
 
 int rename(const char *old, const char *new) {
@@ -1362,6 +1409,7 @@ struct dirent *readdir(DIR *dir) {
     if (info.type == 2) dir->ent.d_type = DT_DIR;
     else if (info.type == 4) dir->ent.d_type = DT_CHR;
     else if (info.type == 3) dir->ent.d_type = DT_BLK;
+    else if (info.type == 5) dir->ent.d_type = DT_LNK;
     else dir->ent.d_type = DT_REG;
     for (i = 0; i < 255 && info.name[i]; i++) dir->ent.d_name[i] = info.name[i];
     dir->ent.d_name[i] = 0;

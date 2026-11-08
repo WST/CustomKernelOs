@@ -75,6 +75,7 @@ static int fs_errno(int e) {
     case FS_EROFS:        return -30;
     case FS_EBUSY:        return -16;
     case FS_EXDEV:        return -18;
+    case FS_ELOOP:        return -ELOOP;
     default:              return e < 0 ? -EIO : e;
     }
 }
@@ -315,16 +316,13 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
     return 1;
 }
 
-static int sys_stat(u32 upath, u32 uout) {
-    char path[PATH_MAX];
-    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
-    if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
+static int stat_path(const char *path, struct dirent_info *out, bool follow) {
     u32 ino;
     struct fs_stat st;
-    int r = fs_resolve(task_current()->cwd, path, &ino);
+    int r = follow ? fs_resolve(task_current()->cwd, path, &ino)
+                   : fs_resolve_nofollow(task_current()->cwd, path, &ino);
     if (!r) r = fs_stat(ino, &st);
     if (r) return fs_errno(r);
-    struct dirent_info *out = (struct dirent_info *)uout;
     const char *b = path + strlen(path);
     while (b > path && b[-1] != '/') b--;
     memset(out->name, 0, sizeof(out->name));
@@ -332,6 +330,33 @@ static int sys_stat(u32 upath, u32 uout) {
     out->type = st.type;
     out->size = st.size;
     return 0;
+}
+
+static int sys_stat(u32 upath, u32 uout) {
+    char path[PATH_MAX];
+    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
+    return stat_path(path, (struct dirent_info *)uout, true);
+}
+
+static int sys_lstat(u32 upath, u32 uout) {
+    char path[PATH_MAX];
+    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
+    return stat_path(path, (struct dirent_info *)uout, false);
+}
+
+static int sys_symlink(u32 utarget, u32 ulink) {
+    char target[PATH_MAX], link[PATH_MAX];
+    if (!user_str(utarget, target, sizeof(target)) || !user_str(ulink, link, sizeof(link))) return -EFAULT;
+    return fs_errno(fs_symlink(task_current()->cwd, target, link));
+}
+
+static int sys_readlink(u32 upath, u32 ubuf, u32 len) {
+    char path[PATH_MAX];
+    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    if (!len || !user_buf_ok(ubuf, len, true)) return -EFAULT;
+    return fs_errno(fs_readlink(task_current()->cwd, path, (char *)ubuf, len));
 }
 
 static int sys_mkdir(u32 upath) {
@@ -344,7 +369,7 @@ static int sys_unlink(u32 upath) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
     u32 ino;
-    if(!fs_resolve(task_current()->cwd,path,&ino) && account_private(ino)) return -EPERM;
+    if(!fs_resolve_nofollow(task_current()->cwd,path,&ino) && account_private(ino)) return -EPERM;
     return fs_errno(fs_remove(task_current()->cwd, path));
 }
 
@@ -357,10 +382,10 @@ static int sys_rename(u32 uold, u32 unew) {
     u32 source, target, etc;
     u32 cwd = task_current()->cwd;
     int result;
-    if (!fs_resolve(cwd, oldp, &source) &&
+    if (!fs_resolve_nofollow(cwd, oldp, &source) &&
         (account_private(source) ||
          (!fs_resolve(FS_ROOT, "/etc", &etc) && source == etc))) result = -EPERM;
-    else if (!fs_resolve(cwd, newp, &target) && account_private(target)) result = -EPERM;
+    else if (!fs_resolve_nofollow(cwd, newp, &target) && account_private(target)) result = -EPERM;
     else result = fs_errno(fs_rename(cwd, oldp, newp));
     fs_namespace_unlock();
     return result;
@@ -898,6 +923,9 @@ void syscall_dispatch(struct regs *r) {
     case SYS_MMAP:    ret = sys_mmap(a); break;
     case SYS_MUNMAP:  ret = sys_munmap(a, b); break;
     case SYS_MPROTECT: ret = sys_mprotect(a, b, c); break;
+    case SYS_SYMLINK:  ret = sys_symlink(a, b); break;
+    case SYS_READLINK: ret = sys_readlink(a, b, c); break;
+    case SYS_LSTAT:    ret = sys_lstat(a, b); break;
     case SYS_PS:      ret = sys_ps(a, b); break;
     case SYS_GETPPID: ret = t->parent; break;
     case SYS_TTYMODE: {

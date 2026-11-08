@@ -377,6 +377,8 @@ test: | $(BUILD)
 	./$(BUILD)/v1_seed $(BUILD)/v1.img
 	./$(BUILD)/myfs $(BUILD)/v1.img grow 4
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/note | grep -q v1-ok
+	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
+	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
 	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==2, v'
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')

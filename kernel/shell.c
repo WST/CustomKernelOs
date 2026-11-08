@@ -388,6 +388,9 @@ static void cmd_ls(char *a) {
             kprintf("   <DIR>  ");
             vga_set_color(LIGHT_BLUE, BLACK); kprintf("%s/\n", de.name);
             vga_set_color(text_color, BLACK);
+        } else if (st.type == FS_TYPE_LINK) {
+            files++;
+            kprintf("   <LNK>  %s\n", de.name);
         } else {
             files++;
             bytes += st.size;
@@ -410,6 +413,8 @@ static void tree_walk(u32 dir, int depth) {
             vga_set_color(LIGHT_BLUE, BLACK); kprintf("%s/\n", de.name);
             vga_set_color(text_color, BLACK);
             tree_walk(de.ino, depth + 1);
+        } else if (st.type == FS_TYPE_LINK) {
+            kprintf("%s@\n", de.name);
         } else {
             kprintf("%s (%u)\n", de.name, st.size);
         }

@@ -17,13 +17,14 @@
  * format() и mkfs пишут версию 2; уже записанный том версии 1 читается как был.
  * Карта блоков версии 1 — 12 прямых, один одинарный и один двойной косвенный
  * (файл до ~8 МиБ). У версии 2 последний прямой слот занят тройным косвенным
- * блоком, поэтому файл может вырасти до свободного места на томе. */
+ * блоком, поэтому файл может вырасти до свободного места на томе.
+ * Символическая ссылка — отдельный тип inode: в теле лежит текст цели. */
 
 #define FS_ROOT       1
 #define FS_NAME_MAX   255
 #define FS_PATH_MAX   1024
 
-enum { FS_TYPE_FREE = 0, FS_TYPE_FILE = 1, FS_TYPE_DIR = 2, FS_TYPE_BLOCK = 3, FS_TYPE_CHAR = 4 };
+enum { FS_TYPE_FREE = 0, FS_TYPE_FILE = 1, FS_TYPE_DIR = 2, FS_TYPE_BLOCK = 3, FS_TYPE_CHAR = 4, FS_TYPE_LINK = 5 };
 
 enum {
     FS_OK        =  0,
@@ -41,6 +42,7 @@ enum {
     FS_EROFS = -12,
     FS_EBUSY = -13,
     FS_EXDEV = -14,
+    FS_ELOOP = -15,
 };
 
 /* VFS: up to four MyFS volumes; /dev is a virtual filesystem. */
@@ -76,6 +78,9 @@ int  fs_format_legacy(void);     /* том версии 1: записи по 32 
 bool fs_ready(void);
 
 int  fs_resolve(u32 cwd, const char *path, u32 *ino);
+int  fs_resolve_nofollow(u32 cwd, const char *path, u32 *ino);
+int  fs_symlink(u32 cwd, const char *target, const char *linkpath);
+int  fs_readlink(u32 cwd, const char *path, char *buf, u32 len); /* -> байт или ошибка */
 int  fs_create(u32 cwd, const char *path, int type, u32 *ino);
 int  fs_remove(u32 cwd, const char *path);
 int  fs_rename(u32 cwd, const char *src, const char *dst);

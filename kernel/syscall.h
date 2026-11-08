@@ -78,6 +78,9 @@ enum {
     SYS_MMAP,           /* mmap(&{addr,len,prot,flags,fd,off}) -> адрес */
     SYS_MUNMAP,         /* munmap(addr, len) */
     SYS_MPROTECT,       /* mprotect(addr, len, prot) */
+    SYS_SYMLINK,        /* symlink(target, linkpath) */
+    SYS_READLINK,       /* readlink(path, buf, len) -> байт, без нуля */
+    SYS_LSTAT,          /* lstat(path, &dirent_info): сама ссылка, не цель */
     SYS_COUNT
 };
 
@@ -108,6 +111,7 @@ enum {
 #define ENAMETOOLONG 36
 #define ENOSYS       38
 #define ENOTEMPTY    39
+#define ELOOP        40
 #define EADDRINUSE   98
 #define ENETDOWN     100
 #define ECONNRESET   104

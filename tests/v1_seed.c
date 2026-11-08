@@ -33,6 +33,7 @@ int main(int argc, char **argv) {
     CHECK(fs_create(1, "keep", FS_TYPE_DIR, 0) == 0);
     CHECK(fs_create(1, "keep/note", FS_TYPE_FILE, &ino) == 0);
     CHECK(fs_write(ino, 0, "v1-ok", 6) == 6);
+    CHECK(fs_symlink(1, "note", "keep/alias") == 0);
     CHECK(fs_create(1, name, FS_TYPE_FILE, &ino) == 0);
     CHECK(fs_write(ino, 0, "long", 4) == 4);
     CHECK(fs_create(1, longer, FS_TYPE_FILE, 0) == FS_ENAMETOOLONG);
