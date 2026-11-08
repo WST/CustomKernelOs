@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Task Manager
+Exec=taskmgr
+Icon=taskmgr
+Keywords=диспетчер задач процессы process
+X-MyOS-Favorite=true

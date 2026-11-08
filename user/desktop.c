@@ -28,6 +28,7 @@
  * В обзоре (Activities) можно сразу печатать — это поиск программ, в том
  * числе по-русски. Справа в панели — раскладка клавиатуры (en/ru). */
 #include "win.h"
+#include "img.h"
 
 static int iabs(int v) { return v < 0 ? -v : v; }
 
@@ -51,22 +52,79 @@ static int mouse_x, mouse_y;
 
 /* ------------------------------------------------------------ программы */
 
-struct app { const char *name, *prog; bool fav; const char *keywords; };
-static const struct app apps[] = {
-    { "Browser", "browser", true, "браузер интернет web internet сайт" },
-    { "Files", "files", true, "файлы папки folder" },
-    { "Terminal", "terminal", true, "терминал консоль shell sh командная" },
-    { "Notepad", "notepad", true, "блокнот текст редактор editor text" },
-    { "Calculator", "calc", true, "калькулятор" },
-    { "Paint", "draw", true, "рисование рисовать draw" },
-    { "Minesweeper", "mines", true, "сапёр сапер мины игра game" },
-    { "Battleship", "battle", true, "морской бой корабли игра game" },
-    { "Task Manager", "taskmgr", true, "диспетчер задач процессы process" },
-    { "Display", "display", false, "экран дисплей разрешение settings настройки" },
-    { "About MyOS", "about", false, "о системе версия" },
-};
-#define N_APPS ((int)(sizeof(apps) / sizeof(apps[0])))
-enum { APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_ABOUT };
+#define MAX_APPS 64
+#define APP_NAME 48
+#define APP_PROG 32
+#define APP_PATH 64
+#define APP_KEYWORDS 128
+enum { APP_GENERIC, APP_BROWSER, APP_FILES, APP_TERMINAL, APP_NOTEPAD, APP_CALC, APP_PAINT, APP_MINES, APP_BATTLE, APP_TASKMGR, APP_DISPLAY, APP_CODE, APP_ABOUT };
+struct app { char name[APP_NAME], prog[APP_PROG], path[APP_PATH], keywords[APP_KEYWORDS]; int icon; bool fav; };
+static struct app apps[MAX_APPS];
+static int N_APPS;
+
+static int app_icon_kind(const char *s) {
+    if (!strcmp(s, "browser")) return APP_BROWSER;
+    if (!strcmp(s, "files")) return APP_FILES;
+    if (!strcmp(s, "terminal")) return APP_TERMINAL;
+    if (!strcmp(s, "notepad")) return APP_NOTEPAD;
+    if (!strcmp(s, "calc")) return APP_CALC;
+    if (!strcmp(s, "paint")) return APP_PAINT;
+    if (!strcmp(s, "mines")) return APP_MINES;
+    if (!strcmp(s, "battle")) return APP_BATTLE;
+    if (!strcmp(s, "taskmgr")) return APP_TASKMGR;
+    if (!strcmp(s, "display")) return APP_DISPLAY;
+    if (!strcmp(s, "code")) return APP_CODE;
+    if (!strcmp(s, "about")) return APP_ABOUT;
+    return APP_GENERIC;
+}
+
+static void app_field(char *dst, int cap, const char *src) {
+    int n = strlen(src); if (n >= cap) n = cap - 1;
+    memcpy(dst, src, n); dst[n] = 0;
+}
+static void app_append(char *dst, int cap, const char *src) {
+    int n = strlen(dst);
+    if (n && n < cap - 1) dst[n++] = ' ';
+    while (*src && n < cap - 1) dst[n++] = *src++;
+    dst[n] = 0;
+}
+static void draw_generic_icon(const char *title, int x, int y, int size);
+
+/* Читаем Desktop Entry из стандартного каталога приложений. */
+static void load_apps(void) {
+    struct dirent_info ent;
+    for (int i = 0; N_APPS < MAX_APPS && dirread("/usr/share/applications", i, &ent) > 0; i++) {
+        int en = strlen(ent.name);
+        if (ent.type != 1 || en < 8 || strcmp(ent.name + en - 8, ".desktop")) continue;
+        char path[64], line[192];
+        snprintf(path, sizeof(path), "/usr/share/applications/%s", ent.name);
+        int fd = open(path, O_READ); if (fd < 0) continue;
+        struct app a; memset(&a, 0, sizeof(a)); a.icon = APP_GENERIC;
+        while (readln(fd, line, sizeof(line)) >= 0) {
+            int ll = strlen(line);
+            while (ll && (line[ll - 1] == '\r' || line[ll - 1] == ' ' || line[ll - 1] == '\t')) line[--ll] = 0;
+            char *eq = strchr(line, '='); if (!eq) continue; *eq++ = 0;
+            if (!strcmp(line, "Name")) app_field(a.name, sizeof(a.name), eq);
+            else if (!strcmp(line, "Exec")) {
+                while (*eq == ' ' || *eq == '\t') eq++;
+                char *end = eq; while (*end && *end != ' ' && *end != '\t') end++;
+                *end = 0;
+                const char *base = eq;
+                if (!strncmp(eq, "/bin/", 5)) base = eq + 5;
+                else if (!strncmp(eq, "/ext/bin/", 9)) base = eq + 9;
+                else if (strchr(eq, '/')) continue;
+                if (!*base || strchr(base, '/') || strstr(base, "..")) continue;
+                app_field(a.prog, sizeof(a.prog), base);
+                if (eq == base) snprintf(a.path, sizeof(a.path), "/bin/%s", base);
+                else app_field(a.path, sizeof(a.path), eq);
+            } else if (!strcmp(line, "Icon")) a.icon = app_icon_kind(eq);
+            else if (!strcmp(line, "Keywords") || !strcmp(line, "Comment")) app_append(a.keywords, sizeof(a.keywords), eq);
+            else if (!strcmp(line, "X-MyOS-Favorite") && (!strcmp(eq, "true") || !strcmp(eq, "1"))) a.fav = true;
+        }
+        close(fd);
+        if (a.name[0] && a.prog[0] && a.path[0]) apps[N_APPS++] = a;
+    }
+}
 
 static struct { int pid, app; } launched[32];
 static int n_launched;
@@ -200,7 +258,7 @@ static void tri(int x0, int y0, int x1, int y1, int x2, int y2, color_t c) {    
 
 static void draw_app_icon(int app, int x, int y, int size) {
     IX = x; IY = y; IS = size;
-    switch (app) {
+    switch (apps[app].icon) {
     case APP_TERMINAL:
         rr_grad(3, 5, 42, 38, 7, RGB(94, 94, 94), RGB(52, 52, 52));
         rr(6, 10, 36, 30, 4, RGB(48, 10, 36));
@@ -229,6 +287,7 @@ static void draw_app_icon(int app, int x, int y, int size) {
         rr_grad(4, 18, 40, 25, 4, RGB(250, 145, 88), RGB(229, 92, 38));
         ln(20, 70, 76, 70, 2, RGB(255, 196, 160));
         break;
+    case APP_CODE:
     case APP_NOTEPAD:
         rr(8, 4, 32, 41, 4, RGB(170, 170, 170));
         rr(9, 5, 30, 39, 3, RGB(252, 252, 252));
@@ -297,6 +356,7 @@ static void draw_app_icon(int app, int x, int y, int size) {
         ell(21, 10, 6, 6, C_WHITE, 255);
         rr(21, 19, 6, 19, 3, C_WHITE);
         break;
+    default: draw_generic_icon(apps[app].name, x, y, size); break;
     }
 }
 
@@ -316,13 +376,13 @@ static void draw_generic_icon(const char *title, int x, int y, int size) {
 }
 
 /* значки, готовые картинки 0xAARRGGBB (рисуются один раз на размер) */
-static uint32_t *icon_cache[N_APPS][2];
+static uint32_t *icon_cache[MAX_APPS][2];
 static int icon_cache_size[2];
 
 static uint32_t *app_icon(int app, int which, int size) {
     if (icon_cache[app][which] && icon_cache_size[which] == size) return icon_cache[app][which];
     if (icon_cache_size[which] != size) {
-        for (int i = 0; i < N_APPS; i++) { free(icon_cache[i][which]); icon_cache[i][which] = NULL; }
+        for (int i = 0; i < MAX_APPS; i++) { free(icon_cache[i][which]); icon_cache[i][which] = NULL; }
         icon_cache_size[which] = size;
     }
     struct gfx_canvas cv;
@@ -342,6 +402,33 @@ static color_t lerp3(int t) {                                      /* t 0..1023:
     if (t > 1023) t = 1023;
     int seg = t * 3 / 1024, f = (t * 3 - seg * 1024) * 255 / 1023;
     return gfx_mix(stops[seg], stops[seg + 1], f);
+}
+
+static void custom_wallpaper(void) {
+    char name[128];
+    strcpy(name,"/usr/share/wallpapers/moon.jpg");
+    int fd=open("/etc/wallpaper",O_READ);
+    if(fd>=0) {
+        char configured[128]; int n=read(fd,configured,sizeof(configured)-1); close(fd);
+        if(n>0) { configured[n]=0; strcpy(name,configured); }
+    }
+    fd=open(name,O_READ); if(fd<0) return;
+    int len=lseek(fd,0,SEEK_END); lseek(fd,0,SEEK_SET);
+    if(len<=0 || len>8*1024*1024) { close(fd); return; }
+    unsigned char *data=malloc(len); img im;
+    int ok=data && read(fd,data,len)==len && img_decode(data,len,&im,2048)==0;
+    close(fd); free(data); if(!ok) return;
+    /* Fill the screen, keeping the aspect ratio and cropping centrally. */
+    int cw=im.w, ch=im.h;
+    if(im.w*SH>im.h*SW) cw=im.h*SW/SH;
+    else ch=im.w*SH/SW;
+    if(cw<1) cw=1;
+    if(ch<1) ch=1;
+    for(int y=0;y<SH;y++) for(int x=0;x<SW;x++) {
+        unsigned c=im.px[((im.h-ch)/2+y*ch/SH)*im.w+(im.w-cw)/2+x*cw/SW];
+        wallpaper[y*SW+x]=gfx_mix(RGB(40,30,40),c,c>>24);
+    }
+    img_free(&im);
 }
 
 static void make_wallpaper(void) {
@@ -383,6 +470,7 @@ static void make_wallpaper(void) {
     /* подпись в углу */
     const char *s = "MyOS";
     text_draw(FONT_UI_BOLD, 30, SW - text_width(FONT_UI_BOLD, 30, s) - 34, SH - 76, s, RGB(255, 220, 200));
+    custom_wallpaper();
     gfx_buf = save; gfx_w = sw; gfx_h = sh;
 }
 
@@ -469,7 +557,7 @@ static int app_windows(int app) {
 
 static void dock_build(void) {
     n_dock = 0;
-    for (int a = 0; a < N_APPS; a++)
+    for (int a = 0; a < N_APPS && n_dock < DOCK_MAX; a++)
         if (apps[a].fav) { dock[n_dock].app = a; dock[n_dock].win = -1; n_dock++; }
     for (int a = 0; a < N_APPS && n_dock < DOCK_MAX; a++)
         if (!apps[a].fav && app_windows(a)) { dock[n_dock].app = a; dock[n_dock].win = -1; n_dock++; }
@@ -566,11 +654,11 @@ static void draw_tip(void) {
 /* ------------------------------------------------------------ системное меню */
 
 #define SM_W 260
-static const char *sm_items[] = { "Display Settings", "About MyOS", "", "Power Off / Log Out" };
-#define SM_N 4
+static const char *sm_items[] = { "Settings", "About MyOS", "", "Log Out", "Close Desktop" };
+#define SM_N 5
 static int hover_sm = -1;
 
-static struct rect sysmenu_rect(void) { return mkrect(SW - SM_W - 8, TOPBAR_H + 6, SM_W, 16 + 3 * 38 + 13); }
+static struct rect sysmenu_rect(void) { return mkrect(SW - SM_W - 8, TOPBAR_H + 6, SM_W, 16 + 4 * 38 + 13); }
 static struct rect sm_item(int i) {
     struct rect r = sysmenu_rect();
     int y = r.y + 8;
@@ -594,6 +682,11 @@ static void draw_sysmenu(void) {
             gfx_ellipse(icon_x, icon_y - 8, 16, 16, RGB(235, 235, 235), 255);
             gfx_fill_rect(icon_x + 7, icon_y - 2, 2, 6, RGB(48, 48, 48));
             gfx_fill_rect(icon_x + 7, icon_y - 5, 2, 2, RGB(48, 48, 48));
+        } else if (i == 3) {
+            gfx_round_frame(icon_x, icon_y - 8, 11, 16, 2, C_WHITE, RGB(48, 48, 48));
+            gfx_fill_rect(icon_x + 6, icon_y - 1, 15, 2, C_WHITE);
+            gfx_line16((icon_x+16)*16, (icon_y-5)*16, (icon_x+21)*16, icon_y*16, 24, C_WHITE, 255);
+            gfx_line16((icon_x+21)*16, icon_y*16, (icon_x+16)*16, (icon_y+5)*16, 24, C_WHITE, 255);
         } else {                                                            /* питание */
             gfx_ellipse(icon_x, icon_y - 7, 16, 16, RGB(235, 235, 235), 255);
             gfx_ellipse(icon_x + 2, icon_y - 5, 12, 12, RGB(48, 48, 48), 255);
@@ -629,7 +722,7 @@ static int hover_ov = -1;
 /* поиск: что напечатано и какие программы подходят */
 static char search[64];
 static int  search_len;
-static int  ov_list[N_APPS], ov_n, ov_sel;
+static int  ov_list[MAX_APPS], ov_n, ov_sel;
 static bool ov_kbd;                     /* выбирали стрелками — показать выбранное */
 
 static int lower_cp(int c) {
@@ -800,6 +893,7 @@ static int win_radius(struct win *w) { return w->maximized ? 0 : RADIUS; }
 static void draw_frame(int idx) {
     struct win *w = &wins[idx];
     bool active = idx == focus;
+    bool code_theme = w->app >= 0 && apps[w->app].icon == APP_CODE;
     int ow = outer_w(w), oh = outer_h(w), rad = win_radius(w);
     /* тень и тонкая обводка (у развёрнутого — не нужны: вокруг панель и док) */
     if (!w->maximized) {
@@ -811,22 +905,22 @@ static void draw_frame(int idx) {
         gfx_fill_rect_a(w->x - 1, w->y + oh, ow + 2, 1, C_BLACK, 40);
     }
     /* заголовок */
-    color_t hb = active ? RGB(235, 235, 235) : RGB(250, 250, 250);
+    color_t hb = code_theme ? RGB(24,24,24) : active ? RGB(235, 235, 235) : RGB(250, 250, 250);
     if (rad) gfx_round_rect_ex(w->x, w->y, ow, HEAD_H, rad, 3, hb, 255);
     else gfx_fill_rect(w->x, w->y, ow, HEAD_H, hb);
-    gfx_fill_rect(w->x, w->y + HEAD_H - 1, ow, 1, active ? RGB(214, 214, 214) : RGB(228, 228, 228));
+    gfx_fill_rect(w->x, w->y + HEAD_H - 1, ow, 1, code_theme ? RGB(43,43,43) : active ? RGB(214, 214, 214) : RGB(228, 228, 228));
     int cxc, cxx, cxm, cy;
     btn_centers(w, &cxc, &cxx, &cxm, &cy);
-    color_t ic = active ? RGB(46, 52, 54) : RGB(150, 150, 150);
+    color_t ic = code_theme ? RGB(205,205,205) : active ? RGB(46, 52, 54) : RGB(150, 150, 150);
     /* закрыть */
     bool hc = hover_close == idx;
-    gfx_disc16(cxc * 16, cy * 16, BTN_R * 16, hc ? RGB(233, 84, 32) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+    gfx_disc16(cxc * 16, cy * 16, BTN_R * 16, hc ? RGB(196,43,28) : code_theme ? RGB(24,24,24) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
     color_t xc = hc ? C_WHITE : ic;
     gfx_line16((cxc - 4) * 16, (cy - 4) * 16, (cxc + 4) * 16, (cy + 4) * 16, 26, xc, 255);
     gfx_line16((cxc + 4) * 16, (cy - 4) * 16, (cxc - 4) * 16, (cy + 4) * 16, 26, xc, 255);
     /* развернуть: квадрат; у развёрнутого — два квадрата («вернуть») */
     if (w->resizable) {
-        if (hover_max == idx) gfx_disc16(cxx * 16, cy * 16, BTN_R * 16, active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+        if (hover_max == idx) gfx_disc16(cxx * 16, cy * 16, BTN_R * 16, code_theme ? RGB(60,60,60) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
         int q = w->maximized ? 3 : 4, ox = w->maximized ? -1 : 0, oy = w->maximized ? 1 : 0;
         int x0 = (cxx - q + ox) * 16, y0 = (cy - q + oy) * 16, x1 = (cxx + q + ox) * 16, y1 = (cy + q + oy) * 16;
         gfx_line16(x0, y0, x1, y0, 24, ic, 255); gfx_line16(x1, y0, x1, y1, 24, ic, 255);
@@ -837,7 +931,7 @@ static void draw_frame(int idx) {
         }
     }
     /* свернуть */
-    if (hover_min == idx) gfx_disc16(cxm * 16, cy * 16, BTN_R * 16, active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
+    if (hover_min == idx) gfx_disc16(cxm * 16, cy * 16, BTN_R * 16, code_theme ? RGB(60,60,60) : active ? RGB(214, 214, 214) : RGB(236, 236, 236), 255);
     gfx_line16((cxm - 5) * 16, (cy + 3) * 16 + 8, (cxm + 5) * 16, (cy + 3) * 16 + 8, 26, ic, 255);
     /* название — по центру, жирным */
     int pad = w->x + ow - (cxm - BTN_R) + 8;                     /* справа заняты кнопки — столько же слева */
@@ -846,7 +940,7 @@ static void draw_frame(int idx) {
         int tw = text_width(FONT_UI_BOLD, 14, w->title);
         if (tw > avail) tw = avail;
         text_draw_fit(FONT_UI_BOLD, 14, w->x + (ow - tw) / 2, w->y + (HEAD_H - text_line_h(FONT_UI_BOLD, 14)) / 2,
-                      w->title, avail, active ? RGB(46, 52, 54) : RGB(140, 140, 140));
+                      w->title, avail, code_theme ? RGB(205,205,205) : active ? RGB(46, 52, 54) : RGB(140, 140, 140));
     }
 }
 
@@ -1156,6 +1250,11 @@ static int app_by_title(const char *t) {
     return -1;
 }
 
+static int app_by_prog(const char *prog) {
+    for (int a = 0; a < N_APPS; a++) if (!strcmp(apps[a].prog, prog)) return a;
+    return -1;
+}
+
 static void handle_msg(struct msg *m) {
     switch (m->type) {
     case WM_CREATE: {
@@ -1235,6 +1334,12 @@ static void handle_msg(struct msg *m) {
         request_buffer(m->a);                                     /* пока ждали, рамку могли ещё растянуть */
         return;
     }
+    case WM_WALLPAPER:
+        free(wallpaper);
+        make_wallpaper();
+        if (overview_bg) { free(overview_bg); overview_bg = NULL; overview_open = false; }
+        add_dirty(0, 0, SW, SH);
+        return;
     case WM_DISPLAY:                                              /* Display / mode: курсор */
         set_hw_cursor(m->a != 0);
         return;
@@ -1245,13 +1350,14 @@ static void handle_msg(struct msg *m) {
 
 static void launch(int app) {
     char path[64];
-    snprintf(path, sizeof(path), "/bin/%s", apps[app].prog);
+    if (app < 0 || app >= N_APPS) return;
+    snprintf(path, sizeof(path), "%s", apps[app].path);
     int pid = fork();
     if (pid == 0) {
         int p[2];                                             /* ввод — пустой канал: клавиатура только у стола */
         if (pipe(p) == 0) { close(p[1]); dup2(p[0], 0); close(p[0]); }
         char *argv[2];
-        argv[0] = (char *)apps[app].prog; argv[1] = NULL;
+        argv[0] = apps[app].prog; argv[1] = NULL;
         exec(path, argv);
         exit(127);
     }
@@ -1300,7 +1406,7 @@ static int drag_dx, drag_dy, drag_px, drag_py;
 static unsigned last_click_t;                                     /* двойной щелчок по заголовку */
 static int last_click_win = -1, last_click_x, last_click_y;
 static unsigned prev_buttons;
-static bool quit;
+static bool quit, logout_requested;
 
 static int window_at(int px, int py) {
     if (overview_open) return -1;
@@ -1419,9 +1525,10 @@ static void mouse_down(int x, int y) {
         int it = sysmenu_at(x, y);
         if (it >= 0) {
             close_sysmenu();
-            if (it == 0) launch(APP_DISPLAY);
-            else if (it == 1) launch(APP_ABOUT);
-            else if (it == 3) quit = true;
+            if (it == 0) launch(app_by_prog("settings"));
+            else if (it == 1) launch(app_by_prog("about"));
+            else if (it == 3) { logout_requested = true; quit = true; }
+            else if (it == 4) quit = true;
             return;
         }
         if (it == -1) return;                                     /* по меню, мимо пунктов */
@@ -1593,7 +1700,125 @@ static void mouse_up(int x, int y) {
 
 /* ------------------------------------------------------------ главный цикл */
 
+/* No desktop actions or client messages are dispatched until login succeeds. */
+static void login_wipe(char *p, unsigned n) {
+    volatile char *v = p;
+    while (n--) *v++ = 0;
+}
+
+static bool desktop_login(void) {
+    if (account(4, NULL, NULL) >= 0) return true;
+    char names[16][24], password[128] = {0}, confirm[128] = {0};
+    int count = 0, selected = 0, len = 0, stage = 0;
+    int setup = account(0, NULL, NULL);
+    const char *error = "";
+    if (setup < 0) error = "Cannot read accounts. Press Escape to exit.";
+    while (count < 16 && account_list(names[count], count) == 0) count++;
+    if (!count) error = "No accounts available. Press Escape to exit.";
+    unsigned buttons = prev_buttons;
+    int field = 1; /* Account, password, submit; password starts focused. */
+    unsigned caret_since = ticks();
+    for (;;) {
+        if (gfx_check_mode()) {
+            SW = gfx_w; SH = gfx_h; back = gfx_buf;
+            make_wallpaper(); dock_build();
+        }
+        int x = (SW - 352) / 2, y = (SH - 300) / 2;
+        gfx_no_clip();
+        memcpy(back, wallpaper, SW * SH * 4);
+        gfx_fill_rect_a(0, 0, SW, SH, C_BLACK, 95);
+        gfx_round_rect(x, y, 352, 300, 18, RGB(42, 39, 45));
+        const char *title = setup > 0 ? (stage ? "Confirm password" : "Set a password") : "Sign in";
+        text_draw(FONT_UI_BOLD, 24, x+28, y+24, title, C_WHITE);
+        color_t accent = RGB(235, 103, 58), input = RGB(62, 58, 66);
+        gfx_round_rect(x+28, y+78, 296, 44, 8, field == 0 ? accent : input);
+        gfx_round_rect(x+30, y+80, 292, 40, 6, input);
+        if (count) {
+            int tw=text_width(FONT_UI_MEDIUM,17,names[selected]);
+            text_draw(FONT_UI_MEDIUM,17,x+176-tw/2,y+89,names[selected],C_WHITE);
+        }
+        if (count > 1 && !setup) {
+            text_draw(FONT_UI,19,x+42,y+88,"<",RGB(205,200,210));
+            text_draw(FONT_UI,19,x+299,y+88,">",RGB(205,200,210));
+        }
+        gfx_round_rect(x+28,y+142,296,46,8,field == 1 ? accent : input);
+        gfx_round_rect(x+30,y+144,292,42,6,input);
+        int chars=0;
+        for (int i=0;i<len;i++) if (((unsigned char)password[i]&0xc0)!=0x80) chars++;
+        int visible=chars < 26 ? chars : 26;
+        if (!len) text_draw(FONT_UI,15,x+42,y+155,"Password",RGB(165,158,171));
+        for (int i=0;i<visible;i++) gfx_ellipse(x+44+i*10,y+162,5,5,C_WHITE,255);
+        if (field == 1 && (ticks()-caret_since)%1000 < 550)
+            gfx_fill_rect(x+42+visible*10,y+154,2,22,C_WHITE);
+        text_draw_fit(FONT_UI,12,x+28,y+199,error,296,RGB(255,170,155));
+        gfx_round_rect(x+28,y+234,296,42,8,field == 2 ? C_WHITE : accent);
+        gfx_round_rect(x+30,y+236,292,38,6,accent);
+        const char *button=setup > 0 ? "Continue" : "Sign in";
+        int bw=text_width(FONT_UI_MEDIUM,16,button);
+        text_draw(FONT_UI_MEDIUM,16,x+176-bw/2,y+245,button,C_WHITE);
+        struct mouse ms; mouse_get(&ms);
+        mouse_x = ms.x; mouse_y = ms.y;
+        if (!hwcur) gfx_cursor_draw(mouse_x, mouse_y);
+        gfx_flip();
+        ttymode(TTY_RAW | TTY_NONBLOCK | TTY_NOSIG);
+        int k = readkey();
+        if ((ms.buttons & MOUSE_LEFT) && !(buttons & MOUSE_LEFT)) {
+            field = -1;
+            if (ms.x >= x+28 && ms.x < x+324) {
+                if (ms.y >= y+78 && ms.y < y+122) {
+                    field = 0;
+                    if (count > 1 && !setup) k = ms.x < x+176 ? KEY_UP : KEY_DOWN;
+                }
+                if (ms.y >= y+142 && ms.y < y+188) { field=1; caret_since=ticks(); }
+                if (ms.y >= y+234 && ms.y < y+276) { field=2; k='\n'; }
+            }
+        }
+        buttons = ms.buttons;
+        if (k == 27) { login_wipe(password,sizeof(password)); login_wipe(confirm,sizeof(confirm)); return false; }
+        if (setup >= 0 && count) {
+            if (k == 9) {
+                field = (field+1)%3; caret_since=ticks();
+            } else if (setup == 0 && (k == KEY_UP || k == KEY_DOWN)) {
+                selected = (selected + (k == KEY_UP ? count-1 : 1)) % count;
+                login_wipe(password,sizeof(password)); len = 0; error = "";
+            } else if ((k == '\n' || k == '\r') && field >= 0) {
+                if (field == 0) { field=1; caret_since=ticks(); continue; }
+                field=1; caret_since=ticks();
+                if (setup > 0 && !stage) {
+                    if (!len) error = "Enter a password.";
+                    else { memcpy(confirm,password,sizeof(confirm)); login_wipe(password,sizeof(password)); len=0; stage=1; error=""; }
+                } else if (setup > 0 && strcmp(confirm,password)) {
+                    error="Passwords do not match. Try again."; stage=0;
+                    login_wipe(password,sizeof(password)); login_wipe(confirm,sizeof(confirm)); len=0;
+                } else {
+                    int result = setup > 0 ? account(3,"root",password) : 0;
+                    if (!result) result=account(1,names[selected],password);
+                    login_wipe(password,sizeof(password)); login_wipe(confirm,sizeof(confirm)); len=0;
+                    if (!result) return true;
+                    error=setup > 0 ? "Could not set password. Try again." : "Incorrect password. Try again.";
+                    setup=account(0,NULL,NULL); stage=0;
+                }
+            } else if (field == 1 && (k == 8 || k == 127)) {
+                caret_since=ticks();
+                if (len) {
+                    do { len--; } while (len && ((unsigned char)password[len] & 0xc0) == 0x80);
+                    password[len]=0;
+                }
+            } else if (field == 1 && ((k >= 32 && k < 127) || (k >= 0x400 && k <= 0xffff))) {
+                caret_since=ticks();
+                char encoded[4]; int bytes=utf8_put(encoded,k);
+                if (bytes > 0 && len+bytes < (int)sizeof(password)) {
+                    memcpy(password+len,encoded,bytes); len+=bytes; password[len]=0;
+                }
+            }
+        }
+        ttymode(TTY_RAW | TTY_NONBLOCK | TTY_NOSIG);
+        sleep_ms(20);
+    }
+}
+
 int main(void) {
+    load_apps();
     if (service_find("desktop")) { dprintf(STDERR, "desktop: already running\n"); return 1; }
     int r = gfx_open();
     if (r < 0) { dprintf(STDERR, "desktop: no graphics (%s)\n", strerror(-r)); return 1; }
@@ -1611,6 +1836,15 @@ int main(void) {
     kb_lang = kblayout(-1);
     int cw, ch, want_hw = 0;
     if (gfx_load_config(&cw, &ch, &want_hw) == 0 && want_hw) set_hw_cursor(true);
+start_session:
+    quit = false; logout_requested = false;
+    if (!desktop_login()) {
+        if (hwcur) gfx_hw_cursor(0);
+        gfx_close();
+        return 1;
+    }
+    mouse_get(&ms);
+    prev_buttons = ms.buttons;
     add_dirty(0, 0, SW, SH);
     flush();
 
@@ -1665,6 +1899,14 @@ int main(void) {
         flush();
     }
 
+    /* Include terminal shells and background children, even without windows. */
+    struct proc_info pi[128]; bool member[128] = {0};
+    int n = ps(pi,128), self = getpid();
+    for (int pass=0;pass<n;pass++) for (int i=0;i<n;i++) {
+        if (pi[i].ppid == (unsigned)self) member[i]=true;
+        for (int j=0;j<n;j++) if (member[j] && pi[i].ppid==pi[j].pid) member[i]=true;
+    }
+
     /* выход: попросить программы закрыться, подождать, остальных — kill */
     int owners[MAXWIN], n_owners = 0;
     for (int i = 0; i < MAXWIN; i++) {
@@ -1677,6 +1919,22 @@ int main(void) {
     for (int j = 0; j < n_owners; j++) kill(owners[j]);
     for (int i = 0; i < MAXWIN; i++) if (wins[i].used) shm_unmap(wins[i].px);
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
+    if (logout_requested) {
+        for (int i=n-1;i>=0;i--) if (member[i]) kill(pi[i].pid);
+        while (waitpid(-1,NULL,WNOHANG)>0) {}
+        account(6,NULL,NULL);
+        memset(wins,0,sizeof(wins)); nz=0; focus=-1; cascade=0;
+        drag=capture=resizing=-1;
+        hover_top=hover_dock=hover_sm=hover_ov=-1;
+        hover_close=hover_min=hover_max=-1; last_click_win=-1;
+        sysmenu_open=false; overview_open=false;
+        free(overview_bg); overview_bg=NULL;
+        search_len=0; search[0]=0;
+        ndirty=0; dock_build();
+        struct msg stale;
+        while (msg_recv(&stale,0)==0) {}
+        goto start_session;
+    }
     if (hwcur) gfx_hw_cursor(0);
     gfx_close();
     printf(ANSI_CLEAR "Desktop closed.\n");

@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Exec=calc
+Icon=calc
+Keywords=калькулятор
+X-MyOS-Favorite=true

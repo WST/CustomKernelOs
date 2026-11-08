@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Paint
+Exec=draw
+Icon=paint
+Keywords=рисование рисовать draw
+X-MyOS-Favorite=true

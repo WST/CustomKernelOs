@@ -105,6 +105,30 @@ int account_name(char *out) {
     if(!r) { if(!t->authenticated || t->uid>=USERS) r=-EPERM;else memcpy(out,db.users[t->uid].name,24); }
     mutex_unlock(&lock);return r;
 }
+/* Public names only: salts and password hashes stay in the kernel. */
+int account_list(char *out, unsigned index) {
+    mutex_lock(&lock); int r=load();
+    if(!r) {
+        r=-ENOENT;
+        for(int i=0;i<USERS;i++) if(db.users[i].name[0]) {
+            if(!index--) { memcpy(out,db.users[i].name,24); r=0; break; }
+        }
+    }
+    mutex_unlock(&lock); return r;
+}
+static int home_dir(const char *path,u32 *ino) {
+    struct fs_stat st; int r=fs_resolve(FS_ROOT,path,ino);
+    if(r==FS_ENOENT) r=fs_create(FS_ROOT,path,FS_TYPE_DIR,ino);
+    if(r || fs_stat(*ino,&st) || st.type!=FS_TYPE_DIR) return -EIO;
+    return 0;
+}
+static int prepare_home(const char *name,u32 *ino) {
+    char path[40]; u32 parent;
+    if(home_dir("/home",&parent)) return -EIO;
+    if(!strcmp(name,"root")) return home_dir("/root",ino);
+    strcpy(path,"/home/"); strcpy(path+6,name);
+    return home_dir(path,ino);
+}
 /* 0 first setup, 1 login, 2 useradd, 3 passwd, 4 uid, 5 name, 6 logout */
 int account_ctl(unsigned op,const char *name,const char *pw) {
     struct task *t=task_current();int r;mutex_lock(&lock);
@@ -117,7 +141,7 @@ int account_ctl(unsigned op,const char *name,const char *pw) {
         u8 h[32];struct entry *e=&db.users[id<0?0:id];digest(e,pw,h);unsigned diff=0;
         for(int i=0;i<32;i++) diff|=h[i]^e->hash[i];
         wipe(h,32);r=-EPERM;
-        if(id>=0 && !diff && !bootstrap()) {t->uid=id;t->authenticated=true;r=0;}
+        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,&home); if(!r) {t->cwd=home;t->uid=id;t->authenticated=true;} }
         goto done;
     }
     if(op!=2 && op!=3) {r=-EINVAL;goto done;}
@@ -131,6 +155,7 @@ int account_ctl(unsigned op,const char *name,const char *pw) {
         if(id<0) {r=-ENOSPC;goto done;}
     }
     if(id<0) {r=-ENOENT;goto done;}
+    u32 home; r=prepare_home(name,&home); if(r) goto done;
     struct entry old=db.users[id],*e=&db.users[id];strcpy(e->name,name);
     u32 seed,high;__asm__ volatile("rdtsc":"=a"(seed),"=d"(high));seed^=high^timer_ticks();
     for(int i=0;i<16;i++) {seed=seed*1664525+1013904223;e->salt[i]=seed>>24;}

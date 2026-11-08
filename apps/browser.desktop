@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Browser
+Exec=browser
+Icon=browser
+Keywords=браузер интернет web internet сайт
+X-MyOS-Favorite=true

@@ -82,6 +82,7 @@ bool ui_inside(int px, int py, int x, int y, int w, int h);
 enum {
     WM_CREATE = 100, WM_CREATED, WM_UPDATE, WM_TITLE, WM_DESTROY,
     WM_DISPLAY = 110,               /* программа -> стол: a = аппаратный курсор вкл/выкл */
+    WM_WALLPAPER = 113,             /* reload /etc/wallpaper */
     WM_RESIZABLE = 111,             /* a = окно, b, c = наименьший размер */
     WM_SETBUF = 112,                /* a = окно, b = shm нового буфера, c = ширина, d = высота */
     WM_KEY = 200, WM_MOUSE, WM_CLOSE, WM_FOCUS, WM_QUIT,
