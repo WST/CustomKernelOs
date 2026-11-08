@@ -860,10 +860,10 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_ACCOUNT: {
         char name[24]={0}, password[128]={0};
-        if ((b && a!=5 && !user_str(b,name,sizeof(name))) || (c && !user_str(c,password,sizeof(password)))) ret=-EFAULT;
-        else if(a==5) {
+        if ((b && a!=5 && a!=7 && !user_str(b,name,sizeof(name))) || (c && a!=7 && !user_str(c,password,sizeof(password)))) ret=-EFAULT;
+        else if(a==5 || a==7) {
             if(!user_buf_ok(b,24,true)) ret=-EFAULT;
-            else ret=account_name((char *)b);
+            else ret=a==7 ? account_list((char *)b,c) : account_name((char *)b);
         } else ret=account_ctl(a,name,password);
         volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;

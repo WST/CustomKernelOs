@@ -921,6 +921,7 @@ int get_time(struct datetime *t)                { return syscall3(SYS_TIME, (int
 
 
 int account(int op,const char *name,const char *password) { return syscall3(SYS_ACCOUNT,op,(int)name,(int)password); }
+int account_list(char *name,unsigned index) { return syscall3(SYS_ACCOUNT,7,(int)name,index); }
 
 /* ================================================================ 64-битная арифметика
  * Имена — как у libgcc: gcc -m32 без libgcc зовёт их из программ и из самого cc.

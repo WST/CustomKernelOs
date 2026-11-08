@@ -426,7 +426,7 @@ static int login_prompt(void) {
         if(!username[0]) strcpy(username,"root");
         if(credential("Password: ",pw,sizeof(pw),true)<0) return -1;
         r=account(1,username,pw);clear_password(pw,sizeof(pw));
-        if(!r) {hist_n=0;memset(history,0,sizeof(history));chdir("/");return 0;}
+        if(!r) {hist_n=0;memset(history,0,sizeof(history));return 0;}
         printf("Login incorrect.\n");sleep_ms(1000);
     }
 }
@@ -466,7 +466,12 @@ static bool builtin(struct cmd *c) {
         account(6,0,0);if(login_prompt()<0) exit(0);last_status=0;return true;
     }
     if (!strcmp(n, "cd")) {
-        int r = chdir(c->argc > 1 ? c->argv[1] : "/");
+        char home[40]="/", name[24]={0};
+        if(account(5,name,0)==0) {
+            if(!strcmp(name,"root")) strcpy(home,"/root");
+            else snprintf(home,sizeof(home),"/home/%s",name);
+        }
+        int r = chdir(c->argc > 1 ? c->argv[1] : home);
         if (r < 0) dprintf(STDERR, "cd: %s: %s\n", c->argv[1], strerror(-r));
         last_status = r < 0;
         return true;

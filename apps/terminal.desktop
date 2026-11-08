@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Exec=terminal
+Icon=terminal
+Keywords=терминал консоль shell sh командная
+X-MyOS-Favorite=true

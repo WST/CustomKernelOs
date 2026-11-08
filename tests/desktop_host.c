@@ -66,6 +66,10 @@ int shm_unmap(void *p) { (void)p; return 0; }
 int shm_alloc(unsigned size) { shms[nshm] = calloc(1, size); return nshm++; }
 int service_find(const char *n) { (void)n; return 0; }
 int service_register(const char *n) { (void)n; return 0; }
+int account(int op, const char *name, const char *password) {
+    (void)name; (void)password; return op == 4 ? 0 : -1;
+}
+int account_list(char *name, unsigned index) { (void)name; (void)index; return -1; }
 int ttymode(int m) { return m; }
 int readkey(void) { int k = pending_key; pending_key = 0; return k; }
 static unsigned fake_ticks;

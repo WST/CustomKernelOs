@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Battleship
+Exec=battle
+Icon=battle
+Keywords=морской бой корабли игра game
+X-MyOS-Favorite=true

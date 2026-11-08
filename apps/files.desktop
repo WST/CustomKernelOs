@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Files
+Exec=files
+Icon=files
+Keywords=файлы папки folder
+X-MyOS-Favorite=true

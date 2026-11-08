@@ -145,6 +145,8 @@ int   close(int fd);
 int   lseek(int fd, long offset, int whence);
 struct block_info { char name[12]; unsigned start,sectors,partition; };
 int account(int op, const char *name, const char *password);
+/* Enumerate public account names (24-byte output), zero-based, -ENOENT at end. */
+int account_list(char *name, unsigned index);
 int mount(const char *device,const char *target);
 int mountinfo(unsigned index,char device[128],char target[128]);
 int blockinfo(unsigned index,struct block_info *info);
