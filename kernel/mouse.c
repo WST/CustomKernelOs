@@ -73,6 +73,18 @@ bool mouse_init(void) {
     return true;
 }
 
+void mouse_usb_report(u32 buttons, i32 dx, i32 dy) {
+    u32 flags=irq_save();
+    st.x+=dx; st.y+=dy;
+    if (st.x<0) st.x=0;
+    if (st.y<0) st.y=0;
+    if (st.x>max_x) st.x=max_x;
+    if (st.y>max_y) st.y=max_y;
+    st.buttons=buttons&7; st.events++;
+    fb_cursor_move(st.x,st.y);
+    irq_restore(flags);
+}
+
 void mouse_set_bounds(i32 w, i32 h) {
     u32 f = irq_save();
     max_x = w - 1; max_y = h - 1;

@@ -27,11 +27,12 @@
 #include "paging.h"
 #include "string.h"
 #include "vga.h"
+#include "bootinfo.h"
 
 static inline void outl(u16 port, u32 v) { __asm__ volatile ("outl %0, %1" : : "a"(v), "Nd"(port)); }
 static inline u32  inl(u16 port) { u32 v; __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
 
-enum { DRV_NONE, DRV_BOCHS, DRV_SVGA };
+enum { DRV_NONE, DRV_BOCHS, DRV_SVGA, DRV_FIRMWARE };
 static int drv;
 static bool ready;
 static struct fb_info info;
@@ -228,6 +229,7 @@ static bool bochs_init(void) {
 }
 
 bool fb_mode_ok(u32 w, u32 h) {
+    if (drv==DRV_FIRMWARE) return w==info.width && h==info.height;
     if (!drv || w < 640 || h < 480 || (w & 7)) return false;
     if (w > info.max_w || h > info.max_h || w > FB_MAX_W || h > FB_MAX_H) return false;
     u32 room = info.vram < FB_VIRT_SZ ? info.vram : FB_VIRT_SZ;
@@ -315,6 +317,7 @@ static bool clip(int *x, int *y, int *w, int *h) {
 
 int fb_set_mode(u32 w, u32 h) {
     if (!fb_mode_ok(w, h)) return -1;
+    if (drv==DRV_FIRMWARE) return 0;
     u32 ow = info.width, oh = info.height;
     bool ok = drv == DRV_SVGA ? svga_set_mode(w, h) : bochs_set_mode(w, h);
     if (!ok) {                                                    /* не вышло — вернуть старый */
@@ -335,7 +338,20 @@ int fb_set_mode(u32 w, u32 h) {
 }
 
 bool fb_init(void) {
-    if (!svga_init() && !bochs_init()) return false;
+    const struct boot_info *boot=boot_info_get();
+    if (boot && boot->fb_phys) {
+        if (boot->font_phys!=0x5000 || boot->bpp!=32 || boot->width<640 || boot->width>FB_MAX_W ||
+            boot->height<480 || boot->height>FB_MAX_H ||
+            (boot->fb_phys&4095) || (boot->pitch&3) ||
+            boot->pitch<boot->width*4 || boot->pitch>FB_VIRT_SZ/boot->height ||
+            boot->fb_phys>0xffffffffu-boot->pitch*boot->height) return false;
+        drv=DRV_FIRMWARE;
+        info.phys=boot->fb_phys; info.width=boot->width; info.height=boot->height;
+        info.bpp=32; info.pitch=boot->pitch; info.vram=boot->pitch*boot->height;
+        info.max_w=boot->width; info.max_h=boot->height;
+        info.caps=FB_CAP_COPY|FB_CAP_FILL; info.gen=1;
+        info.driver="BIOS VBE framebuffer";
+    } else if (!svga_init() && !bochs_init()) return false;
 
     /* отобразить видеопамять в ядро — до создания процессов, тогда эти записи
      * каталога попадут и во все каталоги процессов */
@@ -343,8 +359,13 @@ bool fb_init(void) {
     for (u32 off = 0; off < size; off += 4096)
         if (vmm_map(FB_VIRT + off, info.phys + off, PG_WRITE)) return false;
 
-    grab_font();
-    if (fb_set_mode(FB_DEF_W, FB_DEF_H) < 0) return false;
+    if (drv==DRV_FIRMWARE) {
+        memcpy(font,(const void *)boot->font_phys,sizeof(font));
+        fb=(volatile u32 *)FB_VIRT; stride=info.pitch/4;
+    } else {
+        grab_font();
+        if (fb_set_mode(FB_DEF_W, FB_DEF_H) < 0) return false;
+    }
     ready = true;
     fb_fill(0, 0, info.width, info.height, 0);
     return true;

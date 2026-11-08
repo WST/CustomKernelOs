@@ -1069,3 +1069,12 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 Команда `sysinfo` показывает версию ядра, полный Git-хеш и время сборки, CPU,
 память, графику, диски и сеть. API и правила определения частот описаны
 в [docs/sysinfo.md](docs/sysinfo.md). Проверка: `make sysinfotest`.
+
+
+## Загрузка с USB на реальном ПК (BIOS/CSM)
+
+`make usb-image` создаёт отдельный `build/myos-usb.img`: загрузчик BIOS,
+VBE framebuffer, live-файловая система в RAM, USB HID клавиатура/мышь через xHCI.
+`make usbtest` проверяет загрузку с USB в QEMU. Обычный `make run` сохраняется.
+Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
+Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).

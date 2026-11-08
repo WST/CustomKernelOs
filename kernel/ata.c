@@ -4,6 +4,7 @@
 #include "string.h"
 #include "vga.h"
 #include "timer.h"
+#include "bootinfo.h"
 static struct { u16 base,control; u8 slave; u32 sectors; char model[41]; } units[2] = {
     { .base=0x1f0, .control=0x3f6, .slave=0x10 },
     { .base=0x170, .control=0x376, .slave=0 }
@@ -37,7 +38,25 @@ static bool identify(int u) {
     for(int i=39;i>=0 && units[u].model[i]==' ';i--) units[u].model[i]=0;
     return units[u].sectors!=0;
 }
-bool ata_init(void) { bool root=identify(0); identify(1); return root; }
+static const struct boot_info *live;
+bool ata_init(void) {
+    live=boot_info_get();
+    if (live && (live->root_phys!=0x1000000 || !live->root_bytes ||
+                 live->root_bytes>0x4000000 || (live->root_bytes&511))) live=NULL;
+    if (live) {
+        /* Live mode deliberately does not probe or expose internal ATA disks. */
+        units[0].sectors=live->root_bytes/512;
+        strcpy(units[0].model,"USB live RAM disk (volatile)");
+        units[1].sectors=0;
+        return true;
+    }
+#ifdef MYOS_HARDWARE
+    /* A missing/corrupt boot contract must never expose internal disks. */
+    units[0].sectors=units[1].sectors=0;
+    return false;
+#endif
+    bool root=identify(0); identify(1); return root;
+}
 u32 ata_unit_sectors(int u) { return u>=0 && u<2 ? units[u].sectors : 0; }
 u32 ata_sectors(void) { return ata_unit_sectors(0); }
 const char *ata_model(void) { return units[0].model; }
@@ -51,11 +70,19 @@ static int setup(int u,u32 lba,u8 cmd) {
     outb(b+7,cmd); delay(u); return wait(u,true);
 }
 int ata_unit_read(int u,u32 lba,void *buf) {
+    if (live) {
+        if (u || lba>=units[0].sectors) return -1;
+        memcpy(buf,(const void *)(live->root_phys+lba*512),512); return 0;
+    }
     if(setup(u,lba,0x20)<0) return -1;
     u16 *p=buf; for(int i=0;i<256;i++) p[i]=inw(units[u].base);
     delay(u); return wait(u,false);
 }
 int ata_unit_write(int u,u32 lba,const void *buf) {
+    if (live) {
+        if (u || lba>=units[0].sectors) return -1;
+        memcpy((void *)(live->root_phys+lba*512),buf,512); return 0;
+    }
     if(setup(u,lba,0x30)<0) return -1;
     const u16 *p=buf; for(int i=0;i<256;i++) outw(units[u].base,p[i]);
     delay(u); if(wait(u,false)<0) return -1;

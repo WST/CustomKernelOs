@@ -17,6 +17,8 @@
 #include "display.h"
 #include "net.h"
 #include "mouse.h"
+#include "xhci.h"
+#include "bootinfo.h"
 
 static void ok(const char *fmt, ...) {
     va_list ap;
@@ -88,6 +90,12 @@ void kmain(void) {
     if (have_mouse && fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }
     __asm__ volatile ("sti");
     ok("PIT timer 100 Hz, PS/2 keyboard%s, FPU, interrupts on", have_mouse ? ", PS/2 mouse" : "");
+
+#ifdef MYOS_HARDWARE
+    if (xhci_init()) ok("USB HID input ready");
+    else fail("USB HID", "no supported direct keyboard/mouse; PS/2 or BIOS legacy may still work");
+    if (boot_info_get()) ok("LIVE MODE: filesystem changes stay in RAM; internal ATA disks are hidden");
+#endif
 
     if (net_init())
         ok("Network: Intel e1000, MAC %02x:%02x:%02x:%02x:%02x:%02x, DHCP in background",

@@ -455,3 +455,22 @@ $(BUILD)/user/sysinfocheck: $(BUILD)/user/sysinfocheck.o $(ULIB) user/user.ld
 sysinfotest:
 	python3 tests/build_info_test.py
 	python3 tests/sysinfo_smoke.py
+
+# Hardware/USB live build is isolated from the original QEMU boot image.
+HWBUILD := $(BUILD)/hardware
+HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
+$(HWBUILD):
+	mkdir -p $@
+$(HWBUILD)/%.o: kernel/%.c kernel/*.h $(BUILD)/build_info.h | $(HWBUILD)
+	$(CC) $(CFLAGS) -DMYOS_HARDWARE -c $< -o $@
+$(HWBUILD)/%.o: kernel/%.asm | $(HWBUILD)
+	$(NASM) -f elf32 $< -o $@
+$(HWBUILD)/kernel.elf: $(HWOBJS) boot/hardware.ld
+	$(LD) -m elf_i386 -T boot/hardware.ld -nostdlib $(HWOBJS) -o $@
+$(HWBUILD)/kernel.bin: $(HWBUILD)/kernel.elf
+	$(OBJCOPY) -O binary $< $@
+.PHONY: usb-image usbtest
+usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
+	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm
+usbtest: usb-image
+	python3 tests/hardware_smoke.py

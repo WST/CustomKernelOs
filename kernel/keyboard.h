@@ -15,6 +15,7 @@
 #define KEY_CTRL_D 4
 
 void keyboard_init(void);
+void kb_scancode(unsigned char sc); /* shared PS/2 / USB layout and shortcut path */
 #define KEY_UNI   0x100             /* KEY_UNI + кодовая точка (буквы не латиницей) */
 int  kb_getchar(void);   /* блокирующее чтение клавиши */
 int  kb_layout(void);    /* 0 — US, 1 — русская */
