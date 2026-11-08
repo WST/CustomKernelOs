@@ -1352,15 +1352,13 @@ static void launch(int app) {
     char path[64];
     if (app < 0 || app >= N_APPS) return;
     snprintf(path, sizeof(path), "%s", apps[app].path);
-    int pid = fork();
-    if (pid == 0) {
-        int p[2];                                             /* ввод — пустой канал: клавиатура только у стола */
-        if (pipe(p) == 0) { close(p[1]); dup2(p[0], 0); close(p[0]); }
-        char *argv[2];
-        argv[0] = apps[app].prog; argv[1] = NULL;
-        exec(path, argv);
-        exit(127);
-    }
+    /* Start directly: copying the desktop's framebuffer heap with fork()
+     * only to discard it in exec() stalls input and wastes memory. */
+    int input = open("/dev/null", O_READ);
+    if (input < 0) return;
+    char *argv[2] = { apps[app].prog, NULL };
+    int pid = spawn(path, argv, input);
+    close(input);
     if (pid > 0) {
         if (n_launched == 32) { memmove(launched, launched + 1, sizeof(launched[0]) * 31); n_launched = 31; }
         launched[n_launched].pid = pid;

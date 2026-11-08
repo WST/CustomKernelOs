@@ -17,7 +17,8 @@ CPUID supplies vendor, brand, family/model/stepping, feature masks and hyperviso
 Intel CPUID 16h supplies nominal base/max CPU MHz; CPUID 15h supplies TSC MHz
 when the crystal clock and ratio are available. TSC is not live CPU frequency.
 Missing clock data stays zero and displays unknown (common under QEMU).
-The OS currently runs one CPU; reported logical package capacity is separate.
+The online count comes from the SMP subsystem (up to 8 CPUs); reported logical
+package capacity is separate. See [SMP](smp.md) for startup and fallback rules.
 RAM describes usable memory managed by PMM, not installed DIMM size.
 
 Reference: Intel SDM, CPUID instruction, leaves 15h and 16h:

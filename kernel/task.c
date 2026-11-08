@@ -28,8 +28,8 @@
 #define STACK_RED    2048         /* последние 2 КБ стека — запретная зона */
 
 static struct task *tasks[MAX_TASKS];
-static struct task *current;
-static struct task *idle_task;
+#define current (cpu_states[smp_cpu()].running)
+#define idle_task (cpu_states[smp_cpu()].idle)
 
 /* VFS holds its lock, so no new raw opens can race this snapshot. */
 bool task_raw_device_busy(int disk) {
@@ -43,9 +43,10 @@ bool task_raw_device_busy(int disk) {
 }
 static struct task  task0;          /* kmain / оболочка: живёт на стеке загрузчика */
 static u32 next_id;
-static u32 slice;
-static bool need_resched;
-u32 irq_nesting;
+#define slice (cpu_states[smp_cpu()].slice)
+#define need_resched (cpu_states[smp_cpu()].resched)
+static u32 next_cpu;
+static struct task ap_idle[SMP_MAX_CPUS];
 
 /* ---------------------------------------------------------------- служебное */
 
@@ -137,7 +138,7 @@ void task_reap(void) {
         struct task *t = tasks[i];
         /* каталог процесса нельзя освобождать, пока он загружен в CR3
          * (у потоков ядра общий каталог ядра — его не освобождаем вовсе) */
-        if (t && t->state == TASK_ZOMBIE && t != current && !t->keep_zombie &&
+        if (t && t->state == TASK_ZOMBIE && !smp_task_active(t) && !t->keep_zombie &&
             !(t->user && t->page_dir == vmm_current_dir())) {
             tasks[i] = NULL;
             irq_restore(f);
@@ -185,7 +186,7 @@ static struct task *pick_next(void) {
     int cur = slot_of(current);
     for (int i = 1; i <= MAX_TASKS; i++) {
         struct task *t = tasks[(cur + i) % MAX_TASKS];
-        if (t && t != idle_task && t != current && t->state == TASK_READY) return t;
+        if (t && !t->cpu_idle && t->cpu == smp_cpu() && t != current && t->state == TASK_READY) return t;
     }
     if (current != idle_task && current->state == TASK_READY) return current;
     return idle_task;
@@ -220,6 +221,8 @@ struct regs *schedule(struct regs *r) {
 
 struct regs *sched_tick(struct regs *r) {
     if (!current) return r;
+    if ((r->cs & 3) && current->kill_pending && !current->in_syscall)
+        make_zombie(current, current->pending_code ? current->pending_code : 137);
     current->cpu_ticks++;
 
     u32 now = timer_ticks();
@@ -227,15 +230,15 @@ struct regs *sched_tick(struct regs *r) {
         struct task *t = tasks[i];
         if (t && t->state == TASK_SLEEPING && (i32)(now - t->wake_tick) >= 0) {
             t->state = TASK_READY;
-            need_resched = true;
+            smp_wake(t->cpu);
         }
         if (t && t->state == TASK_BLOCKED && t->wait_deadline &&
             (i32)(now - t->wait_deadline) >= 0) {       /* ждал с тайм-аутом — время вышло */
             t->state = TASK_READY;
-            need_resched = true;
+            smp_wake(t->cpu);
         }
     }
-    if (now % TIMER_HZ == 0) {                      /* CPU% за последнюю секунду */
+    if (smp_cpu() == 0 && now % TIMER_HZ == 0) {                      /* CPU% за последнюю секунду */
         for (int i = 0; i < MAX_TASKS; i++) {
             struct task *t = tasks[i];
             if (!t) continue;
@@ -269,7 +272,7 @@ static void idle_loop(void *arg) {
     (void)arg;
     for (;;) {
         task_reap();
-        __asm__ volatile ("sti; hlt");
+        smp_idle();
     }
 }
 
@@ -285,6 +288,21 @@ void tasking_init(void) {
 
     task_create("idle", idle_loop, NULL);   /* займёт слот 1 */
     idle_task = tasks[1];
+    idle_task->cpu_idle = true;
+}
+
+void tasking_init_ap(void) {
+    u32 cpu = smp_cpu();
+    struct task *t = &ap_idle[cpu];
+    memset(t, 0, sizeof(*t));
+    memcpy(t->name, "idle", 5);
+    t->cpu = cpu; t->cpu_idle = true; t->state = TASK_RUNNING;
+    t->page_dir = vmm_kernel_dir();
+    for (int i=0; i<MAX_TASKS; i++) if (!tasks[i]) {
+        t->id = next_id++; tasks[i] = t; break;
+    }
+    current = idle_task = t;
+    slice = TIME_SLICE;
 }
 
 static struct task *alloc_task(const char *name) {
@@ -319,7 +337,9 @@ u32 task_start(struct task *t) {
     for (int i = 0; i < MAX_TASKS; i++) if (!tasks[i]) { slot = i; break; }
     if (slot >= 0) {
         t->id = next_id++;
+        t->cpu = t->user ? next_cpu++ % smp_count() : 0;
         tasks[slot] = t;
+        smp_wake(t->cpu);
     }
     if (slot >= 0 && !t->pgid) t->pgid = t->id;   /* новая группа (fork задаёт свою) */
     u32 id = slot >= 0 ? t->id : 0;
@@ -334,7 +354,8 @@ int task_create(const char *name, void (*entry)(void *), void *arg) {
     t->entry = entry;
     t->arg = arg;
     struct regs *r = initial_frame(t);
-    r->gs = r->fs = r->es = r->ds = KERNEL_DS;
+    r->fs = r->es = r->ds = KERNEL_DS;
+    r->gs = 0x30; /* CPU-local kernel segment */
     r->cs = KERNEL_CS;
     r->eip = (u32)task_entry;
     u32 id = task_start(t);
@@ -378,13 +399,14 @@ int task_kill(u32 id) {
     u32 f = irq_save();
     struct task *t = task_by_id(id);
     if (!t || t->state == TASK_ZOMBIE) { irq_restore(f); return -1; }
-    if (t == &task0 || t == idle_task) { irq_restore(f); return -2; }
-    if (t->user && t->in_syscall) {
-        /* Процесс сейчас внутри ядра (например, пишет на диск). Убить его прямо
-         * сейчас — значит бросить структуры ядра на полпути. Поэтому только
-         * ставим флаг и будим; умрёт он сам, на выходе из системного вызова. */
+    if (t == &task0 || t->cpu_idle) { irq_restore(f); return -2; }
+    if (t->user) {
+        /* Always clean up a user process on its own CPU. Even a READY process
+         * could start on another CPU if closing its files blocks the killer.
+         * Deliver at the next ring-3 timer interrupt or syscall return. */
         t->kill_pending = true;
         if (t->state == TASK_SLEEPING || t->state == TASK_BLOCKED) t->state = TASK_READY;
+        smp_wake(t->cpu);
     } else {
         make_zombie(t, 137);                 /* как SIGKILL в Unix: 128 + 9 */
     }
@@ -456,6 +478,7 @@ void task_sleep_ticks(u32 ticks) {
     }
     if (!ticks) { task_yield(); return; }
     u32 f = irq_save();
+    if (current->user && current->kill_pending) { irq_restore(f); return; }
     current->wake_tick = timer_ticks() + ticks;
     current->state = TASK_SLEEPING;
     task_yield();
@@ -489,7 +512,7 @@ void task_wakeup(void *chan) {
         struct task *t = tasks[i];
         if (t && t->state == TASK_BLOCKED && t->wait_chan == chan) {
             t->state = TASK_READY;
-            need_resched = true;
+            smp_wake(t->cpu);
         }
     }
     irq_restore(f);

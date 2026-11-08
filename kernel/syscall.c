@@ -369,8 +369,12 @@ static int sys_rename(u32 uold, u32 unew) {
 
 /* ---------------------------------------------------------------- процессы */
 
-static int sys_exec(struct regs *r, u32 upath, u32 uargv) {
-    /* всё, что пришло от программы, копируем в ядро: её память сейчас исчезнет */
+static int sys_image(struct regs *r, u32 upath, u32 uargv, bool create, int stdin_fd) {
+    struct file *input = NULL;
+    if (create && stdin_fd != -1) {
+        if (stdin_fd < 0 || !(input=get_fd((u32)stdin_fd))) return -EBADF;
+    }
+    /* Copy arguments into the kernel before loading/replacing an image. */
     char *buf = kmalloc(PATH_MAX + (PROC_MAX_ARGS) * 256);
     if (!buf) return -ENOMEM;
     char *argv[PROC_MAX_ARGS + 1];
@@ -385,7 +389,7 @@ static int sys_exec(struct regs *r, u32 upath, u32 uargv) {
         if (!user_str(s, argv[argc], 256)) { ret = -EFAULT; goto out; }
     }
     if (argc == 0) argv[argc++] = buf;      /* argv[0] по умолчанию — путь */
-    ret = proc_errno(proc_exec(r, buf, argc, argv));
+    ret = proc_errno(create ? proc_spawn_child(buf, argc, argv, input) : proc_exec(r, buf, argc, argv));
 out:
     kfree(buf);
     return ret;
@@ -698,6 +702,9 @@ static int sys_time(u32 uout) {
 
 void syscall_dispatch(struct regs *r) {
     struct task *t = task_current();
+    /* A remote kill may precede this syscall (including a long sleep).
+     * Deliver it before starting any new blocking operation. */
+    if (t->kill_pending) task_exit_code(t->pending_code ? t->pending_code : 137);
     t->in_syscall = true;
     __asm__ volatile ("sti");   /* шлюз прерывания запретил IRQ; пока работаем в ядре — разрешим */
 
@@ -775,7 +782,8 @@ void syscall_dispatch(struct regs *r) {
     case SYS_TICKS:   ret = timer_ticks() * (1000 / TIMER_HZ); break;
     case SYS_YIELD:   task_yield(); ret = 0; break;
     case SYS_FORK:    ret = proc_errno(proc_fork(r)); break;
-    case SYS_EXEC:    ret = sys_exec(r, a, b); break;
+    case SYS_EXEC:    ret = sys_image(r, a, b, false, -1); break;
+    case SYS_SPAWN:   ret = sys_image(r, a, b, true, (int)c); break;
     case SYS_WAITPID: ret = sys_waitpid((i32)a, b, c); break;
     case SYS_PIPE:    ret = sys_pipe(a); break;
     case SYS_DUP2:    ret = sys_dup2(a, b); break;

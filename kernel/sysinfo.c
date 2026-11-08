@@ -34,7 +34,7 @@ void sysinfo_init(void) {
     strcpy(s->commit, MYOS_COMMIT); strcpy(s->build_time, MYOS_BUILD_TIME);
     strcpy(s->arch, "i386"); strcpy(s->cpu_brand, "unknown");
     strcpy(s->cpu_vendor, "unknown");
-    s->cpu_online = 1; /* Current scheduler is uniprocessor. */
+    s->cpu_online = 1; /* Bootstrap value; sysinfo_get reads the online SMP count. */
     if (!have_cpuid()) return;
     u32 r[4]; cpuid(0, 0, r); u32 max = r[0];
     memcpy(s->cpu_vendor, &r[1], 4); memcpy(s->cpu_vendor+4, &r[3], 4); memcpy(s->cpu_vendor+8, &r[2], 4);
@@ -71,8 +71,10 @@ void sysinfo_init(void) {
         }
     }
 }
+#include "smp.h"
 void sysinfo_get(struct system_info *out) {
     *out=identity;
+    out->cpu_online=smp_count();
     struct pmm_stats mem;
     u32 flags=irq_save(); pmm_stats(&mem); irq_restore(flags);
     out->ram_total_kb=mem.total_frames*4;

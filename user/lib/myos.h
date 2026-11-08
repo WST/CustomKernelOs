@@ -46,7 +46,7 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
@@ -153,6 +153,7 @@ unsigned ticks(void);           /* миллисекунды с момента з
 void  yield(void);
 
 /* процессы в стиле Unix */
+int   spawn(const char *path, char **argv, int stdin_fd); /* -1 inherits stdin */
 int   fork(void);                         /* 0 в потомке, pid потомка в родителе */
 int   exec(const char *path, char **argv);/* при успехе не возвращается */
 int   waitpid(int pid, int *status, int options);   /* pid -1 = любой ребёнок */

@@ -24,6 +24,9 @@ static void refresh(void) {
     int busy = 0;
     for (int i = 0; i < n_procs; i++)
         if (strcmp(procs[i].name, "idle")) busy += procs[i].cpu_percent;
+    struct system_info info;
+    if (sysinfo(&info, sizeof(info)) == 0 && info.cpu_online)
+        busy /= info.cpu_online;
     if (busy > 100) busy = 100;
     if (n_hist == 60) { memmove(cpu_hist, cpu_hist + 1, sizeof(int) * 59); n_hist--; }
     cpu_hist[n_hist++] = busy;

@@ -76,6 +76,7 @@ enum {
     SYS_RENAME,
     SYS_UNITCTL,
     SYS_SYSINFO,
+    SYS_SPAWN,
     SYS_COUNT
 };
 

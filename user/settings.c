@@ -111,7 +111,8 @@ static int page, focus;
 static const char *tabs[] = {"Сеть", "Рабочий стол", "Экран", "Система"};
 
 static void launch(const char *name) {
-    if (fork() == 0) { char *args[] = {(char *)name, 0}; exec(name, args); exit(1); }
+    char *args[] = {(char *)name, NULL};
+    spawn(name, args, -1);
 }
 static void field(int y, const char *s, int selected) {
     gfx_round_frame(CX,y,CW,38,8,selected ? UI_ACCENT : BORDER,C_WHITE);

@@ -177,7 +177,7 @@ fail:
     return err;
 }
 
-static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input) {
+static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent) {
     struct image im;
     int err = load_image(path, cwd, argc, argv, &im);
     if (err) return err;
@@ -186,6 +186,16 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
     t->brk_start = t->brk = im.brk;
     t->user_pages = im.pages;
     t->cwd = cwd;
+    if (parent) {
+        t->uid = parent->uid;
+        t->authenticated = parent->authenticated;
+        t->parent = parent->id;
+        t->pgid = parent->pgid;
+        for (int i=0; i<MAX_FDS; i++) {
+            file_close(t->fds[i]);
+            t->fds[i] = file_dup(parent->fds[i]);
+        }
+    }
     if (input) { file_close(t->fds[0]); t->fds[0] = file_dup(input); }
     if (log) {
         for (int i = 1; i <= 2; i++) { file_close(t->fds[i]); t->fds[i] = file_dup(log); }
@@ -197,10 +207,15 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
 }
 
 int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
-    return spawn(path, cwd, argc, argv, fg, NULL, NULL);
+    return spawn(path, cwd, argc, argv, fg, NULL, NULL, NULL);
 }
 int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input) {
-    return spawn(path, FS_ROOT, argc, argv, true, log, input);
+    return spawn(path, FS_ROOT, argc, argv, true, log, input, NULL);
+}
+
+int proc_spawn_child(const char *path, int argc, char **argv, struct file *input) {
+    struct task *parent = task_current();
+    return spawn(path, parent->cwd, argc, argv, true, NULL, input, parent);
 }
 
 /* ---------------------------------------------------------------- fork

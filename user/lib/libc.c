@@ -192,6 +192,7 @@ void  sleep_ms(unsigned ms)                      { syscall3(SYS_SLEEP, ms, 0, 0)
 int   getpid(void)                               { return syscall3(SYS_GETPID, 0, 0, 0); }
 unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }
 void  yield(void)                                { syscall3(SYS_YIELD, 0, 0, 0); }
+int   spawn(const char *path, char **argv, int stdin_fd) { return syscall3(SYS_SPAWN, (int)path, (int)argv, stdin_fd); }
 int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
 int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }

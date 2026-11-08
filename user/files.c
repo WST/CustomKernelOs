@@ -129,14 +129,11 @@ static void draw(void) {
 }
 
 static void launch(const char *prog, const char *arg) {
-    int pid = fork();
-    if (pid == 0) {
-        int p[2];                                             /* ввод — пустой канал: клавиатура только у стола */
-        if (pipe(p) == 0) { close(p[1]); dup2(p[0], 0); close(p[0]); }
-        char *argv[3] = { (char *)prog, (char *)arg, NULL };
-        exec(prog, argv);
-        exit(127);
-    }
+    int input = open("/dev/null", O_READ);
+    if (input < 0) return;
+    char *argv[3] = { (char *)prog, (char *)arg, NULL };
+    spawn(prog, argv, input);
+    close(input);
 }
 
 static void open_entry(int i) {

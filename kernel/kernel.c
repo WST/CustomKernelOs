@@ -12,6 +12,7 @@
 #include "paging.h"
 #include "heap.h"
 #include "task.h"
+#include "smp.h"
 #include "gdt.h"
 #include "fb.h"
 #include "display.h"
@@ -39,6 +40,7 @@ static void fail(const char *what, const char *why) {
 
 void kmain(void) {
     vga_init();
+    smp_early_init();
     sysinfo_init();
 
     vga_set_color(LIGHT_CYAN, BLACK);
@@ -128,6 +130,7 @@ void kmain(void) {
     vga_set_color(WHITE, BLACK);
     kprintf("\nWelcome to MyOS! Type 'help' for a list of commands.\n\n");
 
+    smp_init();
     services_init();
     shell_run();
 }

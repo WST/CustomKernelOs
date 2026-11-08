@@ -42,9 +42,47 @@ BUILD   := build
 DISK    := disk.img
 DISK_MB := 16
 C_SRC   := $(wildcard kernel/*.c)
-OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
+OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
 
 all: $(BUILD)/os.img install
+
+$(BUILD)/user/launchbench.o: tests/launchbench.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/launchbench: $(BUILD)/user/launchbench.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/spawncheck.o: tests/spawncheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/spawncheck: $(BUILD)/user/spawncheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/desktop_launchcheck.o: tests/desktop_launchcheck.c user/desktop.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/desktop_launchcheck: $(BUILD)/user/desktop_launchcheck.o $(BUILD)/user/l_img.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
+.PHONY: launchtest
+launchtest:
+	python3 tests/launch_smoke.py
+
+.PHONY: smptest
+smptest:
+	python3 tests/smp_smoke.py
+
+$(BUILD)/user/smpcheck.o: tests/smpcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/smpcheck: $(BUILD)/user/smpcheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/smpbench.o: tests/smpbench.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/smpbench: $(BUILD)/user/smpbench.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
 
 .PHONY: FORCE_BUILD_INFO
 FORCE_BUILD_INFO:
@@ -269,6 +307,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive format=raw,file=$(DISK),index=1,media=disk
 QEMU_MEM ?= 256M
+QEMU_CPUS ?= 4
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
@@ -284,10 +323,10 @@ QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80 -rtc base=localt
 
 # всё, что пишет консоль ядра (и browser -v), — ещё и в build/serial.log
 run: all
-	$(QEMU) -m $(QEMU_MEM) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
+	$(QEMU) -smp $(QEMU_CPUS) -m $(QEMU_MEM) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
 
 debug: all
-	$(QEMU) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
+	$(QEMU) -smp $(QEMU_CPUS) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
 
 clean:
 	rm -rf $(BUILD)
@@ -458,7 +497,7 @@ sysinfotest:
 
 # Hardware/USB live build is isolated from the original QEMU boot image.
 HWBUILD := $(BUILD)/hardware
-HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
+HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
 $(HWBUILD):
 	mkdir -p $@
 $(HWBUILD)/%.o: kernel/%.c kernel/*.h $(BUILD)/build_info.h | $(HWBUILD)

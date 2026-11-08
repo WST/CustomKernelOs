@@ -7,6 +7,7 @@
  * регистры программы. Свой стек программе доверять нельзя. */
 #include "gdt.h"
 #include "string.h"
+#include "smp.h"
 
 struct gdt_entry {
     u16 limit_lo;
@@ -29,9 +30,12 @@ struct tss {
     u16 trap, iomap_base;
 } __attribute__((packed));
 
-static struct gdt_entry gdt[6];
-static struct gdt_ptr   gdtr;
-static struct tss       tss;
+static struct gdt_entry cpu_gdt[SMP_MAX_CPUS][7];
+static struct gdt_ptr cpu_gdtr[SMP_MAX_CPUS];
+static struct tss cpu_tss[SMP_MAX_CPUS];
+#define gdt (cpu_gdt[smp_cpu()])
+#define gdtr (cpu_gdtr[smp_cpu()])
+#define tss (cpu_tss[smp_cpu()])
 
 static void set_entry(int i, u32 base, u32 limit, u8 access, u8 flags) {
     gdt[i].limit_lo       = limit & 0xFFFF;
@@ -55,6 +59,10 @@ void gdt_init(void) {
     tss.iomap_base = sizeof(tss);              /* нет карты портов: in/out из ring 3 запрещены */
     set_entry(5, (u32)&tss, sizeof(tss) - 1, 0x89, 0x0);   /* 0x28 TSS (32-bit available) */
 
+    u32 cpu = smp_cpu();
+    cpu_states[cpu].index = cpu;
+    set_entry(6, (u32)&cpu_states[cpu], sizeof(struct cpu_state)-1, 0x92, 0x4);
+
     gdtr.limit = sizeof(gdt) - 1;
     gdtr.base  = (u32)&gdt;
     __asm__ volatile (
@@ -68,7 +76,9 @@ void gdt_init(void) {
         "mov %%ax, %%gs\n\t"
         "mov %%ax, %%ss\n\t"
         "mov $0x28, %%ax\n\t"
-        "ltr %%ax\n\t"                         /* загрузить TSS */
+        "ltr %%ax\n\t"
+        "mov $0x30, %%ax\n\t"
+        "mov %%ax, %%gs\n\t"                         /* загрузить TSS */
         : : "m"(gdtr) : "eax", "memory");
 }
 

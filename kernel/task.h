@@ -2,6 +2,7 @@
 #define TASK_H
 #include "types.h"
 #include "idt.h"
+#include "smp.h"
 
 /* Задачи (потоки ядра и пользовательские процессы) и вытесняющий планировщик. */
 
@@ -19,6 +20,8 @@ struct file;
 
 struct task {
     u32   id;
+    u32   cpu;                     /* pinned CPU, assigned at task_start */
+    bool  cpu_idle;
     char  name[TASK_NAME];
     enum task_state state;
     u32   esp;                      /* сохранённый указатель на struct regs */
@@ -62,6 +65,7 @@ struct mutex {                      /* рекурсивный мьютекс */
 void  fpu_init(void);               /* включить FPU, запомнить чистое состояние */
 void  fpu_reset_current(void);      /* exec: новой программе — чистый FPU */
 void  fpu_copy_current(struct task *to);   /* fork: потомку — копию */
+void  tasking_init_ap(void);
 void  tasking_init(void);           /* текущий поток (kmain) становится задачей 0 */
 bool  tasking_ready(void);
 struct task *task_current(void);
@@ -91,7 +95,7 @@ struct regs *sched_tick(struct regs *r);
 struct regs *schedule(struct regs *r);
 struct regs *sched_maybe(struct regs *r);     /* после IRQ/syscall: надо ли переключиться */
 bool  task_fault(struct regs *r, const char *what);
-extern u32 irq_nesting;                       /* >0 — мы внутри обработчика IRQ */
+#define irq_nesting (cpu_states[smp_cpu()].nesting) /* >0 inside this CPU's IRQ */
 
 /* для ps */
 struct task_info {
