@@ -39,16 +39,23 @@ int main(){
   for(int i=0;i<BIGN;i++) big[i]=(u8)(i*7+i/512);
   int n=BIGN;                                  /* 1 МБ: прямые + косвенный + двойной косвенный */
   CHECK(fs_write(ino,0,big,n)==n);
-  CHECK(fs_write(ino,(12+128+128*128)*512,big,1)==FS_EFBIG);
   CHECK(fs_read(ino,0,rd,BIGN)==n && !memcmp(big,rd,n));
   CHECK(fs_read(ino,1000,rd,10)==10 && !memcmp(big+1000,rd,10));
   CHECK(fs_read(ino,900000,rd,10)==10 && !memcmp(big+900000,rd,10));
   int data=(n+511)/512, mids=(data-140+127)/128;
   struct fs_info fi; fs_info(&fi); CHECK(fi0.free_blocks-fi.free_blocks==(u32)(data+1+1+mids));
   struct fs_stat st; CHECK(fs_stat(ino,&st)==0 && st.size==(u32)n && st.blocks==(u32)(data+2+mids));
+  /* Байт за прежним пределом ~8 МиБ лежит в тройном косвенном блоке. */
+  u32 past=(12u+128u+128u*128u)*512u; char mark='Q';
+  CHECK(fs_write(ino,past,&mark,1)==1);
+  CHECK(fs_read(ino,past,rd,1)==1 && rd[0]=='Q');
+  CHECK(fs_read(ino,2u*1024u*1024u,rd,1)==1 && rd[0]==0);
+  CHECK(fs_write(ino,(11u+128u+128u*128u+128u*128u*128u)*512u,&mark,1)==FS_EFBIG);
+  fs_info(&fi);
   /* remount: всё на месте */
   CHECK(fs_init(&f)==0 && !f);
   CHECK(fs_resolve(1,"big",&ino)==0 && fs_read(ino,0,rd,n)==n && !memcmp(big,rd,n));
+  CHECK(fs_read(ino,past,rd,1)==1 && rd[0]=='Q');
   struct fs_info fi2; fs_info(&fi2); CHECK(fi2.free_blocks==fi.free_blocks);
   CHECK(fs_remove(1,"/big")==0); fs_info(&fi); CHECK(fi.free_blocks==fi0.free_blocks);
   /* заполнение диска -> ENOSPC, затем освобождение */
@@ -109,6 +116,8 @@ int main(){
     CHECK(fs_create(1, "ok", FS_TYPE_FILE, &up)==0);
     CHECK(fs_create(1, n27, FS_TYPE_FILE, &up)==0);
     CHECK(fs_create(1, n28, FS_TYPE_FILE, 0)==FS_ENAMETOOLONG);
+    CHECK(fs_create(1, "bigv1", FS_TYPE_FILE, &up)==0);
+    CHECK(fs_write(up, (12u+128u+128u*128u)*512u, "Z", 1)==FS_EFBIG);
     CHECK(fs_init(&f)==0 && !f);
     CHECK(fs_resolve(1, n27, &up)==0);
     CHECK(fs_remove(1, "ok")==0);

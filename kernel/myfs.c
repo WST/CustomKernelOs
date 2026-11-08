@@ -17,10 +17,12 @@ void *malloc(unsigned long); void free(void *);
 #define MAGIC         0x5346594D                /* "MYFS" в little-endian */
 #define VERSION       2                       /* format() пишет её; монтирование принимает и 1 */
 #define VERSION_MIN   1
-#define NDIRECT       12
+#define NDIRECT       12                        /* версия 1; у версии 2 последний слот — тройной косвенный */
+#define NDIRECT_V2    11
 #define NINDIRECT     (BS / 4)                  /* 128 ссылок в косвенном блоке */
-#define NDINDIRECT    (NINDIRECT * NINDIRECT)  /* 16384 блока через двойной косвенный */
-#define MAX_FILE_BLKS (NDIRECT + NINDIRECT + NDINDIRECT)
+#define NDINDIRECT    (NINDIRECT * NINDIRECT)   /* 16384 блока через двойной косвенный */
+#define NTINDIRECT    (NDINDIRECT * NINDIRECT)  /* 128^3 блока через тройной косвенный */
+#define MAX_FILE_BLKS (NDIRECT + NINDIRECT + NDINDIRECT) /* предел версии 1 */
 #define INODES_PER_BLK (BS / sizeof(struct inode))
 #define BITS_PER_BLK  (BS * 8)
 #define MAX_BLOCKS    2097152u                  /* 1 GiB, 512-byte sectors */
@@ -43,7 +45,7 @@ struct inode {
     u32 size;
     u32 direct[NDIRECT];
     u32 indirect;
-    u32 dindirect;      /* двойной косвенный: блок ссылок на блоки ссылок (было reserved = 0) */
+    u32 dindirect;      /* двойной косвенный. В версии 2 direct[11] — тройной косвенный */
 } __attribute__((packed));                      /* ровно 64 байта */
 
 struct dirent_v1 {
@@ -157,66 +159,136 @@ static u32 ialloc(int type) {
     return 0;
 }
 
+static int legacy(void);
+
+static u32 n_direct(void) { return legacy() ? (u32)NDIRECT : (u32)NDIRECT_V2; }
+
+/* Сколько блоков файла адресует карта этой версии. */
+static u32 max_file_blks(void) {
+    u32 n = n_direct() + NINDIRECT + NDINDIRECT;
+    if (!legacy()) n += NTINDIRECT;
+    return n;
+}
+
+/* Один уровень косвенности: *root — блок из 128 номеров, index — позиция в нём. */
+static u32 map_level(u32 *root, u32 index, bool alloc) {
+    static u32 ind[NINDIRECT];
+    if (index >= NINDIRECT) return 0;
+    if (!*root && (!alloc || !(*root = balloc()))) return 0;
+    if (bread(*root, ind)) return 0;
+    if (!ind[index] && alloc) {
+        if (!(ind[index] = balloc())) return 0;
+        if (bwrite(*root, ind)) return 0;
+    }
+    return ind[index];
+}
+
+/* Двойной косвенный: *root указывает на блоки, которые указывает map_level. */
+static u32 map_double(u32 *root, u32 idx, bool alloc) {
+    static u32 top[NINDIRECT];
+    if (idx >= NDINDIRECT) return 0;
+    if (!*root && (!alloc || !(*root = balloc()))) return 0;
+    if (bread(*root, top)) return 0;
+    u32 slot = idx / NINDIRECT;
+    if (!top[slot]) {
+        if (!alloc) return 0;
+        u32 b = balloc();
+        if (!b) return 0;
+        top[slot] = b;
+        if (bwrite(*root, top)) return 0;
+    }
+    u32 mid = top[slot];
+    return map_level(&mid, idx % NINDIRECT, alloc);
+}
+
+/* Тройной косвенный: *root указывает на двойные косвенные блоки. */
+static u32 map_triple(u32 *root, u32 idx, bool alloc) {
+    static u32 top[NINDIRECT];
+    if (idx >= NTINDIRECT) return 0;
+    if (!*root && (!alloc || !(*root = balloc()))) return 0;
+    if (bread(*root, top)) return 0;
+    u32 slot = idx / NDINDIRECT;
+    if (!top[slot]) {
+        if (!alloc) return 0;
+        u32 b = balloc();
+        if (!b) return 0;
+        top[slot] = b;
+        if (bwrite(*root, top)) return 0;
+    }
+    u32 child = top[slot];
+    return map_double(&child, idx % NDINDIRECT, alloc);
+}
+
 /* Номер дискового блока для idx-го блока файла. alloc=true — выделить, если нет.
  * Возвращает 0, если блока нет (или не удалось выделить). */
 static u32 bmap(struct inode *in, u32 idx, bool alloc) {
-    static u32 ind[NINDIRECT];
-    if (idx < NDIRECT) {
+    u32 nd = n_direct();
+    if (idx < nd) {
         if (!in->direct[idx] && alloc) in->direct[idx] = balloc();
         return in->direct[idx];
     }
-    idx -= NDIRECT;
-    if (idx >= NINDIRECT) {                  /* двойной косвенный: idx / 128 — какой блок ссылок, idx % 128 — где в нём */
-        static u32 top[NINDIRECT];
-        idx -= NINDIRECT;
-        if (idx >= NDINDIRECT) return 0;
-        if (!in->dindirect && (!alloc || !(in->dindirect = balloc()))) return 0;
-        if (bread(in->dindirect, top)) return 0;
-        u32 *mid = &top[idx / NINDIRECT];
-        if (!*mid) {
-            if (!alloc || !(*mid = balloc())) return 0;
-            memset(ind, 0, sizeof(ind));
-            if (bwrite(*mid, ind) || bwrite(in->dindirect, top)) return 0;
-        }
-        u32 m = *mid;
-        if (bread(m, ind)) return 0;
-        if (!ind[idx % NINDIRECT] && alloc) {
-            if (!(ind[idx % NINDIRECT] = balloc())) return 0;
-            if (bwrite(m, ind)) return 0;
-        }
-        return ind[idx % NINDIRECT];
+    idx -= nd;
+    if (idx < NINDIRECT) {
+        u32 slot = in->indirect;
+        u32 b = map_level(&slot, idx, alloc);
+        in->indirect = slot;
+        return b;
     }
-    if (!in->indirect) {
-        if (!alloc || !(in->indirect = balloc())) return 0;
+    idx -= NINDIRECT;
+    if (idx < NDINDIRECT) {
+        u32 slot = in->dindirect;
+        u32 b = map_double(&slot, idx, alloc);
+        in->dindirect = slot;
+        return b;
     }
-    if (bread(in->indirect, ind)) return 0;
-    if (!ind[idx] && alloc) {
-        if (!(ind[idx] = balloc())) return 0;
-        if (bwrite(in->indirect, ind)) return 0;
+    if (legacy()) return 0;
+    idx -= NDINDIRECT;
+    {
+        u32 slot = in->direct[NDIRECT_V2];
+        u32 b = map_triple(&slot, idx, alloc);
+        in->direct[NDIRECT_V2] = slot;
+        return b;
     }
-    return ind[idx];
+}
+
+static void free_indirect_block(u32 block) {
+    static u32 ind[NINDIRECT];
+    if (!block) return;
+    if (!bread(block, ind))
+        for (u32 i = 0; i < NINDIRECT; i++) bfree(ind[i]);
+    bfree(block);
+}
+
+static void free_double_block(u32 block) {
+    static u32 top[NINDIRECT];
+    u32 kids[NINDIRECT];
+    if (!block) return;
+    if (!bread(block, top)) {
+        for (u32 j = 0; j < NINDIRECT; j++) kids[j] = top[j];
+        for (u32 j = 0; j < NINDIRECT; j++) free_indirect_block(kids[j]);
+    }
+    bfree(block);
+}
+
+static void free_triple_block(u32 block) {
+    static u32 top[NINDIRECT];
+    u32 kids[NINDIRECT];
+    if (!block) return;
+    if (!bread(block, top)) {
+        for (u32 j = 0; j < NINDIRECT; j++) kids[j] = top[j];
+        for (u32 j = 0; j < NINDIRECT; j++) free_double_block(kids[j]);
+    }
+    bfree(block);
 }
 
 static void free_all_blocks(struct inode *in) {
-    static u32 ind[NINDIRECT];
-    for (int i = 0; i < NDIRECT; i++) { bfree(in->direct[i]); in->direct[i] = 0; }
-    if (in->indirect) {
-        if (!bread(in->indirect, ind))
-            for (u32 i = 0; i < NINDIRECT; i++) bfree(ind[i]);
-        bfree(in->indirect);
-        in->indirect = 0;
-    }
-    if (in->dindirect) {
-        static u32 top[NINDIRECT];
-        if (!bread(in->dindirect, top))
-            for (u32 j = 0; j < NINDIRECT; j++) {
-                if (!top[j]) continue;
-                if (!bread(top[j], ind))
-                    for (u32 i = 0; i < NINDIRECT; i++) bfree(ind[i]);
-                bfree(top[j]);
-            }
-        bfree(in->dindirect);
-        in->dindirect = 0;
+    u32 nd = n_direct();
+    for (u32 i = 0; i < nd; i++) { bfree(in->direct[i]); in->direct[i] = 0; }
+    if (in->indirect) { free_indirect_block(in->indirect); in->indirect = 0; }
+    if (in->dindirect) { free_double_block(in->dindirect); in->dindirect = 0; }
+    if (nd == NDIRECT_V2 && in->direct[NDIRECT_V2]) {
+        free_triple_block(in->direct[NDIRECT_V2]);
+        in->direct[NDIRECT_V2] = 0;
     }
     in->size = 0;
 }
@@ -250,7 +322,8 @@ static int myfs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
     struct inode in;
     int r = iread(ino, &in);
     if (r) return r;
-    if (off + n > MAX_FILE_BLKS * BS) return FS_EFBIG;
+    u32 limit = max_file_blks() * BS;
+    if (off > limit || n > limit - off) return FS_EFBIG;
 
     const u8 *src = buf;
     u32 done = 0;
@@ -288,9 +361,19 @@ static int myfs_stat_impl(u32 ino, struct fs_stat *st) {
     st->type = in.type;
     st->size = in.size;
     u32 data = (in.size + BS - 1) / BS;
+    u32 nd = n_direct();
     st->blocks = data + (in.indirect ? 1 : 0);
-    if (data > NDIRECT + NINDIRECT)          /* блоки ссылок двойного косвенного */
-        st->blocks += 1 + (data - NDIRECT - NINDIRECT + NINDIRECT - 1) / NINDIRECT;
+    if (data > nd + NINDIRECT) {
+        u32 past = data - nd - NINDIRECT;
+        u32 in_double = past > NDINDIRECT ? NDINDIRECT : past;
+        st->blocks += 1 + (in_double + NINDIRECT - 1) / NINDIRECT;
+        if (!legacy() && past > NDINDIRECT) {
+            u32 extra = past - NDINDIRECT;
+            st->blocks += 1;
+            st->blocks += (extra + NDINDIRECT - 1) / NDINDIRECT;
+            st->blocks += (extra + NINDIRECT - 1) / NINDIRECT;
+        }
+    }
     return FS_OK;
 }
 
