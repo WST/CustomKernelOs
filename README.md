@@ -1063,3 +1063,9 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 Оболочка запрашивает логин и пароль. При первом входе задайте пароль root.
 Команды: `useradd NAME`, `passwd [NAME]`, `whoami`, `logout`.
 Подробности и текущие ограничения: [docs/users.md](docs/users.md).
+
+## Сведения о системе
+
+Команда `sysinfo` показывает версию ядра, полный Git-хеш и время сборки, CPU,
+память, графику, диски и сеть. API и правила определения частот описаны
+в [docs/sysinfo.md](docs/sysinfo.md). Проверка: `make sysinfotest`.

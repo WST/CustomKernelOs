@@ -75,6 +75,7 @@ enum {
     SYS_FSTAT,
     SYS_RENAME,
     SYS_UNITCTL,
+    SYS_SYSINFO,
     SYS_COUNT
 };
 

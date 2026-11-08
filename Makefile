@@ -46,6 +46,16 @@ OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(
 
 all: $(BUILD)/os.img install
 
+.PHONY: FORCE_BUILD_INFO
+FORCE_BUILD_INFO:
+$(BUILD)/build_info.h: FORCE_BUILD_INFO VERSION tools/build_info.py | $(BUILD)
+	python3 tools/build_info.py $@
+$(BUILD)/sysinfo.o: $(BUILD)/build_info.h
+$(OBJS): user/lib/sysinfo.h
+$(BUILD)/user/libc.o: user/lib/sysinfo.h
+CFLAGS += -I$(BUILD)
+
+
 # Native clipboard/editor checks, installed only onto a disposable test disk.
 $(BUILD)/user/clipboardcheck.o: tests/clipboardcheck.c user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
@@ -135,7 +145,7 @@ $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.
 
 $(BUILD)/user/code.o: user/code_features.h user/code_index.h user/code_workspace.h user/code_chrome.h user/code_signature.h
 
-$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
+$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
@@ -234,7 +244,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in myos.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
@@ -351,7 +361,7 @@ gfxtest: | $(BUILD)
 CCROOT := $(BUILD)/ccroot
 cctest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@mkdir -p $(CCROOT)/include/sys
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
@@ -384,7 +394,7 @@ largetest: | $(BUILD)
 # ext без сети: разбор инструкций, каталоги, отказ на неизвестной команде.
 exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
@@ -393,7 +403,7 @@ exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
 # gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
 gztest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
@@ -401,7 +411,7 @@ gztest: $(BUILD)/cc-host
 
 cptest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
@@ -436,3 +446,12 @@ $(BUILD)/user/settings $(BUILD)/user/desktop: $(BUILD)/user/%: $(BUILD)/user/%.o
 .PHONY: settingstest
 settingstest:
 	python3 tests/settings_smoke.py
+
+$(BUILD)/user/sysinfocheck.o: tests/sysinfocheck.c user/lib/myos.h user/lib/sysinfo.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/sysinfocheck: $(BUILD)/user/sysinfocheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: sysinfotest
+sysinfotest:
+	python3 tests/build_info_test.py
+	python3 tests/sysinfo_smoke.py

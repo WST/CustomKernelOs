@@ -739,6 +739,7 @@ int sendto(int fd, const void *buf, size_t len, unsigned ip, int port) {
 int recvfrom(int fd, void *buf, size_t len, struct sockaddr *from, unsigned timeout_ms) {
     return syscall5(SYS_RECVFROM, fd, (int)buf, (int)len, (int)from, (int)timeout_ms);
 }
+int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
 int netinfo(struct net_info *out)          { return syscall3(SYS_NETINFO, (int)out, 0, 0); }
 int ping(unsigned ip, int seq, unsigned t) { return syscall3(SYS_PING, (int)ip, seq, (int)t); }
 int set_dns(unsigned ip)                   { return syscall3(SYS_NETCONFIG, 1, (int)ip, 0); }

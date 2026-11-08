@@ -2,6 +2,8 @@
  * Никаких системных заголовков: программы собираются с -nostdinc. */
 #ifndef MYOS_H
 #define MYOS_H
+#include "sysinfo.h"
+int sysinfo(struct system_info *out, unsigned size);
 
 typedef unsigned int   size_t;
 typedef int            ssize_t;
@@ -44,7 +46,7 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat

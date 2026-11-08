@@ -9,6 +9,7 @@
  * указатель проверяется — он должен лежать в памяти программы, а не ядра,
  * и эта память должна быть отображена (и доступна на запись, если пишем). */
 #include "syscall.h"
+#include "sysinfo.h"
 #include "tty.h"
 #include "keyboard.h"
 #include "task.h"
@@ -758,6 +759,12 @@ void syscall_dispatch(struct regs *r) {
         } else ret=account_ctl(a,name,password);
         volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;
+    }
+    case SYS_SYSINFO: {
+        if (b < sizeof(struct system_info)) { ret=-EINVAL; break; }
+        if (!user_buf_ok(a,sizeof(struct system_info),true)) { ret=-EFAULT; break; }
+        struct system_info info; sysinfo_get(&info);
+        memcpy((void *)a,&info,sizeof(info)); ret=0; break;
     }
     case SYS_CLOSE:   ret = sys_close(a); break;
     case SYS_LSEEK:   ret = sys_lseek(a, b, c); break;

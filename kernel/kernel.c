@@ -1,5 +1,6 @@
 /* Главная функция ядра: сюда приходит управление из entry.asm. */
 #include "vga.h"
+#include "sysinfo.h"
 #include "idt.h"
 #include "timer.h"
 #include "keyboard.h"
@@ -36,6 +37,7 @@ static void fail(const char *what, const char *why) {
 
 void kmain(void) {
     vga_init();
+    sysinfo_init();
 
     vga_set_color(LIGHT_CYAN, BLACK);
     vga_puts(
@@ -44,8 +46,11 @@ void kmain(void) {
         " | |\\/| | | | | | | \\___ \\ \n"
         " | |  | | |_| | |_| |___) |\n"
         " |_|  |_|\\__, |\\___/|____/ \n"
-        "         |___/   v0.19     \n\n");
+        "         |___/             \n\n");
 
+    struct system_info identity; sysinfo_get(&identity);
+    ok("%s %s %s (%s)", identity.os, identity.version, identity.commit, identity.build_time);
+    ok("CPU: %s", identity.cpu_brand);
     ok("VGA text console 80x25");
     gdt_init();
     idt_init();
