@@ -33,7 +33,7 @@ static int compat_tests(void) {
     b = compat_box(0x123456);
     CHECK(b && b->w == dom_view_width / 2, "vw recomputed after resize");
     jsval r;
-    const char *check_view = "innerWidth === 468 && innerHeight === 644 && document.documentElement.clientWidth === 468 && matchMedia('(max-width:600px)').matches";
+    const char *check_view = "innerWidth === 468 && innerHeight === 604 && document.documentElement.clientWidth === 468 && matchMedia('(max-width:600px)').matches";
     CHECK(js_eval(check_view, strlen(check_view), "viewport", &r) == 0 && r.tag == JS_BOOL && r.u.b,
           "JavaScript dimensions agree with CSS");
     resize(1000, 700);

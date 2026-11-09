@@ -31,7 +31,10 @@
 #include "img.h"
 
 static int W = 800, H = 576;          /* окно можно растягивать */
-#define BAR_H 36
+#define BAR_H 76
+#define NAV_Y 36
+#define ADDR_X 154
+#define ADDR_TEXT_X 184
 #define STATUS_H 20
 #define VIEW_Y BAR_H
 #define VIEW_H (H - BAR_H - STATUS_H)
@@ -1160,16 +1163,59 @@ static void url_encode(const char *s, char *out, int max) {
 static bool u8cont(char c) { return ((unsigned char)c & 0xC0) == 0x80; }
 static int u8count(const char *s, int bytes) { int k = 0; for (int i = 0; i < bytes && s[i]; i++) if (!u8cont(s[i])) k++; return k; }
 
+/* Navigation geometry is shared by painting and mouse hit testing. */
+static void nav_icon(int x, int kind, bool enabled) {
+    color_t c = enabled ? RGB(66, 77, 98) : RGB(184, 192, 205);
+    int cy = NAV_Y + 14;
+    if (kind < 2) {
+        int d = kind ? -1 : 1, cx = x + 14;
+        gfx_line(cx - 6*d, cy, cx + 6*d, cy, c);
+        gfx_line(cx - 6*d, cy, cx, cy - 6, c);
+        gfx_line(cx - 6*d, cy, cx, cy + 6, c);
+    } else if (kind == 2) {
+        if (loading) {
+            gfx_line(x+9, cy-5, x+19, cy+5, c);
+            gfx_line(x+9, cy+5, x+19, cy-5, c);
+        } else {
+            gfx_circle(x+14, cy, 6, c);
+            gfx_fill_rect(x+18, cy-8, 5, 7, RGB(248,250,253));
+            gfx_line(x+19, cy-6, x+19, cy, c);
+            gfx_line(x+19, cy, x+13, cy, c);
+        }
+    } else {
+        gfx_line(x+7, cy, x+14, cy-7, c);
+        gfx_line(x+14, cy-7, x+21, cy, c);
+        gfx_line(x+9, cy-2, x+9, cy+7, c);
+        gfx_line(x+9, cy+7, x+19, cy+7, c);
+        gfx_line(x+19, cy+7, x+19, cy-2, c);
+    }
+}
+
 static void draw_toolbar(void) {
-    gfx_fill_rect(0, 0, W, BAR_H, RGB(242, 242, 242));
-    gfx_fill_rect(0, BAR_H - 1, W, 1, RGB(200, 200, 200));
-    ui_button(6, 6, 30, 24, "<", false);
-    ui_button(40, 6, 30, 24, ">", false);
-    ui_button(74, 6, 30, 24, loading ? "X" : "R", false);       /* пока грузится — «остановить» */
-    ui_button(108, 6, 30, 24, "H", false);
-    ui_sunken(144, 6, W - 150, 24, C_WHITE);
+    gfx_fill_rect(0, 0, W, BAR_H, RGB(248,250,253));
+    gfx_fill_rect(0, 0, W, 29, RGB(231,237,246));
+    gfx_fill_circle(19, 14, 7, RGB(73,112,226));
+    gfx_circle(19, 14, 4, C_WHITE);
+    ui_text(34, 6, "MyOS", RGB(54,73,110));
+    char title[100];
+    int title_chars = (W - 126) / 8;
+    if (title_chars > 72) title_chars = 72;
+    snprintf(title, sizeof(title), "%.*s", title_chars, page_title[0] ? page_title : "Browser");
+    ui_text(100, 6, title, RGB(91,105,128));
+    gfx_fill_rect(0, BAR_H - 1, W, 1, RGB(220,226,236));
+    nav_icon(8, 0, hist_pos > 0);
+    nav_icon(42, 1, hist_pos + 1 < n_hist);
+    nav_icon(76, 2, true);
+    nav_icon(110, 3, true);
+    gfx_round_frame(ADDR_X, NAV_Y-2, W-ADDR_X-12, 32, 14,
+                    editing_addr ? RGB(91,128,234) : RGB(226,232,242),
+                    editing_addr ? C_WHITE : RGB(236,241,248));
+    /* A neutral site-information mark; it does not imply certificate trust. */
+    gfx_circle(ADDR_X+15, NAV_Y+14, 6, RGB(112,128,152));
+    gfx_text(ADDR_X+12, NAV_Y+6, "i", RGB(112,128,152), TRANSPARENT);
     static char shown[1100];
-    int maxc = (W - 162) / 8;                              /* столько букв влезает */
+    int maxc = (W - ADDR_TEXT_X - 24) / 8;
+    if (maxc < 1) maxc = 1;
     int ccur = u8count(addr, addr_cur), skip = 0, start = 0;
     if (editing_addr && ccur > maxc - 1) skip = ccur - maxc + 1;
     while (skip > 0 && addr[start]) { start++; while (u8cont(addr[start])) start++; skip--; }
@@ -1180,15 +1226,16 @@ static void draw_toolbar(void) {
     }
     shown[n] = 0;
     if (editing_addr && addr_all && addr[0]) {
-        gfx_fill_rect(149, 9, u8count(shown, n) * 8 + 2, 18, UI_ACCENT);
-        gfx_text(150, 10, shown, C_WHITE, TRANSPARENT);
-    } else gfx_text(150, 10, shown, UI_TEXT, TRANSPARENT);
-    if (editing_addr && !addr_all) gfx_fill_rect(150 + (ccur - u8count(addr, start)) * 8, 10, 2, 16, UI_TEXT);
+        gfx_fill_rect(ADDR_TEXT_X-1, NAV_Y+5, u8count(shown, n)*8+2, 18, RGB(65,105,220));
+        gfx_text(ADDR_TEXT_X, NAV_Y+6, shown, C_WHITE, TRANSPARENT);
+    } else gfx_text(ADDR_TEXT_X, NAV_Y+6, shown, RGB(61,77,103), TRANSPARENT);
+    if (editing_addr && !addr_all)
+        gfx_fill_rect(ADDR_TEXT_X+(ccur-u8count(addr,start))*8, NAV_Y+6, 1, 16, RGB(65,105,220));
 }
 
 static void draw_status(void) {
-    gfx_fill_rect(0, H - STATUS_H, W, STATUS_H, RGB(242, 242, 242));
-    gfx_fill_rect(0, H - STATUS_H, W, 1, RGB(200, 200, 200));
+    gfx_fill_rect(0, H - STATUS_H, W, STATUS_H, RGB(248, 250, 253));
+    gfx_fill_rect(0, H - STATUS_H, W, 1, RGB(226, 232, 242));
     char s[100];
     snprintf(s, sizeof(s), "%.96s", hover_link[0] ? hover_link : status);
     gfx_text(6, H - STATUS_H + 2, s, UI_DARK, TRANSPARENT);
@@ -1437,7 +1484,7 @@ static void busy_events(void) {
         if (e.type == EV_TIMEOUT) break;
         if (e.type == EV_CLOSE || e.type == EV_QUIT) { win_destroy(win); exit(0); }
         if (e.type == EV_KEY && e.key == 27) stop_req = true;
-        else if (e.type == EV_MOUSE_DOWN && e.y < BAR_H && ui_inside(e.x, e.y, 74, 6, 30, 24) && loading) stop_req = true;
+        else if (e.type == EV_MOUSE_DOWN && e.y < BAR_H && ui_inside(e.x, e.y, 76, NAV_Y, 28, 28) && loading) stop_req = true;
         else if (!loading && e.type != EV_RESIZE && e.type != EV_MOUSE_MOVE && n_later < 16) later[n_later++] = e;
         if (e.type == EV_RESIZE) {                            /* буфер уже новый — нарисовать, что есть */
             W = e.x; H = e.y;
@@ -1627,33 +1674,20 @@ bad:
 }
 
 static const char *home_page =
-    "<title>MyOS Browser</title>"
-    "<center><h1>MyOS Browser</h1></center>"
-    "<p>A small web browser written from scratch for MyOS: it speaks HTTP over the MyOS "
-    "TCP/IP stack and lays out HTML by itself.</p>"
-    "<form action=\"http://frogfind.com/\"><b>Search the web:</b> <input name=\"q\" size=\"40\"> "
-    "<input type=\"submit\" value=\"Search\"></form>"
-    "<p><i>(search goes through FrogFind, a free service that simplifies modern sites for old "
-    "computers. https:// sites are opened directly with our own TLS 1.3; sites that only know "
-    "older TLS are opened through FrogFind)</i></p>"
-    "<p><b>JavaScript</b> works: the browser has its own JS engine and DOM. "
-    "<a href=\"about:js\">JavaScript demo</a> | <a href=\"about:console\">JS console</a> "
-    "<span id=\"jsinfo\">(JavaScript is off - press Ctrl+J)</span></p>"
-    "<script>document.getElementById('jsinfo').textContent = '- enabled, ' + new Date().toLocaleString();</script>"
-    "<h2>Try these</h2><ul>"
-    "<li><a href=\"http://info.cern.ch/hypertext/WWW/TheProject.html\">The first web site</a> - CERN, 1991</li>"
-    "<li><a href=\"http://frogfind.com/\">FrogFind</a> - search engine for vintage computers</li>"
-    "<li><a href=\"http://68k.news/\">68k.news</a> - news headlines, plain HTML</li>"
-    "<li><a href=\"https://en.wikipedia.org/wiki/Operating_system\">Wikipedia: Operating system</a> (HTTPS)</li>"
-    "<li><a href=\"https://ru.wikipedia.org/wiki/MS-DOS\">Wikipedia (ru): MS-DOS</a> - in Russian</li>"
-    "<li><a href=\"" PROXY "https://en.wikipedia.org/wiki/Operating_system\">The same Wikipedia page via FrogFind</a> - simplified</li>"
-    "<li><a href=\"https://example.com/\">https://example.com/</a> - a tiny page over HTTPS</li>"
-    "<li><a href=\"https://lite.duckduckgo.com/lite/\">DuckDuckGo Lite</a> - search over HTTPS</li>"
-    "<li><a href=\"http://neverssl.com/\">neverssl.com</a></li>"
-    "<li><a href=\"http://localhost/\">http://localhost/</a> - this computer (start <b>httpd &amp;</b> in Terminal first)</li>"
-    "<li><a href=\"file:/\">file:/</a> - files on the MyOS disk</li>"
-    "</ul><hr><p>Keys: Ctrl+L - address, Backspace - back, PgUp/PgDn, arrows, Home/End - scroll, "
-    "Ctrl+J - JavaScript on/off, Ctrl+K - JavaScript console, Ctrl+U - page styles (CSS) on/off.</p>";
+    "<title>Новая страница</title><style>"
+    "body { background:#f8fafd; color:#273750; font-family:sans-serif; padding:20px; }"
+    "main { max-width:520px; margin:0 auto; padding-top:62px; text-align:center; }"
+    "h1 { font-size:44px; color:#466bda; margin-bottom:32px; text-align:center; }"
+    ".search { padding:14px 0; margin-bottom:22px; text-align:center; }"
+    "a { color:#74839b; text-decoration:none; }"
+    ".links { text-align:center; color:#bac4d3; font-size:14px; }"
+    ".hint { color:#a0acbf; font-size:12px; text-align:center; margin-top:48px; }"
+    "@media (max-width:600px) { main { padding-top:48px; } h1 { font-size:38px; } }"
+    "</style><main><h1>MyOS</h1><div class=\"search\"><center><form action=\"http://frogfind.com/\">"
+    "<input name=\"q\" size=\"24\" placeholder=\"Поиск в интернете\"><input type=\"submit\" value=\"Найти\">"
+    "</form></center></div><p class=\"links\"><a href=\"https://ru.wikipedia.org/\">Википедия</a> &middot; "
+    "<a href=\"http://68k.news/\">Новости</a> &middot; <a href=\"file:/\">Мои файлы</a></p>"
+    "<p class=\"hint\">Ctrl+L — ввести адрес</p></main>";
 
 static const char *js_page =
     "<title>JavaScript in MyOS</title><h1>JavaScript in MyOS</h1>"
@@ -2534,11 +2568,11 @@ static void on_click(int x, int y) {
     sel_item = sel_end_item = -1; text_drag = false;
     if (y < BAR_H) {
         editing_addr = false;
-        if (ui_inside(x, y, 6, 6, 30, 24)) { go_history(-1); return; }
-        if (ui_inside(x, y, 40, 6, 30, 24)) { go_history(1); return; }
-        if (ui_inside(x, y, 74, 6, 30, 24)) { navigate(url, false); return; }
-        if (ui_inside(x, y, 108, 6, 30, 24)) { navigate(HOME, true); return; }
-        if (x >= 144) { addr_all = !editing_addr; editing_addr = true; focus_input = -1; addr_cur = strlen(addr); }
+        if (ui_inside(x, y, 8, NAV_Y, 28, 28)) { go_history(-1); return; }
+        if (ui_inside(x, y, 42, NAV_Y, 28, 28)) { go_history(1); return; }
+        if (ui_inside(x, y, 76, NAV_Y, 28, 28)) { navigate(url, false); return; }
+        if (ui_inside(x, y, 110, NAV_Y, 28, 28)) { navigate(HOME, true); return; }
+        if (ui_inside(x, y, ADDR_X, NAV_Y-2, W-ADDR_X-12, 32)) { addr_all = true; editing_addr = true; focus_input = -1; addr_cur = strlen(addr); }
         redraw();
         return;
     }
