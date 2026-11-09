@@ -14,6 +14,7 @@ struct tty {
     struct ring out;                /* к окну терминала */
     u8   line[TTY_LINE];            /* строка, которую сейчас набирают (обычный режим) */
     u32  line_len;
+    bool resize_pending;            /* Wake raw input after a size change. */
     bool eof;                       /* Ctrl+D на пустой строке */
     u32  mode, mode_owner;          /* TTY_RAW... и кто его включил */
     u32  cols, rows;

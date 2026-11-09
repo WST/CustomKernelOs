@@ -9,6 +9,7 @@ struct cpu_state {
     u32 tlb_generation;
     struct task *running, *idle;
     u32 slice, nesting;
+    u32 total_ticks, idle_ticks; /* Per-logical-CPU scheduler accounting. */
     bool resched;
 };
 extern struct cpu_state cpu_states[SMP_MAX_CPUS];

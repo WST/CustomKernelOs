@@ -10,6 +10,7 @@
  * и эта память должна быть отображена (и доступна на запись, если пишем). */
 #include "syscall.h"
 #include "sysinfo.h"
+#include "smp.h"
 #include "tty.h"
 #include "keyboard.h"
 #include "task.h"
@@ -767,6 +768,19 @@ void syscall_dispatch(struct regs *r) {
         volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;
     }
+    case SYS_CPUINFO: {
+        u32 count = smp_count();
+        if (b < count) { ret=-EINVAL; break; }
+        if (!user_buf_ok(a,count*sizeof(struct cpu_info),true)) { ret=-EFAULT; break; }
+        struct cpu_info sample[SMP_MAX_CPUS];
+        u32 flags=irq_save();
+        for (u32 i=0;i<count;i++) {
+            sample[i].total_ticks=cpu_states[i].total_ticks;
+            sample[i].idle_ticks=cpu_states[i].idle_ticks;
+        }
+        irq_restore(flags);
+        memcpy((void *)a,sample,count*sizeof(struct cpu_info)); ret=count; break;
+    }
     case SYS_SYSINFO: {
         if (b < sizeof(struct system_info)) { ret=-EINVAL; break; }
         if (!user_buf_ok(a,sizeof(struct system_info),true)) { ret=-EFAULT; break; }
@@ -805,7 +819,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_GETPPID: ret = t->parent; break;
     case SYS_TTYMODE: {
         struct tty *tt = tty_of(t);
-        ret = tt ? (int)tty_set_mode(tt, a & 7) : (int)console_set_mode(a & 7);
+        ret = tt ? (int)tty_set_mode(tt, a & 15) : (int)console_set_mode(a & 7);
         break;
     }
     case SYS_STAT:    ret = sys_stat(a, b); break;

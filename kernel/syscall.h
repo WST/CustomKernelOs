@@ -77,6 +77,7 @@ enum {
     SYS_UNITCTL,
     SYS_SYSINFO,
     SYS_SPAWN,
+    SYS_CPUINFO,
     SYS_COUNT
 };
 

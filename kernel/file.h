@@ -34,6 +34,7 @@ extern struct file console_file;    /* клавиатура + экран: stdin/
 
 #define TTY_RAW      1                 /* клавиши сразу, без эха и без сборки строки */
 #define TTY_NONBLOCK 2                 /* read не ждёт: нет клавиши — вернёт 0 */
+#define TTY_RESIZE_EVENT 8             /* readkey-only: resize interrupts the pending read. */
 #define TTY_NOSIG    4                 /* Ctrl+C — обычная клавиша (код 3), а не убийство */
 
 u32  console_set_mode(u32 mode);       /* -> прежний режим */

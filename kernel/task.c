@@ -224,6 +224,8 @@ struct regs *sched_tick(struct regs *r) {
     if ((r->cs & 3) && current->kill_pending && !current->in_syscall)
         make_zombie(current, current->pending_code ? current->pending_code : 137);
     current->cpu_ticks++;
+    cpu_states[smp_cpu()].total_ticks++;
+    if (current->cpu_idle) cpu_states[smp_cpu()].idle_ticks++;
 
     u32 now = timer_ticks();
     for (int i = 0; i < MAX_TASKS; i++) {

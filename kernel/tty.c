@@ -164,6 +164,10 @@ static int master_read(struct tty *t, u8 *buf, u32 len) {
 static int slave_read(struct tty *t, u8 *buf, u32 len) {
     u32 f = irq_save();
     for (;;) {
+        if ((t->mode & (TTY_RAW | TTY_RESIZE_EVENT)) == (TTY_RAW | TTY_RESIZE_EVENT) && t->resize_pending) {
+            t->resize_pending = false;
+            irq_restore(f); return -EINTR;
+        }
         if (t->in.count) break;
         if (t->eof) { t->eof = false; irq_restore(f); return 0; }
         if (t->masters == 0 || (t->mode & TTY_NONBLOCK)) { irq_restore(f); return 0; }
@@ -221,6 +225,7 @@ u32 tty_set_mode(struct tty *t, u32 mode) {
     u32 f = irq_save();
     u32 old = t->mode;
     t->mode = mode;
+    if (!(mode & TTY_RAW)) t->resize_pending = false;
     t->mode_owner = mode ? task_current()->id : 0;
     if (!(mode & TTY_RAW) && (old & TTY_RAW)) t->line_len = 0;
     irq_restore(f);
@@ -249,7 +254,13 @@ int tty_ctl(struct file *f, u32 op, u32 arg) {
     case TTYCTL_SETSIZE: {
         u32 c = arg >> 16, r = arg & 0xFFFF;
         if (c < 2 || r < 2 || c > 1000 || r > 1000) return -EINVAL;
-        t->cols = c; t->rows = r;
+        u32 flags = irq_save();
+        if (t->cols != c || t->rows != r) {
+            t->cols = c; t->rows = r;
+            if (t->mode & TTY_RAW) t->resize_pending = true;
+            task_wakeup(&t->in);
+        }
+        irq_restore(flags);
         return 0;
     }
     case TTYCTL_GETSIZE: return (t->cols << 16) | t->rows;

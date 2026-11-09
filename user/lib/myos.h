@@ -4,6 +4,8 @@
 #define MYOS_H
 #include "sysinfo.h"
 int sysinfo(struct system_info *out, unsigned size);
+/* Returns online CPU count, or negative errno; capacity is in records. */
+int cpuinfo(struct cpu_info *out, unsigned capacity);
 
 typedef unsigned int   size_t;
 typedef int            ssize_t;
@@ -46,7 +48,7 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
@@ -178,6 +180,7 @@ int  term_rows(void);
 #define SCREEN_H term_rows()
 #define TTY_RAW      1          /* клавиши сразу, без эха */
 #define TTY_NONBLOCK 2          /* read не ждёт клавишу (вернёт 0) */
+#define TTY_RESIZE_EVENT 8 /* Internal readkey opt-in; ordinary read stays uninterrupted. */
 #define TTY_NOSIG    4          /* Ctrl+C приходит как код 3, а не убивает */
 int  ttymode(int mode);         /* -> прежний режим */
 
@@ -198,6 +201,7 @@ int  utf8_put(char *out, int cp); /* кодовая точка -> UTF-8 (1..3 б
 enum { KEY_UP = 1000, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
        KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS };
 int  readkey(void);
+#define KEY_RESIZE 0x30000 /* Terminal geometry changed; redraw using term_cols/rows. */
 #define KEY_SHIFT 0x10000
 #define KEY_COPY  0x20000
 #define KEY_PASTE 0x20001

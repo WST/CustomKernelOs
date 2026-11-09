@@ -234,9 +234,22 @@ void gotoxy(int x, int y) { printf("\x1b[%d;%dH", y + 1, x + 1); }
 int clipboard_set(const char *s, unsigned n) { return syscall3(SYS_CLIPBOARD, 1, (int)s, n); }
 int clipboard_get(char *s, unsigned n) { return syscall3(SYS_CLIPBOARD, 0, (int)s, n); }
 
+static int key_termsize;
 int readkey(void) {
+    int size = syscall3(SYS_TERMSIZE, 0, 0, 0);
+    if (key_termsize && size != key_termsize) { key_termsize = size; return KEY_RESIZE; }
+    key_termsize = size;
     unsigned char c;
-    if (read(STDIN, &c, 1) <= 0) return -1;
+    /* Only readkey opts into resize interruption. Raw read callers (notably
+     * login/password input) must never see resize as EOF or an input error. */
+    syscall3(SYS_TTYMODE, cur_tty | TTY_RESIZE_EVENT, 0, 0);
+    int count = read(STDIN, &c, 1);
+    syscall3(SYS_TTYMODE, cur_tty, 0, 0);
+    if (count <= 0) {
+        size = syscall3(SYS_TERMSIZE, 0, 0, 0);
+        if (size != key_termsize) { key_termsize = size; return KEY_RESIZE; }
+        return -1;
+    }
     if (c >= 0xC0) {                                /* UTF-8: остальные байты буквы уже в буфере */
         int n = c >= 0xE0 ? 2 : 1, cp = c & (c >= 0xE0 ? 0x0F : 0x1F);
         for (int i = 0; i < n; i++) {
@@ -741,6 +754,7 @@ int recvfrom(int fd, void *buf, size_t len, struct sockaddr *from, unsigned time
     return syscall5(SYS_RECVFROM, fd, (int)buf, (int)len, (int)from, (int)timeout_ms);
 }
 int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
+int cpuinfo(struct cpu_info *out, unsigned capacity) { return syscall3(SYS_CPUINFO, (int)out, capacity, 0); }
 int netinfo(struct net_info *out)          { return syscall3(SYS_NETINFO, (int)out, 0, 0); }
 int ping(unsigned ip, int seq, unsigned t) { return syscall3(SYS_PING, (int)ip, seq, (int)t); }
 int set_dns(unsigned ip)                   { return syscall3(SYS_NETCONFIG, 1, (int)ip, 0); }

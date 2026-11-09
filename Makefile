@@ -513,3 +513,34 @@ usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
 	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm
 usbtest: usb-image
 	python3 tests/hardware_smoke.py
+
+.PHONY: htoptest
+htoptest:
+	$(MAKE) build/os.img install DISK=build/htop-test.img
+	python3 tests/htop_smoke.py
+
+$(BUILD)/user/cpuinfocheck.o: tests/cpuinfocheck.c user/lib/myos.h user/lib/sysinfo.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/cpuinfocheck: $(BUILD)/user/cpuinfocheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/terminalresizecheck.o: tests/terminalresizecheck.c user/terminal.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/terminalresizecheck: $(BUILD)/user/terminalresizecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: terminalresizetest
+terminalresizetest:
+	$(MAKE) build/os.img build/user/terminalresizecheck install DISK=build/terminal-resize-test.img
+	python3 tests/terminal_resize_smoke.py
+
+$(BUILD)/user/terminalwindowcheck.o: tests/terminalwindowcheck.c user/lib/myos.h user/lib/win.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/terminalwindowcheck: $(BUILD)/user/terminalwindowcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+
+
+.PHONY: terminalwindowtest
+terminalwindowtest:
+	$(MAKE) build/os.img build/user/terminalwindowcheck install DISK=build/terminal-resize-test.img
+	python3 tests/terminal_window_smoke.py

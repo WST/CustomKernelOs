@@ -14,4 +14,6 @@ struct system_info {
     unsigned cpu_logical_package, cpu_online;
     unsigned ram_total_kb, ram_used_kb, ram_free_kb, uptime_seconds;
 };
+/* Monotonic modulo-2^32 counters, sampled independently on each CPU. */
+struct cpu_info { unsigned total_ticks, idle_ticks; };
 #endif

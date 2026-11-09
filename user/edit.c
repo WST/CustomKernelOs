@@ -190,6 +190,7 @@ static bool prompt(const char *q, char *buf, int max) {
         putf("\x1b[%d;1H\x1b[K" ANSI_YELLOW "%s" ANSI_RESET "%s", TEXT_ROWS + 2, q, buf);
         write(STDOUT, out, olen);
         int k = readkey();
+        if (k == KEY_RESIZE) { draw(); continue; }
         if (k == '\r') return true;
         if (k == 27 || k == CTRL('c')) return false;
         if ((k == '\b' || k == 127) && len) buf[--len] = 0;
@@ -334,6 +335,7 @@ int main(int argc, char **argv) {
     for (;;) {
         draw();
         int k = readkey();
+        if (k == KEY_RESIZE) { write(STDOUT, ANSI_CLEAR, strlen(ANSI_CLEAR)); continue; }
         char keep = msg[0];
         msg[0] = 0;                     /* сообщение живёт до следующей клавиши */
         (void)keep;
