@@ -551,3 +551,12 @@ wheeltest: $(BUILD)/os.img
 	$(HOSTCC) -m32 -std=gnu11 -DMYOS_HOST_LIBC -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections -Iuser/lib tests/terminal_history.c -Wl,--gc-sections -o $(BUILD)/terminal-history-test
 	./$(BUILD)/terminal-history-test
 	python3 tests/wheel_smoke.py
+
+# Native user threads and shared-address-space SMP regression tests.
+$(BUILD)/user/threadcheck.o: tests/threadcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/threadcheck: $(BUILD)/user/threadcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: threadtest
+threadtest:
+	python3 tests/thread_smoke.py

@@ -88,19 +88,27 @@ static int proc_errno(int e) {
     case PROC_ENOMEM:  return -ENOMEM;
     case PROC_EAGAIN:  return -EAGAIN;
     case PROC_EISDIR:  return -EISDIR;
+    case PROC_EBUSY:   return -EBUSY;
     default:           return e;
     }
 }
 
 static struct file *get_fd(u32 fd) {
     struct task *t = task_current();
-    return fd < MAX_FDS ? t->fds[fd] : NULL;
+    if (fd >= MAX_FDS) return NULL;
+    u32 flags=irq_save();
+    struct file *f=task_process(t)->fds[fd];
+    if (f && !t->syscall_fds[fd]) t->syscall_fds[fd]=file_dup(f);
+    irq_restore(flags);
+    return f;
 }
 
 static int alloc_fd(struct file *f) {
     struct task *t = task_current();
-    for (int i = 0; i < MAX_FDS; i++) if (!t->fds[i]) { t->fds[i] = f; return i; }
-    return -EMFILE;
+    u32 flags=irq_save();
+    int fd=-EMFILE;
+    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; fd=i; break; }
+    irq_restore(flags); return fd;
 }
 
 /* ---------------------------------------------------------------- файлы */
@@ -115,7 +123,7 @@ static int sys_clipboard(u32 op, u32 addr, u32 size) {
     if (size > sizeof(clipboard)) return -EFBIG;
     if (size && !user_buf_ok(addr, size, op == 0)) return -EFAULT;
     mutex_lock(&clipboard_lock);
-    u32 uid = task_current()->uid;
+    u32 uid = task_process(task_current())->uid;
     int result;
     if (op == 1) {
         if (size) memcpy(clipboard, (void *)addr, size);
@@ -162,13 +170,13 @@ static int sys_open_impl(u32 upath, u32 flags) {
 
     u32 ino;
     struct fs_stat st;
-    int r = fs_resolve(t->cwd, path, &ino);
+    int r = fs_resolve(task_process(t)->cwd, path, &ino);
     bool existed = r == 0;
-    if (r == FS_ENOENT && creat && want_write) r = fs_create(t->cwd, path, FS_TYPE_FILE, &ino);
+    if (r == FS_ENOENT && creat && want_write) r = fs_create(task_process(t)->cwd, path, FS_TYPE_FILE, &ino);
     if (r) return fs_errno(r);
     if (account_private(ino)) return -EPERM;
     if ((r = fs_stat(ino, &st))) return fs_errno(r);
-    if (st.type == FS_TYPE_BLOCK && (!t->authenticated || t->uid != 0)) return -EPERM;
+    if (st.type == FS_TYPE_BLOCK && (!task_process(t)->authenticated || task_process(t)->uid != 0)) return -EPERM;
     if (st.type == FS_TYPE_DIR) return -EISDIR;
     if (st.type == FS_TYPE_BLOCK && want_write) return -EROFS;
     if (excl && creat && existed) return -EEXIST;
@@ -190,11 +198,13 @@ static int sys_open(u32 upath,u32 mode) {
 }
 
 static int sys_close(u32 fd) {
-    struct file *f = get_fd(fd);
+    if (fd>=MAX_FDS) return -EBADF;
+    u32 flags=irq_save();
+    struct task *p=task_process(task_current());
+    struct file *f=p->fds[fd]; p->fds[fd]=NULL;
+    irq_restore(flags);
     if (!f) return -EBADF;
-    task_current()->fds[fd] = NULL;
-    file_close(f);
-    return 0;
+    file_close(f); return 0;
 }
 
 static int sys_lseek(u32 fd, u32 off, u32 whence) {
@@ -226,13 +236,16 @@ static int sys_pipe(u32 ufds) {
     if (!user_buf_ok(ufds, 8, true)) return -EFAULT;
     struct file *rd, *wr;
     if (pipe_create(&rd, &wr)) return -ENOMEM;
+    u32 flags=irq_save();
     int a = alloc_fd(rd), b = a >= 0 ? alloc_fd(wr) : -1;
     if (a < 0 || b < 0) {
-        if (a >= 0) task_current()->fds[a] = NULL;
+        if (a >= 0) task_process(task_current())->fds[a] = NULL;
+        irq_restore(flags);
         file_close(rd);
         file_close(wr);
         return -EMFILE;
     }
+    irq_restore(flags);
     ((int *)ufds)[0] = a;
     ((int *)ufds)[1] = b;
     return 0;
@@ -243,13 +256,16 @@ static int sys_pty_open(u32 ufds) {
     struct file *m, *sl;
     int r = pty_create(&m, &sl);
     if (r) return r;
+    u32 flags=irq_save();
     int a = alloc_fd(m), b = a >= 0 ? alloc_fd(sl) : -1;
     if (a < 0 || b < 0) {
-        if (a >= 0) task_current()->fds[a] = NULL;
+        if (a >= 0) task_process(task_current())->fds[a] = NULL;
+        irq_restore(flags);
         file_close(m);
         file_close(sl);
         return -EMFILE;
     }
+    irq_restore(flags);
     ((int *)ufds)[0] = a;
     ((int *)ufds)[1] = b;
     return 0;
@@ -259,12 +275,14 @@ static int sys_pty_open(u32 ufds) {
  * Так оболочка подключает stdout программы к каналу или файлу. */
 static int sys_dup2(u32 oldfd, u32 newfd) {
     struct task *t = task_current();
+    u32 flags=irq_save();
     struct file *f = get_fd(oldfd);
-    if (!f || newfd >= MAX_FDS) return -EBADF;
-    if (oldfd == newfd) return newfd;
-    file_close(t->fds[newfd]);
-    t->fds[newfd] = file_dup(f);
-    return newfd;
+    if (!f || newfd >= MAX_FDS) { irq_restore(flags); return -EBADF; }
+    if (oldfd == newfd) { irq_restore(flags); return newfd; }
+    struct file *old=task_process(t)->fds[newfd];
+    task_process(t)->fds[newfd] = file_dup(f);
+    irq_restore(flags);
+    file_close(old); return newfd;
 }
 
 /* ---------------------------------------------------------------- каталоги */
@@ -275,18 +293,18 @@ static int sys_chdir(u32 upath) {
     u32 ino;
     struct fs_stat st;
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
-    int r = fs_resolve(t->cwd, path, &ino);
+    int r = fs_resolve(task_process(t)->cwd, path, &ino);
     if (!r) r = fs_stat(ino, &st);
     if (r) return fs_errno(r);
     if (st.type != FS_TYPE_DIR) return -ENOTDIR;
-    t->cwd = ino;
+    task_process(t)->cwd = ino;
     return 0;
 }
 
 static int sys_getcwd(u32 buf, u32 len) {
     char path[PATH_MAX];
     if (!user_buf_ok(buf, len, true)) return -EFAULT;
-    int r = fs_getpath(task_current()->cwd, path, sizeof(path));
+    int r = fs_getpath(task_process(task_current())->cwd, path, sizeof(path));
     if (r) return fs_errno(r);
     u32 n = strlen(path) + 1;
     if (n > len) return -ENAMETOOLONG;
@@ -300,7 +318,7 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
     if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
     u32 dir, pos = 0;
-    int r = fs_resolve(task_current()->cwd, path, &dir);
+    int r = fs_resolve(task_process(task_current())->cwd, path, &dir);
     if (r) return fs_errno(r);
     struct fs_dirent de;
     for (u32 i = 0; ; i++) {
@@ -323,7 +341,7 @@ static int sys_stat(u32 upath, u32 uout) {
     if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
     u32 ino;
     struct fs_stat st;
-    int r = fs_resolve(task_current()->cwd, path, &ino);
+    int r = fs_resolve(task_process(task_current())->cwd, path, &ino);
     if (!r) r = fs_stat(ino, &st);
     if (r) return fs_errno(r);
     struct dirent_info *out = (struct dirent_info *)uout;
@@ -339,15 +357,15 @@ static int sys_stat(u32 upath, u32 uout) {
 static int sys_mkdir(u32 upath) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
-    return fs_errno(fs_create(task_current()->cwd, path, FS_TYPE_DIR, NULL));
+    return fs_errno(fs_create(task_process(task_current())->cwd, path, FS_TYPE_DIR, NULL));
 }
 
 static int sys_unlink(u32 upath) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
     u32 ino;
-    if(!fs_resolve(task_current()->cwd,path,&ino) && account_private(ino)) return -EPERM;
-    return fs_errno(fs_remove(task_current()->cwd, path));
+    if(!fs_resolve(task_process(task_current())->cwd,path,&ino) && account_private(ino)) return -EPERM;
+    return fs_errno(fs_remove(task_process(task_current())->cwd, path));
 }
 
 static int sys_rename(u32 uold, u32 unew) {
@@ -357,7 +375,7 @@ static int sys_rename(u32 uold, u32 unew) {
      * acquiring the VFS lock would let another task move it in between. */
     fs_namespace_lock();
     u32 source, target, etc;
-    u32 cwd = task_current()->cwd;
+    u32 cwd = task_process(task_current())->cwd;
     int result;
     if (!fs_resolve(cwd, oldp, &source) &&
         (account_private(source) ||
@@ -411,15 +429,17 @@ static int sys_kill(u32 pid) {
     struct task *v = task_by_id(pid);
     if (!v) return -ESRCH;
     if (!v->user) return -EPERM;            /* потоки ядра программе не по зубам */
-    return task_kill(pid) == 0 ? 0 : -ESRCH;
+    return task_kill(task_process(v)->id) == 0 ? 0 : -ESRCH;
 }
 
 static int sys_setpgid(u32 pid, u32 pgid) {
     struct task *t = task_current();
+    t=task_process(t);
     struct task *v = pid ? task_by_id(pid) : t;
+    v=task_process(v);
     if (!v) return -ESRCH;
     if (v != t && v->parent != t->id) return -EPERM;   /* только себе и своим детям */
-    v->pgid = pgid ? pgid : v->id;
+    task_set_pgid(v,pgid ? pgid : v->id);
     return 0;
 }
 
@@ -552,18 +572,18 @@ static int sys_gfx_font(u32 ubuf) {
 /* Сдвинуть границу кучи программы. Новые страницы выделяются сразу. */
 static u32 sys_sbrk(i32 inc) {
     struct task *t = task_current();
-    u32 old = t->brk, new = old + inc;
-    if (inc < 0 ? new < t->brk_start || new > old : new > SBRK_LIMIT || new < old)
+    u32 old = task_process(t)->brk, new = old + inc;
+    if (inc < 0 ? new < task_process(t)->brk_start || new > old : new > SBRK_LIMIT || new < old)
         return (u32)-1;
     for (u32 va = (old + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); va < new; va += PAGE_SIZE) {
         u32 frame = pmm_alloc();
         if (!frame) return (u32)-1;
         memset((void *)frame, 0, PAGE_SIZE);
         if (vmm_map_in(t->page_dir, va, frame, PG_USER | PG_WRITE)) { pmm_free(frame); return (u32)-1; }
-        t->user_pages++;
-        t->brk = va + PAGE_SIZE < new ? va + PAGE_SIZE : new;   /* на случай нехватки памяти */
+        task_process(t)->user_pages++;
+        task_process(t)->brk = va + PAGE_SIZE < new ? va + PAGE_SIZE : new;   /* на случай нехватки памяти */
     }
-    t->brk = new;
+    task_process(t)->brk = new;
     return old;
 }
 
@@ -709,14 +729,44 @@ void syscall_dispatch(struct regs *r) {
     struct task *t = task_current();
     /* A remote kill may precede this syscall (including a long sleep).
      * Deliver it before starting any new blocking operation. */
-    if (t->kill_pending) task_exit_code(t->pending_code ? t->pending_code : 137);
+    if (t->kill_pending) task_exit_code(t->pending_code);
     t->in_syscall = true;
     __asm__ volatile ("sti");   /* шлюз прерывания запретил IRQ; пока работаем в ядре — разрешим */
 
     u32 a = r->ebx, b = r->ecx, c = r->edx, d = r->esi, e = r->edi;
     int ret = -ENOSYS;
     switch (r->eax) {
-    case SYS_EXIT:    t->in_syscall = false; task_exit_code((int)a);
+    case SYS_EXIT:    t->in_syscall = false; task_exit_group((int)a);
+    case SYS_GETTID: ret=t->id; break;
+    case SYS_THREAD_EXIT: t->in_syscall=false; task_exit_code((int)a);
+    case SYS_THREAD_CREATE: {
+        if (e<4096 || e>1024*1024 || d+e<d || !user_buf_ok(d,e,true) ||
+            !user_buf_ok(a,1,false) || !user_buf_ok(b,1,false)) { ret=-EFAULT; break; }
+        u32 sp=((d+e)&~15u)-20; /* i386 ABI: esp+4 aligned to 16 */
+        ret=task_thread_create(a,b,c,sp); break;
+    }
+    case SYS_THREAD_JOIN:
+        if (b && !user_buf_ok(b,4,true)) ret=-EFAULT;
+        else ret=task_thread_join(a,(int *)b);
+        break;
+    case SYS_THREAD_MUTEX: {
+        if ((a&3) || !user_buf_ok(a,4,true) || b>1) {ret=-EINVAL;break;}
+        u32 flags=irq_save(); volatile u32 *lock=(u32 *)a;
+        if (b) {
+            if (*lock!=t->id) ret=-EPERM;
+            else { *lock=0; task_wakeup((void *)a); ret=0; }
+        } else {
+            ret=0;
+            while (*lock) {
+                if (*lock==t->id) {ret=-EBUSY;break;}
+                if (t->kill_pending) {ret=-EINTR;break;}
+                task_wait((void *)a);
+                if (!user_buf_ok(a,4,true)) {ret=-EFAULT;break;}
+            }
+            if (!ret) *lock=t->id;
+        }
+        irq_restore(flags); break;
+    }
     case SYS_WRITE:
         ret = sys_write(a, b, c);
         if (ret == -EPIPE) {                /* как SIGPIPE: читателей нет — писатель умирает */
@@ -727,19 +777,19 @@ void syscall_dispatch(struct regs *r) {
     case SYS_READ:    ret = sys_read(a, b, c); break;
     case SYS_OPEN:    ret = sys_open(a, b); break;
     case SYS_MOUNT: {
-        if(!t->authenticated || t->uid!=0) {ret=-EPERM;break;}
+        if(!task_process(t)->authenticated || task_process(t)->uid!=0) {ret=-EPERM;break;}
         char device[128],target[128];
-        ret = !user_str(a,device,sizeof(device)) || !user_str(b,target,sizeof(target)) ? -EFAULT : fs_errno(fs_mount(t->cwd,device,target));
+        ret = !user_str(a,device,sizeof(device)) || !user_str(b,target,sizeof(target)) ? -EFAULT : fs_errno(fs_mount(task_process(t)->cwd,device,target));
         break;
     }
     case SYS_MKFS: {
-        if(!t->authenticated || t->uid!=0) {ret=-EPERM;break;}
+        if(!task_process(t)->authenticated || task_process(t)->uid!=0) {ret=-EPERM;break;}
         char device[128];
         ret=!user_str(a,device,sizeof(device)) ? -EFAULT : fs_errno(fs_mkfs(device));
         break;
     }
     case SYS_PARTCTL: {
-        if(!t->authenticated || t->uid!=0) {ret=-EPERM;break;}
+        if(!task_process(t)->authenticated || task_process(t)->uid!=0) {ret=-EPERM;break;}
         char device[128]; u32 args[3];
         if(!user_str(a,device,sizeof(device)) || !user_buf_ok(c,sizeof(args),false)) { ret=-EFAULT; break; }
         memcpy(args,(const void*)c,sizeof(args));
@@ -794,9 +844,9 @@ void syscall_dispatch(struct regs *r) {
     case SYS_CLOSE:   ret = sys_close(a); break;
     case SYS_LSEEK:   ret = sys_lseek(a, b, c); break;
     case SYS_FSTAT:   ret = sys_fstat(a, b); break;
-    case SYS_SBRK:    ret = (int)sys_sbrk((i32)a); break;
+    case SYS_SBRK: { u32 f=irq_save(); ret=(int)sys_sbrk((i32)a); irq_restore(f); break; }
     case SYS_SLEEP:   sleep_ms(a); ret = 0; break;
-    case SYS_GETPID:  ret = t->id; break;
+    case SYS_GETPID:  ret = task_process(t)->id; break;
     case SYS_TICKS:   ret = timer_ticks() * (1000 / TIMER_HZ); break;
     case SYS_YIELD:   task_yield(); ret = 0; break;
     case SYS_FORK:    ret = proc_errno(proc_fork(r)); break;
@@ -820,7 +870,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_UNLINK:  ret = sys_unlink(a); break;
     case SYS_RENAME:  ret = sys_rename(a, b); break;
     case SYS_PS:      ret = sys_ps(a, b); break;
-    case SYS_GETPPID: ret = t->parent; break;
+    case SYS_GETPPID: ret = task_process(t)->parent; break;
     case SYS_TTYMODE: {
         struct tty *tt = tty_of(t);
         ret = tt ? (int)tty_set_mode(tt, a & 15) : (int)console_set_mode(a & 7);
@@ -847,9 +897,9 @@ void syscall_dispatch(struct regs *r) {
     case SYS_NETINFO:     ret = sys_netinfo(a); break;
     case SYS_PING:        ret = netcfg.up ? net_ping(a, (u16)b, c) : -ENETDOWN; break;
     case SYS_NETCONFIG:   ret = sys_netconfig(a, b); break;
-    case SYS_SHM_ALLOC:   ret = shm_alloc(a); break;
-    case SYS_SHM_MAP:     ret = sys_shm_map(a); break;
-    case SYS_SHM_UNMAP:   ret = shm_unmap(a); break;
+    case SYS_SHM_ALLOC: { u32 f=irq_save(); ret=shm_alloc(a); irq_restore(f); break; }
+    case SYS_SHM_MAP: { u32 f=irq_save(); ret=sys_shm_map(a); irq_restore(f); break; }
+    case SYS_SHM_UNMAP: { u32 f=irq_save(); ret=shm_unmap(a); irq_restore(f); break; }
     case SYS_MSG_SEND:    ret = sys_msg_send(a, b); break;
     case SYS_MSG_RECV:    ret = sys_msg_recv(a, b); break;
     case SYS_UNITCTL: {
@@ -876,7 +926,10 @@ void syscall_dispatch(struct regs *r) {
     r->eax = (u32)ret;
 
     __asm__ volatile ("cli");
+    for (int i=0; i<MAX_FDS; i++) {
+        struct file *f=t->syscall_fds[i]; t->syscall_fds[i]=NULL; file_close(f);
+    }
     t->in_syscall = false;
-    if (t->kill_pending) task_exit_code(t->pending_code ? t->pending_code : 137);  /* убит, пока был в ядре */
+    if (t->kill_pending) task_exit_code(t->pending_code);  /* убит, пока был в ядре */
 }
 

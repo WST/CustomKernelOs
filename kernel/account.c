@@ -102,7 +102,7 @@ static void digest(struct entry *e,const char *pw,u8 out[32]) {
 }
 int account_name(char *out) {
     mutex_lock(&lock);int r=load();struct task *t=task_current();
-    if(!r) { if(!t->authenticated || t->uid>=USERS) r=-EPERM;else memcpy(out,db.users[t->uid].name,24); }
+    if(!r) { if(!task_process(t)->authenticated || task_process(t)->uid>=USERS) r=-EPERM;else memcpy(out,db.users[task_process(t)->uid].name,24); }
     mutex_unlock(&lock);return r;
 }
 /* Public names only: salts and password hashes stay in the kernel. */
@@ -134,18 +134,18 @@ int account_ctl(unsigned op,const char *name,const char *pw) {
     struct task *t=task_current();int r;mutex_lock(&lock);
     r=load();if(r) goto done;
     if(op==0) {r=bootstrap();goto done;}
-    if(op==4) {r=t->authenticated?(int)t->uid:-EPERM;goto done;}
-    if(op==6) {t->authenticated=false;t->uid=0;r=0;goto done;}
+    if(op==4) {r=task_process(t)->authenticated?(int)task_process(t)->uid:-EPERM;goto done;}
+    if(op==6) {task_process(t)->authenticated=false;task_process(t)->uid=0;r=0;goto done;}
     int id=-1;for(int i=0;i<USERS;i++) if(!strcmp(db.users[i].name,name)) id=i;
     if(op==1) {
         u8 h[32];struct entry *e=&db.users[id<0?0:id];digest(e,pw,h);unsigned diff=0;
         for(int i=0;i<32;i++) diff|=h[i]^e->hash[i];
         wipe(h,32);r=-EPERM;
-        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,&home); if(!r) {t->cwd=home;t->uid=id;t->authenticated=true;} }
+        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,&home); if(!r) {task_process(t)->cwd=home;task_process(t)->uid=id;task_process(t)->authenticated=true;} }
         goto done;
     }
     if(op!=2 && op!=3) {r=-EINVAL;goto done;}
-    if(!(bootstrap() && op==3 && id==0) && (!t->authenticated || (op==2?t->uid!=0:(t->uid!=0 && id!=(int)t->uid)))) {r=-EPERM;goto done;}
+    if(!(bootstrap() && op==3 && id==0) && (!task_process(t)->authenticated || (op==2?task_process(t)->uid!=0:(task_process(t)->uid!=0 && id!=(int)task_process(t)->uid)))) {r=-EPERM;goto done;}
     if(!pw[0]) {r=-EINVAL;goto done;}
     if(op==2) {
         if(id>=0) {r=-EEXIST;goto done;}

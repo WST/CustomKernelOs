@@ -53,13 +53,25 @@ bool smp_task_active(struct task *t) {
     for (u32 i=0;i<online;i++) if (cpu_states[i].running==t) return true;
     return false;
 }
+static volatile u32 user_tlb_generation;
+static volatile u32 user_tlb_seen[SMP_MAX_CPUS];
+static void poll_user_tlb(void) {
+    u32 c=smp_cpu(), g=user_tlb_generation;
+    if (user_tlb_seen[c]!=g) {
+        u32 cr3;
+        __asm__ volatile("mov %%cr3,%0; mov %0,%%cr3" : "=r"(cr3) :: "memory");
+        __sync_synchronize(); user_tlb_seen[c]=g;
+    }
+}
 void smp_enter(void) {
     if (!enabled) return;
+    poll_user_tlb();
     u32 me=smp_cpu()+1;
     if (owner==me) return;
     while (__sync_lock_test_and_set(&kernel_lock,1))
-        while (kernel_lock) __asm__ volatile("pause" ::: "memory");
+        while (kernel_lock) { poll_user_tlb(); __asm__ volatile("pause" ::: "memory"); }
     owner=me;
+    poll_user_tlb();
     /* Kernel mappings are shared, but most entries change no mapping.
      * Only flush when another serialized kernel operation changed them. */
     struct cpu_state *local = &cpu_states[me-1];
@@ -92,6 +104,25 @@ static bool ipi(u32 id,u32 command) {
         __asm__ volatile("pause");
     }
     return false;
+}
+void smp_user_tlb_flush(u32 dir) {
+    if (!enabled || online<2) return;
+    bool remote=false;
+    for (u32 c=0;c<online;c++) {
+        struct task *t=cpu_states[c].running;
+        if (c!=smp_cpu() && t && t->page_dir==dir) remote=true;
+    }
+    if (!remote) return;
+    u32 flags=irq_save();
+    u32 generation=++user_tlb_generation;
+    __sync_synchronize();
+    poll_user_tlb();
+    for (u32 c=0;c<online;c++) if(c!=smp_cpu()) {
+        if (!ipi(cpu_apic[c],0x83)) kpanic("TLB IPI delivery failed");
+    }
+    for (u32 c=0;c<online;c++)
+        while (user_tlb_seen[c]!=generation) __asm__ volatile("pause" ::: "memory");
+    irq_restore(flags);
 }
 void smp_tick(void) { if(online>1) ipi(0,0xc0000|0x82); }
 void smp_wake(u32 cpu) {

@@ -217,7 +217,7 @@ int pty_write(struct file *f, const void *buf, u32 len) {
 /* терминал процесса — ведомая сторона pty среди stdin/stdout/stderr (или NULL — консоль) */
 struct tty *tty_of(struct task *t) {
     for (int i = 0; i < 3; i++)
-        if (t->fds[i] && t->fds[i]->type == FILE_PTY_SLAVE) return t->fds[i]->tty;
+        if (task_process(t)->fds[i] && task_process(t)->fds[i]->type == FILE_PTY_SLAVE) return task_process(t)->fds[i]->tty;
     return NULL;
 }
 

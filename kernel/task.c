@@ -22,6 +22,7 @@
 #include "paging.h"
 #include "file.h"
 #include "fb.h"
+#include "syscall.h"
 
 #define CANARY       0xDEADC0DE
 #define CANARY_WORDS 4
@@ -51,6 +52,17 @@ static struct task ap_idle[SMP_MAX_CPUS];
 /* ---------------------------------------------------------------- служебное */
 
 struct task *task_current(void) { return current; }
+struct task *task_process(struct task *t) { return t && t->leader ? t->leader : t; }
+bool task_has_threads(struct task *t) {
+    t = task_process(t);
+    for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && tasks[i]->leader == t) return true;
+    return false;
+}
+static bool process_alive(struct task *p) {
+    for (int i=0; i<MAX_TASKS; i++)
+        if (tasks[i] && task_process(tasks[i]) == p && tasks[i]->state != TASK_ZOMBIE) return true;
+    return false;
+}
 bool tasking_ready(void) { return current != NULL; }
 
 const char *task_state_name(enum task_state s) {
@@ -102,29 +114,42 @@ static void close_all_files(struct task *t) {
 static void make_zombie(struct task *t, int code) {
     if (t->state == TASK_ZOMBIE) return;
     release_mutex(t);
-    close_all_files(t);
+    for (int i=0; i<MAX_FDS; i++) {
+        struct file *f=t->syscall_fds[i]; t->syscall_fds[i]=NULL; file_close(f);
+    }
+    struct task *p = task_process(t);
+    /* A thread exiting must not close the process descriptor table. */
+    if (!t->leader) {
+        for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && tasks[i]->leader == t) {
+            tasks[i]->keep_zombie = false;
+            task_kill(tasks[i]->id);
+        }
+    }
     console_release(t->id);         /* если программа перевела терминал в сырой режим */
     tty_release(t->id);
     fb_release(t->id);              /* если программа захватила экран — вернуть консоль */
     t->exit_code = code;
     t->state = TASK_ZOMBIE;
+    if (!process_alive(p)) close_all_files(p);
+    /* A dead joiner cannot retain another thread forever. */
+    for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && tasks[i]->joiner == t->id) tasks[i]->joiner=0;
 
     /* дети умершего становятся сиротами: их код выхода никто не заберёт */
     for (int i = 0; i < MAX_TASKS; i++) {
         struct task *c = tasks[i];
-        if (c && c->parent == t->id && c->user) {
+        if (c && !c->leader && c->parent == t->id && c->user) {
             c->parent = 0;
             c->keep_zombie = false;     /* ждать его больше некому — пусть reap() уберёт */
         }
     }
     task_wakeup(t);                 /* того, кто ждёт именно эту задачу (task_waitpid) */
-    struct task *p = t->parent ? task_by_id(t->parent) : NULL;
-    if (p) task_wakeup(p);          /* родителя, ждущего любого ребёнка (waitpid -1) */
+    struct task *parent = t->parent ? task_by_id(t->parent) : NULL;
+    if (parent) task_wakeup(parent);          /* родителя, ждущего любого ребёнка (waitpid -1) */
 }
 
 static void free_task(struct task *t) {
-    close_all_files(t);
-    if (t->user && t->page_dir) { shm_release_all(t, t->page_dir); vmm_destroy_dir(t->page_dir); }
+    if (!t->leader) close_all_files(t);
+    if (!t->leader && t->user && t->page_dir) { shm_release_all(t, t->page_dir); vmm_destroy_dir(t->page_dir); }
     msg_free(t);
     kfree(t->stack);
     kfree(t);
@@ -138,8 +163,8 @@ void task_reap(void) {
         struct task *t = tasks[i];
         /* каталог процесса нельзя освобождать, пока он загружен в CR3
          * (у потоков ядра общий каталог ядра — его не освобождаем вовсе) */
-        if (t && t->state == TASK_ZOMBIE && !smp_task_active(t) && !t->keep_zombie &&
-            !(t->user && t->page_dir == vmm_current_dir())) {
+        if (t && t->state == TASK_ZOMBIE && !smp_task_active(t) && !t->keep_zombie && (t->leader || !task_has_threads(t)) &&
+            !(t->user && !t->leader && t->page_dir == vmm_current_dir())) {
             tasks[i] = NULL;
             irq_restore(f);
             free_task(t);
@@ -222,7 +247,7 @@ struct regs *schedule(struct regs *r) {
 struct regs *sched_tick(struct regs *r) {
     if (!current) return r;
     if ((r->cs & 3) && current->kill_pending && !current->in_syscall)
-        make_zombie(current, current->pending_code ? current->pending_code : 137);
+        make_zombie(current, current->pending_code);
     current->cpu_ticks++;
     cpu_states[smp_cpu()].total_ticks++;
     if (current->cpu_idle) cpu_states[smp_cpu()].idle_ticks++;
@@ -384,6 +409,55 @@ struct task *task_alloc_user(const char *name, u32 page_dir, u32 entry, u32 user
 
 /* ---------------------------------------------------------------- завершение */
 
+int task_thread_create(u32 entry, u32 fn, u32 arg, u32 sp) {
+    struct task *p=task_process(current);
+    if (p->state == TASK_ZOMBIE || p->kill_pending) return -EINTR;
+    struct task *t=task_alloc_user(p->name,p->page_dir,entry,sp);
+    if (!t) return -ENOMEM;
+    /* The process owns these defaults; this thread owns no file references. */
+    memset(t->fds,0,sizeof(t->fds));
+    t->leader=p; t->parent=p->id; t->pgid=p->pgid; t->keep_zombie=true;
+    u32 flags=irq_save();
+    if (p->state==TASK_ZOMBIE || p->kill_pending || current->kill_pending) {
+        free_task(t); irq_restore(flags); return -EINTR;
+    }
+    u32 *s=(u32 *)sp; s[0]=0; s[1]=fn; s[2]=arg;
+    u32 id=task_start(t);
+    irq_restore(flags);
+    return id ? (int)id : -EAGAIN;
+}
+int task_thread_join(u32 tid, int *code) {
+    u32 f=irq_save();
+    for (;;) {
+        struct task *t=task_by_id(tid);
+        if (!t || !t->leader || t->leader != task_process(current)) { irq_restore(f); return -ESRCH; }
+        if (t==current || (t->joiner && t->joiner != current->id)) { irq_restore(f); return -EBUSY; }
+        t->joiner=current->id;
+        /* The outgoing CPU must have stopped using the thread's user stack. */
+        if (t->state==TASK_ZOMBIE && !smp_task_active(t)) {
+            if (code) *code=t->exit_code;
+            t->keep_zombie=false;
+            tasks[slot_of(t)]=NULL;
+            free_task(t);
+            irq_restore(f); return 0;
+        }
+        if (current->kill_pending) { t->joiner=0; irq_restore(f); return -EINTR; }
+        task_wait_timeout(t,1);
+    }
+}
+void task_set_pgid(struct task *p, u32 pgid) {
+    for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && task_process(tasks[i])==p) tasks[i]->pgid=pgid;
+}
+void task_exit_group(int code) {
+    __asm__ volatile("cli" ::: "memory");
+    struct task *p=task_process(current);
+    for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && task_process(tasks[i])==p && tasks[i]!=current) {
+        if (tasks[i]->leader) tasks[i]->keep_zombie=false;
+        task_kill(tasks[i]->id);
+    }
+    for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && task_process(tasks[i])==p) tasks[i]->pending_code=code;
+    task_exit_code(code);
+}
 void task_yield(void) {
     __asm__ volatile ("int $0x81");
 }
@@ -402,10 +476,17 @@ int task_kill(u32 id) {
     struct task *t = task_by_id(id);
     if (!t || t->state == TASK_ZOMBIE) { irq_restore(f); return -1; }
     if (t == &task0 || t->cpu_idle) { irq_restore(f); return -2; }
+    if (t->user && !t->leader) {
+        for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && tasks[i]->leader==t) {
+            tasks[i]->keep_zombie=false;
+            task_kill(tasks[i]->id);
+        }
+    }
     if (t->user) {
         /* Always clean up a user process on its own CPU. Even a READY process
          * could start on another CPU if closing its files blocks the killer.
          * Deliver at the next ring-3 timer interrupt or syscall return. */
+        if (!t->kill_pending) t->pending_code=137;
         t->kill_pending = true;
         if (t->state == TASK_SLEEPING || t->state == TASK_BLOCKED) t->state = TASK_READY;
         smp_wake(t->cpu);
@@ -414,7 +495,7 @@ int task_kill(u32 id) {
     }
     need_resched = true;
     irq_restore(f);
-    if (t == current && !irq_nesting) task_yield();
+    if (t == current && !irq_nesting && !t->user) task_yield();
     return 0;
 }
 
@@ -436,7 +517,7 @@ int task_wait_child(int pid, int *code, bool nohang) {
         bool have = false;
         for (int i = 0; i < MAX_TASKS; i++) {
             struct task *c = tasks[i];
-            if (!c || c->parent != current->id || (pid > 0 && c->id != (u32)pid)) continue;
+            if (!c || c->leader || c->parent != task_process(current)->id || (pid > 0 && c->id != (u32)pid)) continue;
             have = true;
             if (c->state == TASK_ZOMBIE) {
                 u32 id = c->id;
@@ -449,7 +530,7 @@ int task_wait_child(int pid, int *code, bool nohang) {
         }
         if (!have) { irq_restore(f); return -1; }
         if (nohang) { irq_restore(f); return 0; }
-        task_wait(current);                  /* make_zombie ребёнка разбудит нас */
+        task_wait(task_process(current));                  /* make_zombie ребёнка разбудит нас */
         if (current->kill_pending) { irq_restore(f); return -2; }
     }
 }
@@ -561,6 +642,10 @@ bool task_fault(struct regs *r, const char *what) {
         kprintf("\n[task %u '%s' killed: %s at EIP=%p]\n", current->id, current->name, what, r->eip);
     }
     vga_set_color(LIGHT_GREY, BLACK);
+    if (current->leader) {
+        task_kill(current->leader->id);
+        current->leader->pending_code=139;
+    }
     make_zombie(current, 139);               /* как SIGSEGV: 128 + 11 */
     return true;
 }

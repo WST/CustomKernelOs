@@ -10,7 +10,7 @@ static int W = 520, H = 400;
 #define VIS ((H - LIST_Y - BOTTOM_H) / ROW_H)
 
 static window *win;
-static struct proc_info procs[64];
+static struct proc_info procs[256];
 static int n_procs, sel_pid = -1, top;
 static int cpu_hist[60], n_hist;
 static char status[64];
@@ -19,7 +19,7 @@ static bool btn_pressed;
 static const char *states[] = { "ready", "running", "sleeping", "waiting", "zombie" };
 
 static void refresh(void) {
-    n_procs = ps(procs, 64);
+    n_procs = ps(procs, 256);
     if (n_procs < 0) n_procs = 0;
     int busy = 0;
     for (int i = 0; i < n_procs; i++)

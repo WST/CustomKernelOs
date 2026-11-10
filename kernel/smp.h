@@ -18,6 +18,7 @@ u32 smp_count(void);
 void smp_init(void);
 void smp_early_init(void); /* before paging: BIOS data area is in page zero */
 void smp_enter(void);
+void smp_user_tlb_flush(u32 dir);
 void smp_kernel_mapping_changed(void);
 void smp_leave(struct regs *r);
 void smp_idle(void);

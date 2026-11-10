@@ -48,7 +48,8 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
+    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
@@ -153,6 +154,16 @@ void  sleep_ms(unsigned ms);
 int   getpid(void);
 unsigned ticks(void);           /* миллисекунды с момента загрузки */
 void  yield(void);
+
+/* Native threads: caller owns the stack until successful join. Not POSIX pthreads.
+ * Zero-initialize mutexes. Lock/unlock return 0 or negative errno. */
+typedef struct { unsigned owner; } thread_mutex_t;
+int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned stack_size);
+int thread_join(int tid, int *code);
+void thread_exit(int code) __attribute__((noreturn));
+int gettid(void);
+int thread_mutex_lock(thread_mutex_t *m);
+int thread_mutex_unlock(thread_mutex_t *m);
 
 /* процессы в стиле Unix */
 int   spawn(const char *path, char **argv, int stdin_fd); /* -1 inherits stdin */

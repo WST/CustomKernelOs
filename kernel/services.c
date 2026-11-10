@@ -211,7 +211,7 @@ static int reload(void) {
 int services_ctl(unsigned op, const char *name, struct unit_info *out, unsigned index) {
     if (!ready) return -ENODEV;
     if (op > UNIT_RELOAD) return -EINVAL;
-    if (op >= UNIT_START && (!task_current()->authenticated || task_current()->uid)) return -EPERM;
+    if (op >= UNIT_START && (!task_process(task_current())->authenticated || task_process(task_current())->uid)) return -EPERM;
     mutex_lock(&lock);
     int r = 0;
     if (op == UNIT_RELOAD) r = reload();

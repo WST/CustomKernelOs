@@ -193,6 +193,17 @@ int   getpid(void)                               { return syscall3(SYS_GETPID, 0
 unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }
 void  yield(void)                                { syscall3(SYS_YIELD, 0, 0, 0); }
 int   spawn(const char *path, char **argv, int stdin_fd) { return syscall3(SYS_SPAWN, (int)path, (int)argv, stdin_fd); }
+static void thread_entry(void (*fn)(void *), void *arg) {
+    fn(arg); thread_exit(0);
+}
+int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned size) {
+    return syscall5(SYS_THREAD_CREATE,(int)thread_entry,(int)fn,(int)arg,(int)stack,size);
+}
+int thread_join(int tid,int *code) { return syscall3(SYS_THREAD_JOIN,tid,(int)code,0); }
+void thread_exit(int code) { syscall3(SYS_THREAD_EXIT,code,0,0); for (;;) {} }
+int gettid(void) { return syscall3(SYS_GETTID,0,0,0); }
+int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,0,0); }
+int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
 int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
 int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
@@ -662,7 +673,7 @@ static int size_class(size_t n, size_t *rounded) {
     }
 }
 
-void *malloc(size_t n) {
+static void *malloc_unlocked(size_t n) {
     if (n == 0) n = 1;
     if (n > 0x40000000u) return NULL;
     size_t sz;
@@ -701,7 +712,7 @@ void *malloc(size_t n) {
     return h + 1;
 }
 
-void free(void *p) {
+static void free_unlocked(void *p) {
     if (!p) return;
     struct hdr *h = (struct hdr *)p - 1;
     if (h->magic != HEAP_MAGIC) return;             /* не наш указатель — не трогаем */
@@ -711,6 +722,19 @@ void free(void *p) {
     free_list[k] = h;
 }
 
+static thread_mutex_t heap_lock;
+void *malloc(size_t n) {
+    thread_mutex_lock(&heap_lock);
+    void *p=malloc_unlocked(n);
+    thread_mutex_unlock(&heap_lock);
+    return p;
+}
+void free(void *p) {
+    if (!p) return;
+    thread_mutex_lock(&heap_lock);
+    free_unlocked(p);
+    thread_mutex_unlock(&heap_lock);
+}
 void *calloc(size_t n, size_t size) {
     void *p = malloc(n * size);
     if (p) memset(p, 0, n * size);

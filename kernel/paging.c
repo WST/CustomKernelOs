@@ -147,8 +147,10 @@ int vmm_map_in(u32 dir, u32 virt, u32 phys, u32 flags) {
     if (user && (virt < USER_BASE || virt >= USER_TOP)) return -1;
     u32 *pte = get_pte((u32 *)dir, virt, true, user);
     if (!pte) return -1;
+    bool replace=(*pte & PG_PRESENT)!=0;
     *pte = FRAME(phys) | (flags & 0xFFF) | PG_PRESENT;
     if (dir == vmm_current_dir()) invlpg(virt);
+    if (replace) smp_user_tlb_flush(dir);
     return 0;
 }
 
@@ -159,6 +161,7 @@ u32 vmm_unmap_in(u32 dir, u32 virt) {
     u32 phys = FRAME(*pte);
     *pte = 0;
     if (dir == vmm_current_dir()) invlpg(virt);
+    smp_user_tlb_flush(dir);
     return phys;
 }
 

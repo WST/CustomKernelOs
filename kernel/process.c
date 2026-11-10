@@ -183,22 +183,22 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
     if (err) return err;
     struct task *t = task_alloc_user(basename(path), im.dir, im.entry, im.sp);
     if (!t) { vmm_destroy_dir(im.dir); return PROC_ENOMEM; }
-    t->brk_start = t->brk = im.brk;
-    t->user_pages = im.pages;
-    t->cwd = cwd;
+    task_process(t)->brk_start = task_process(t)->brk = im.brk;
+    task_process(t)->user_pages = im.pages;
+    task_process(t)->cwd = cwd;
     if (parent) {
-        t->uid = parent->uid;
-        t->authenticated = parent->authenticated;
+        task_process(t)->uid = task_process(parent)->uid;
+        task_process(t)->authenticated = task_process(parent)->authenticated;
         t->parent = parent->id;
         t->pgid = parent->pgid;
         for (int i=0; i<MAX_FDS; i++) {
-            file_close(t->fds[i]);
-            t->fds[i] = file_dup(parent->fds[i]);
+            file_close(task_process(t)->fds[i]);
+            task_process(t)->fds[i] = file_dup(task_process(parent)->fds[i]);
         }
     }
-    if (input) { file_close(t->fds[0]); t->fds[0] = file_dup(input); }
+    if (input) { file_close(task_process(t)->fds[0]); task_process(t)->fds[0] = file_dup(input); }
     if (log) {
-        for (int i = 1; i <= 2; i++) { file_close(t->fds[i]); t->fds[i] = file_dup(log); }
+        for (int i = 1; i <= 2; i++) { file_close(task_process(t)->fds[i]); task_process(t)->fds[i] = file_dup(log); }
     }
     t->keep_zombie = fg;                                 /* оболочка заберёт код выхода */
     u32 id = task_start(t);                              /* при неудаче сама освободит всё */
@@ -214,8 +214,8 @@ int proc_spawn_service(const char *path, int argc, char **argv, struct file *log
 }
 
 int proc_spawn_child(const char *path, int argc, char **argv, struct file *input) {
-    struct task *parent = task_current();
-    return spawn(path, parent->cwd, argc, argv, true, NULL, input, parent);
+    struct task *parent = task_process(task_current());
+    return spawn(path, task_process(parent)->cwd, argc, argv, true, NULL, input, parent);
 }
 
 /* ---------------------------------------------------------------- fork
@@ -225,6 +225,7 @@ int proc_spawn_child(const char *path, int argc, char **argv, struct file *input
  * того же самого fork(), но получает 0, а родитель — номер потомка. */
 int proc_fork(struct regs *r) {
     struct task *parent = task_current();
+    if (parent->leader || task_has_threads(parent)) return PROC_EBUSY;
     u32 pages;
     u32 dir = vmm_clone_user(parent->page_dir, &pages);
     if (!dir) return PROC_ENOMEM;
@@ -235,17 +236,17 @@ int proc_fork(struct regs *r) {
     *cr = *r;                                            /* те же регистры... */
     cr->eax = 0;                                         /* ...но fork() вернёт 0 */
 
-    t->brk_start  = parent->brk_start;
-    t->brk        = parent->brk;
-    t->user_pages = pages;
-    t->uid = parent->uid;
-    t->authenticated = parent->authenticated;
-    t->cwd        = parent->cwd;
+    task_process(t)->brk_start  = task_process(parent)->brk_start;
+    task_process(t)->brk        = task_process(parent)->brk;
+    task_process(t)->user_pages = pages;
+    task_process(t)->uid = task_process(parent)->uid;
+    task_process(t)->authenticated = task_process(parent)->authenticated;
+    task_process(t)->cwd        = task_process(parent)->cwd;
     t->parent     = parent->id;
     t->pgid       = parent->pgid;
     t->keep_zombie = true;                               /* родитель заберёт код в waitpid */
     fpu_copy_current(t);                                 /* и регистры FPU тоже копия */
-    for (int i = 0; i < MAX_FDS; i++) t->fds[i] = file_dup(parent->fds[i]);
+    for (int i = 0; i < MAX_FDS; i++) task_process(t)->fds[i] = file_dup(task_process(parent)->fds[i]);
 
     u32 id = task_start(t);
     return id ? (int)id : PROC_EAGAIN;
@@ -258,8 +259,9 @@ int proc_fork(struct regs *r) {
  * не удалось, процесс продолжает жить со старой и получает ошибку. */
 int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
     struct task *t = task_current();
+    if (t->leader || task_has_threads(t)) return PROC_EBUSY;
     struct image im;
-    int err = load_image(path, t->cwd, argc, argv, &im);
+    int err = load_image(path, task_process(t)->cwd, argc, argv, &im);
     if (err) return err;
 
     u32 old = t->page_dir;
@@ -267,8 +269,8 @@ int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
     vmm_switch(im.dir);                                  /* уходим со старого каталога... */
     shm_release_all(t, old);                             /* общую память — отпустить, не освобождая */
     vmm_destroy_dir(old);                                /* ...и только теперь его освобождаем */
-    t->brk_start = t->brk = im.brk;
-    t->user_pages = im.pages;
+    task_process(t)->brk_start = task_process(t)->brk = im.brk;
+    task_process(t)->user_pages = im.pages;
     fpu_reset_current();                                 /* новой программе — чистый FPU */
     const char *b = basename(path);
     u32 n = strlen(b);
