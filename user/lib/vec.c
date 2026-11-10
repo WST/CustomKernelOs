@@ -378,7 +378,7 @@ static void raster(gfx_path *p, int mode, color_t c0, color_t c1, int gy0, int g
             if (v <= 0) continue;
             if (v > 255) v = 255;
             v = (v * ak) >> 8;
-            row[i] = gfx_mix(row[i], col, v);
+            row[i] = v >= 255 ? col : gfx_mix(row[i], col, v);
         }
     }
 }
@@ -397,10 +397,33 @@ void path_mask(gfx_path *p, uint8_t *mask, int x, int y, int w, int h) {
 
 void gfx_round_rect_ex(int x, int y, int w, int h, int r, int corners, color_t c, int alpha) {
     gfx_path p;
-    if (w <= 0 || h <= 0) return;
+    if (w <= 0 || h <= 0 || alpha <= 0) return;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
+    /* Integer-aligned interior pixels have full coverage. Only the corner bands
+     * need the 16-subrow rasterizer; retain the original path there for identical AA. */
+    int solid_alpha = (255 * (alpha + (alpha >> 7))) >> 8;
+    if (r <= 0 || !(corners & 15)) {
+        gfx_fill_rect_a(x,y,w,h,c,solid_alpha);
+        return;
+    }
+    int bx0,by0,bx1,by1;
+    gfx_bounds(&bx0,&by0,&bx1,&by1);
+    if (x >= bx1 || y >= by1 || x+w <= bx0 || y+h <= by0) return;
+    gfx_fill_rect_a(x,y+r,w,h-2*r,c,solid_alpha);
     path_begin(&p, 0, 0, 1, 1);
     path_round_rect_ex(&p, x, y, w, h, r, corners);
-    path_fill(&p, c, alpha);
+    int cx,cy,cw,ch,clipped=gfx_clip_get(&cx,&cy,&cw,&ch);
+    int top=y+r<by1?y+r:by1,bottom=y+h-r>by0?y+h-r:by0;
+    if (top>by0) {
+        gfx_set_clip(bx0,by0,bx1-bx0,top-by0);
+        path_fill(&p,c,alpha);
+    }
+    if (by1>bottom) {
+        gfx_set_clip(bx0,bottom,bx1-bx0,by1-bottom);
+        path_fill(&p,c,alpha);
+    }
+    if(clipped)gfx_set_clip(cx,cy,cw,ch);else gfx_no_clip();
     path_free(&p);
 }
 

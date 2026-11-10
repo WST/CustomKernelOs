@@ -134,6 +134,9 @@ static char *links[MAX_LINKS];
 static int link_node[MAX_LINKS];           /* узел DOM ссылки (для событий JS) или -1 */
 static int n_links;
 static int doc_h, scroll;
+static unsigned paint_epoch;
+static int paint_damage_top,paint_damage_bottom;
+static unsigned scroll_reuse_frames;
 
 struct input { int form; char name[40]; char value[128]; char type; int item; int node; };   /* type: t текст, s кнопка, h скрытое */
 static struct input inputs[MAX_INPUTS];
@@ -1179,6 +1182,7 @@ static void style_close(struct frame *f) {
 
 /* разобрать HTML и разложить */
 static void layout_html(const char *s, int n, bool plain) {
+    paint_epoch++;
     sel_item = sel_end_item = -1; text_drag = false;
     input_all = false;
     n_flex_fragments = 0;
@@ -1479,6 +1483,10 @@ static void copy_page_selection(void) {
 
 static void page_clip_bounds(int clip,int *x0,int *y0,int *x1,int *y1) {
     *x0=0;*y0=VIEW_Y;*x1=view_w();*y1=VIEW_Y+VIEW_H;
+    if(paint_damage_bottom>paint_damage_top) {
+        if(paint_damage_top>*y0)*y0=paint_damage_top;
+        if(paint_damage_bottom<*y1)*y1=paint_damage_bottom;
+    }
     for(int depth=0;clip>=0 && clip<n_boxes && depth<256;depth++) {
         struct box *b=&boxes[clip];int y=b->y-scroll+VIEW_Y,h=b->clip_height>=0?b->clip_height:b->h;
         if(b->x>*x0)*x0=b->x;
@@ -1497,6 +1505,8 @@ static int page_clip_contains(int clip,int x,int y) {
     int x0,y0,x1,y1;page_clip_bounds(clip,&x0,&y0,&x1,&y1);return x>=x0 && x<x1 && y>=y0 && y<y1;
 }
 static void draw_page(void) {
+    int dirty_top=paint_damage_bottom>paint_damage_top?paint_damage_top:VIEW_Y;
+    int dirty_bottom=paint_damage_bottom>paint_damage_top?paint_damage_bottom:VIEW_Y+VIEW_H;
     page_clip(-1);
     gfx_fill_rect(0, VIEW_Y, W, VIEW_H, page_bg >= 0 ? (color_t)page_bg : C_WHITE);
     if (page_is_dom && !n_items && dom_module_scripts() && dom_last_error()[0]) {
@@ -1510,7 +1520,7 @@ static void draw_page(void) {
         struct box *b = &boxes[i];
         page_clip(b->clip);
         int y = b->y - scroll + VIEW_Y;
-        if (y + b->h < VIEW_Y || y > VIEW_Y + VIEW_H || b->h <= 0) continue;
+        if (y + b->h < dirty_top || y > dirty_bottom || b->h <= 0) continue;
         if (b->bg >= 0) {
             int radius=clampi(b->radius,0,(b->w<b->h?b->w:b->h)/2);
             if (radius) gfx_round_rect(b->x,y,b->w,b->h,radius,b->bg);
@@ -1526,7 +1536,7 @@ static void draw_page(void) {
         if (it->kind != IT_FILL) continue;
         page_clip(it->clip);
         int y = it->y - scroll + VIEW_Y, h = it->h + it->below;
-        if (y + h < VIEW_Y - 32 || y > VIEW_Y + VIEW_H) continue;
+        if (y + h < dirty_top - 32 || y > dirty_bottom) continue;
         if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, h, it->bg);
         if (it->color != TRANSPARENT) gfx_rect(it->x, y, it->w, h, it->color);
     }
@@ -1534,7 +1544,7 @@ static void draw_page(void) {
         struct item *it = &items[i];
         page_clip(it->clip);
         int y = it->y - scroll + VIEW_Y;
-        if (y + it->h < VIEW_Y - 32 || y > VIEW_Y + VIEW_H) continue;
+        if (y + it->h < dirty_top - 32 || y > dirty_bottom) continue;
         switch (it->kind) {
         case IT_TEXT:
             if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, it->h, it->bg);
@@ -1611,11 +1621,42 @@ static void draw_page(void) {
     }
 }
 
+static struct {
+    unsigned epoch;
+    int valid,w,h,scroll,focus,selection,editing,loading,dirty;
+    color_t *pixels;
+} painted;
+
 static void redraw(void) {
-    draw_page();
-    draw_toolbar();
-    draw_status();
-    win_update(win);
+    int delta=scroll-painted.scroll,step=delta<0?-delta:delta;
+    int reuse=painted.valid && painted.pixels==win->pixels && painted.w==W && painted.h==H &&
+        painted.epoch==paint_epoch && step>0 && step<VIEW_H &&
+        focus_input<0 && painted.focus<0 && !page_selection() && !painted.selection &&
+        !editing_addr && !painted.editing && !loading && !painted.loading && !dom_dirty && !painted.dirty;
+    if(reuse) {
+        /* Shared window pixels remain the backing store. Copy the overlap by
+         * words, then rasterize only the newly exposed strip. The scrollbar is
+         * repainted separately by draw_page, while the browser chrome stays put. */
+        color_t *base=win->pixels+VIEW_Y*W;
+        int count=(VIEW_H-step)*W;
+        if(delta>0) {
+            color_t *src=base+step*W;
+            for(int i=0;i<count;i++)base[i]=src[i];
+            paint_damage_top=VIEW_Y+VIEW_H-step;paint_damage_bottom=VIEW_Y+VIEW_H;
+        } else {
+            color_t *dst=base+step*W;
+            for(int i=count;i>0;i--)dst[i-1]=base[i-1];
+            paint_damage_top=VIEW_Y;paint_damage_bottom=VIEW_Y+step;
+        }
+        draw_page();paint_damage_top=paint_damage_bottom=0;
+        win_update_rect(win,0,VIEW_Y,W,VIEW_H);
+        scroll_reuse_frames++;
+    } else {
+        draw_page();draw_toolbar();draw_status();win_update(win);
+    }
+    painted.valid=1;painted.pixels=win->pixels;painted.w=W;painted.h=H;painted.scroll=scroll;
+    painted.epoch=paint_epoch;painted.focus=focus_input;painted.selection=page_selection();
+    painted.editing=editing_addr;painted.loading=loading;painted.dirty=dom_dirty;
 }
 
 static bool verbose;                /* browser -v: строки статуса ещё и в stdout (видно на COM1) */
@@ -2321,6 +2362,7 @@ static bool img_more;               /* на странице, может быт�
 static unsigned img_last_relayout;
 
 static void img_drop(struct imgent *e) {
+    paint_epoch++;
     if (e->sc && e->sc != e->px) free(e->sc);
     free(e->px);
     e->px = e->sc = NULL;
@@ -2354,6 +2396,7 @@ static void img_trim(int need) {
 }
 
 static void img_store(struct imgent *e, const unsigned char *data, int len) {
+    paint_epoch++;
     img im;
     int side = W > 1600 ? W : 1600;
     int iw = 0, ih = 0;

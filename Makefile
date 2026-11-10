@@ -237,6 +237,12 @@ $(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
 $(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
 	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
 
+# Native browser paint/scroll benchmark (not installed by default).
+$(BUILD)/user/browser-paint.o: tests/browser_paint.c user/browser.c user/lib/dom.h user/lib/gfx.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/browser-paint: $(BUILD)/user/browser-paint.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
+
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
 CC_OBJS := $(patsubst user/cc/%.c,$(BUILD)/user/cc_%.o,$(CC_SRC))
@@ -380,6 +386,15 @@ x509test: | $(BUILD)
 
 # Весь браузер (загрузка, DOM, JS, CSS, раскладка, картинки) на Linux с AddressSanitizer:
 #   build/browser-host страница.html [w 1280] [scroll] [click] [keys] [images] [timers 500] [shot f.ppm]
+# Optimized host benchmark; sanitizer builds are used separately by browsertest.
+$(BUILD)/browser-bench: tests/browser_host.c tests/browser_compat.h user/browser.c user/lib/dom_prelude.h $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/svg.c | $(BUILD)
+	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/lib \
+	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
+	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
+.PHONY: browserbench
+browserbench: $(BUILD)/browser-bench
+	./$(BUILD)/browser-bench tests/web/layout.html w 1920 h 600 bench 500
+
 browsertest: user/lib/dom_prelude.h | $(BUILD)
 	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \

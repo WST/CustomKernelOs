@@ -10,6 +10,7 @@
  *     shot F.ppm   снимок окна
  *     dump F.html  сохранить текущий DOM с атрибутами и классами
  *     click-text S щёлкнуть по текстовому фрагменту S
+ *     bench N      замерить N отрисовок и шагов прокрутки, затем до 20 раскладок
  *
  * Рабочий стол и сеть заменены заглушками: окно — просто буфер в памяти, http(s)
  * отвечает «нет такого хоста», file:/путь читает файлы Linux. */
@@ -225,6 +226,23 @@ int main(int argc, char **argv) {
     printf("load: %u ms, items %d, links %d, doc_h %d; %s\n", ticks() - t0, n_items, n_links, doc_h, status);
     for (int i = 2; i < argc; i++) {
         const char *c = argv[i];
+        if (!strcmp(c,"bench") && i+1<argc) {
+            int count=atoi(argv[++i]);if(count<1 || count>10000)return 1;
+            redraw();unsigned start=ticks();
+            for(int k=0;k<count;k++)draw_page();
+            unsigned paint=ticks()-start;start=ticks();
+            for(int k=0;k<count;k++){draw_toolbar();draw_status();}
+            unsigned chrome=ticks()-start;start=ticks();int saved=scroll;
+            unsigned reused_before=scroll_reuse_frames;
+            for(int k=0;k<count;k++){scroll_by(k%2?-48:48);redraw();}
+            unsigned scrolling=ticks()-start,reused=scroll_reuse_frames-reused_before;scroll=saved;
+            start=ticks();int layouts=count<20?count:20;
+            for(int k=0;k<layouts;k++)relayout(true);
+            unsigned layout_ms=ticks()-start;redraw();
+            printf("bench: %d frames paint=%u ms chrome=%u ms scroll=%u ms (%u reused); %d layouts=%u ms\n",
+                   count,paint,chrome,scrolling,reused,layouts,layout_ms);
+            continue;
+        }
         if (!strcmp(c,"dump") && i+1<argc) {
             jsval result;
             const char *expr="document.documentElement.outerHTML";

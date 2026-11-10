@@ -19,7 +19,86 @@ static void compat_page(const char *html) {
     relayout(false);
 }
 
+static void compat_round_rects(void) {
+    color_t *saved=gfx_buf;int sw=gfx_w,sh=gfx_h,cx,cy,cw,ch;
+    int clipped=gfx_clip_get(&cx,&cy,&cw,&ch);
+    color_t *reference=malloc(80*80*4),*fast=malloc(80*80*4);
+    CHECK(reference && fast,"rounded rectangle comparison buffers");
+    if(!reference || !fast) {free(reference);free(fast);return;}
+    unsigned seed=12345;
+    static const int alphas[]={0,1,2,64,127,128,200,254,255};
+    for(int test=0;test<512;test++) {
+        seed=seed*1664525u+1013904223u;
+        int x=(seed&31)-8,y=((seed>>5)&31)-8,w=1+((seed>>10)%75),h=1+((seed>>17)%75);
+        int radius=(int)(seed%48)-3,corners=test&15,alpha=alphas[test%9];
+        for(int k=0;k<80*80;k++)reference[k]=fast[k]=(k*1234567u+seed)&0xffffff;
+        gfx_w=gfx_h=80;gfx_buf=reference;
+        if(test&1)gfx_set_clip(9,13,47,41);else gfx_no_clip();
+        gfx_path p;path_begin(&p,0,0,1,1);path_round_rect_ex(&p,x,y,w,h,radius,corners);
+        path_fill(&p,0x438fce,alpha);path_free(&p);
+        gfx_buf=fast;gfx_round_rect_ex(x,y,w,h,radius,corners,0x438fce,alpha);
+        if(memcmp(reference,fast,80*80*4)) {
+            printf("rounded mismatch: x=%d y=%d w=%d h=%d r=%d corners=%d alpha=%d\n",x,y,w,h,radius,corners,alpha);
+            CHECK(0,"rounded rectangle fast path matches reference pixels");break;
+        }
+    }
+    gfx_buf=saved;gfx_w=sw;gfx_h=sh;
+    if(clipped)gfx_set_clip(cx,cy,cw,ch);else gfx_no_clip();
+    free(reference);free(fast);
+}
+
+static void compat_scroll_frame(int delta,int expected_reuse) {
+    unsigned before=scroll_reuse_frames;
+    scroll_by(delta);redraw();
+    CHECK((scroll_reuse_frames!=before)==expected_reuse,"scroll chooses the appropriate paint path");
+    unsigned *actual=malloc(W*H*4);
+    CHECK(actual!=NULL,"scroll comparison buffer");if(!actual)return;
+    memcpy(actual,win->pixels,W*H*4);
+    draw_page();draw_toolbar();draw_status();
+    CHECK(!memcmp(actual,win->pixels,W*H*4),"retained scrolling matches a full repaint pixel for pixel");
+    free(actual);
+}
+
+static void compat_scrolling(void) {
+    const char *html="<style>body{margin:0;background:#f3f5f8}.card{height:180px;padding:16px;margin:12px;"
+        "border-radius:18px;background:#fb8b24;color:white;box-sizing:border-box}</style>"
+        "<div class=card>First card <a href='/a'>Link</a></div>"
+        "<div style='height:80px;overflow:hidden'><div class=card>Clipped card</div></div>"
+        "<img src='http://test.local/pending.svg' width=96 height=64>"
+        "<div class=card>Third card <input name=q value=test></div>"
+        "<div class=card>Fourth card</div><div class=card>Fifth card</div>"
+        "<div class=card>Sixth card</div><div class=card>Seventh card</div>";
+    static const int widths[]={800,480,1280};
+    for(int k=0;k<3;k++) {
+        resize(widths[k],576);compat_page(html);editing_addr=false;redraw();
+        compat_scroll_frame(48,1);compat_scroll_frame(17,1);compat_scroll_frame(-31,1);
+        compat_scroll_frame(180,1);compat_scroll_frame(-48,1);
+        focus_input=0;compat_scroll_frame(48,0);focus_input=-1;redraw();
+        compat_scroll_frame(12,1);
+        int pending=img_find("http://test.local/pending.svg",false);
+        CHECK(pending>=0,"pending image exists for paint invalidation test");
+        if(pending>=0) {
+            const char *svg="<svg width='96' height='64'><path fill='#123456' d='M0 0H96V64H0Z'/></svg>";
+            img_store(&imgs[pending],(const unsigned char*)svg,strlen(svg));
+            compat_scroll_frame(-48,0);
+        }
+        jsval result;const char *change="document.querySelectorAll('.card')[2].style.backgroundColor='#123456'";
+        CHECK(js_eval(change,strlen(change),"scroll mutation",&result)==0,"scroll mutation fixture executes");
+        relayout(true);compat_scroll_frame(24,0);
+        int selected=-1;
+        for(int i=0;i<n_items;i++)if(items[i].kind==IT_TEXT && items[i].y>=scroll && items[i].y<scroll+VIEW_H) {selected=i;break;}
+        if(selected>=0) {
+            sel_item=sel_end_item=selected;sel_byte=0;sel_end_byte=1;redraw();
+            compat_scroll_frame(12,0);
+            sel_item=sel_end_item=-1;redraw();compat_scroll_frame(-12,1);
+        }
+        compat_scroll_frame(doc_h,0);compat_scroll_frame(-48,1);
+    }
+}
+
 static int compat_tests(void) {
+    compat_round_rects();
+    compat_scrolling();
     resize(800, 576);
     compat_page("<style>.small{display:none}@media(max-width:600px){.small{display:block}.wide{display:none}}"
                 "@media(orientation:portrait){.land{display:none}}"
