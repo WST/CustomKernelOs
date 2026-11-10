@@ -230,10 +230,12 @@ $(BUILD)/user/js: $(BUILD)/user/js.o $(ULIB) $(JS_OBJS) user/user.ld
 # картинки (PNG, GIF, JPEG, BMP) — user/lib/img.c, пока только браузеру
 $(BUILD)/user/l_img.o: user/lib/img.c user/lib/img.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/browser.o: user/lib/img.h
+$(BUILD)/user/l_svg.o: user/lib/svg.c user/lib/svg.h user/lib/gfx.h user/lib/js.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
 
-$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
 
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
@@ -381,7 +383,7 @@ x509test: | $(BUILD)
 browsertest: user/lib/dom_prelude.h | $(BUILD)
 	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
+	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --clipboard-test

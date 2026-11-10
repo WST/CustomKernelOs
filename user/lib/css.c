@@ -27,10 +27,10 @@ enum { S_DISPLAY, S_VIS, S_COLOR, S_BG, S_FW, S_FSTYLE, S_FSIZE, S_TDEC, S_TALIG
        S_MT, S_MR, S_MB, S_ML, S_PT, S_PR, S_PB, S_PL,
        S_BTW, S_BRW, S_BBW, S_BLW, S_BTC, S_BRC, S_BBC, S_BLC, S_BTS, S_BRS, S_BBS, S_BLS,
        S_WIDTH, S_MAXW, S_HEIGHT, S_MAXH, S_OVERFLOW, S_POS, S_LEFT, S_TOP, S_CLIP, S_CLIPPATH, S_TINDENT,
-       S_FLEXDIR, S_BGIMG, S_BOXSIZING, S_COLGAP, S_ROWGAP, S_BASIS, S_FLEXWRAP, S_COUNT };
+       S_FLEXDIR, S_BGIMG, S_BOXSIZING, S_COLGAP, S_ROWGAP, S_BASIS, S_FLEXWRAP, S_GROW, S_SHRINK, S_JUSTIFY, S_ALIGNITEMS, S_ALIGNSELF, S_MINH, S_LINEHEIGHT, S_GRIDCOLS, S_RADIUS, S_RIGHT, S_BOTTOM, S_OPACITY, S_TRANSLATE, S_TRANSFORM, S_COUNT };
 
 /* как достать значение своего свойства из сокращённой записи */
-enum { SH_NONE, SH_BOX, SH_PAIR, SH_BG, SH_FONT, SH_BORDER, SH_LIST, SH_TDEC, SH_FIRST };
+enum { SH_NONE, SH_BOX, SH_PAIR, SH_BG, SH_FONT, SH_BORDER, SH_LIST, SH_TDEC, SH_FIRST, SH_FLEX };
 
 struct pmap { unsigned char slot, sh, idx; };
 struct propdef { const char *name; unsigned char n; struct pmap m[12]; };
@@ -77,7 +77,10 @@ static const struct propdef props[] = {
     { "inline-size", ONE(S_WIDTH) }, { "max-inline-size", ONE(S_MAXW) },
     { "overflow", 1, { { S_OVERFLOW, SH_FIRST, 0 } } }, { "overflow-y", ONE(S_OVERFLOW) },
     { "position", ONE(S_POS) }, { "left", ONE(S_LEFT) }, { "top", ONE(S_TOP) },
-    { "inset", 2, { { S_TOP, SH_BOX, 0 }, { S_LEFT, SH_BOX, 3 } } },
+    { "right", ONE(S_RIGHT) }, { "bottom", ONE(S_BOTTOM) }, { "opacity", ONE(S_OPACITY) }, { "translate", ONE(S_TRANSLATE) }, { "transform", ONE(S_TRANSFORM) },
+    { "inset-inline", 2, { { S_LEFT, SH_PAIR, 0 }, { S_RIGHT, SH_PAIR, 1 } } },
+    { "inset-block", 2, { { S_TOP, SH_PAIR, 0 }, { S_BOTTOM, SH_PAIR, 1 } } },
+    { "inset", BOX4(S_TOP,S_RIGHT,S_BOTTOM,S_LEFT) },
     { "clip", ONE(S_CLIP) }, { "clip-path", ONE(S_CLIPPATH) }, { "text-indent", ONE(S_TINDENT) },
     { "flex-direction", ONE(S_FLEXDIR) }, { "flex-flow", 2, { { S_FLEXDIR, SH_FIRST, 0 }, { S_FLEXWRAP, SH_NONE, 0 } } },
     { "flex-wrap", ONE(S_FLEXWRAP) }, { "-ms-flex-wrap", ONE(S_FLEXWRAP) },
@@ -85,6 +88,12 @@ static const struct propdef props[] = {
     { "box-sizing", ONE(S_BOXSIZING) }, { "-webkit-box-sizing", ONE(S_BOXSIZING) },
     { "column-gap", ONE(S_COLGAP) }, { "row-gap", ONE(S_ROWGAP) },
     { "gap", 2, { { S_ROWGAP, SH_PAIR, 0 }, { S_COLGAP, SH_PAIR, 1 } } },
+    { "grid-template-columns", ONE(S_GRIDCOLS) }, { "border-radius", 1, { { S_RADIUS, SH_FIRST, 0 } } },
+    { "justify-content", ONE(S_JUSTIFY) }, { "align-items", ONE(S_ALIGNITEMS) }, { "align-self", ONE(S_ALIGNSELF) },
+    { "min-height", ONE(S_MINH) }, { "min-block-size", ONE(S_MINH) }, { "block-size", ONE(S_HEIGHT) },
+    { "line-height", ONE(S_LINEHEIGHT) },
+    { "flex-grow", ONE(S_GROW) }, { "flex-shrink", ONE(S_SHRINK) },
+    { "flex", 3, { { S_GROW, SH_FLEX, 0 }, { S_SHRINK, SH_FLEX, 1 }, { S_BASIS, SH_FLEX, 2 } } },
     { "flex-basis", ONE(S_BASIS) }, { "-ms-flex-preferred-size", ONE(S_BASIS) },
 };
 #define N_PROPS ((int)(sizeof(props) / sizeof(props[0])))
@@ -92,7 +101,7 @@ static const struct propdef props[] = {
 /* наследуемые свойства */
 static const unsigned char inherited[S_COUNT] = {
     [S_VIS] = 1, [S_COLOR] = 1, [S_FW] = 1, [S_FSTYLE] = 1, [S_FSIZE] = 1, [S_TDEC] = 1, [S_TALIGN] = 1,
-    [S_TTRANS] = 1, [S_WS] = 1, [S_LIST] = 1,
+    [S_TTRANS] = 1, [S_WS] = 1, [S_LIST] = 1, [S_LINEHEIGHT] = 1,
 };
 
 #define PROP_HASH 256
@@ -282,6 +291,35 @@ static int parse_color(const char *s, int n, int *rgb, double *alpha) {
     }
     if (word_is(s, n, "transparent")) { *rgb = 0; *alpha = 0; return 1; }
     if (word_is(s, n, "currentcolor")) return 2;
+    if (starts(s,"oklch(") || starts(s,"oklab(")) {
+        int polar=starts(s,"oklch(");
+        char buf[160]; int count=n<159?n:159; memcpy(buf,s,count);buf[count]=0;
+        char *p=strchr(buf,'(')+1,*end=strrchr(p,')'); if (!end) return 0; *end=0;
+        for (char *q=p;*q;q++) if (*q=='/') *q=' ';
+        const char *w[4];int wl[4],nw=split_words(p,w,wl,4);
+        if (nw<3) return 0;
+        double L=comp(w[0],wl[0],1),a=comp(w[1],wl[1],.4),b=comp(w[2],wl[2],.4);
+        if (polar) {
+            double h=comp(w[2],wl[2],360);
+            int used=read_num(w[2],&b);
+            if (used<wl[2] && starts(w[2]+used,"turn")) h=b*360;
+            else if (used<wl[2] && starts(w[2]+used,"rad")) h=b*180/3.141592653589793;
+            b=a*js_sin(h*3.141592653589793/180); a*=js_cos(h*3.141592653589793/180);
+        }
+        double l=L+.3963377774*a+.2158037573*b, m=L-.1055613458*a-.0638541728*b, ss=L-.0894841775*a-1.291485548*b;
+        l=l*l*l;m=m*m*m;ss=ss*ss*ss;
+        double channels[3]={4.0767416621*l-3.3077115913*m+.2309699292*ss,
+            -1.2684380046*l+2.6097574011*m-.3413193965*ss,-.0041960863*l-.7034186147*m+1.707614701*ss};
+        *rgb = 0;
+        int value=0;
+        for (int i=0;i<3;i++) {
+            double c=channels[i]; c=c<=.0031308?12.92*c:1.055*js_pow(c,1/2.4)-.055;
+            value=(value<<8)|clamp255(c*255);
+        }
+        *rgb=value;
+        if (nw==4) *alpha=comp(w[3],wl[3],1);
+        return 1;
+    }
     int rgbf = starts(s, "rgb"), hslf = starts(s, "hsl");
     if (rgbf || hslf) {
         const char *p = s;
@@ -686,10 +724,10 @@ static int value_ok(int slot, const char *v, int n) {
 
 /* объявления «a: b; c: d !important» -> блок; ar — где хранить строки */
 static struct dblock *parse_decls(const char *s, int n, struct arena **ar) {
-    struct decl tmp[160];
+    struct decl tmp[512];
     int nd = 0;
     int i = 0;
-    while (i < n && nd < 160) {
+    while (i < n && nd < (int)(sizeof(tmp)/sizeof(tmp[0]))) {
         while (i < n && (is_sp(s[i]) || s[i] == ';')) i++;
         if (i >= n) break;
         int st = i, depth = 0;
@@ -836,6 +874,7 @@ static void add_style_rule(const char *sel, int sn, const char *body, int bn, in
         int depth = 0;
         char q = 0;
         while (*e && (q || *e != ',' || depth)) {
+            if (*e == '\\' && e[1]) { e += 2; continue; }
             if (q) { if (*e == q) q = 0; }
             else if (*e == '"' || *e == '\'') q = *e;
             else if (*e == '(' || *e == '[') depth++;
@@ -869,7 +908,8 @@ static void parse_block(const char *s, int n, const char *base, int author, int 
         char q = 0;
         while (j < n) {
             char c = s[j];
-            if (q) { if (c == '\\') j++; else if (c == q) q = 0; }
+            if (c == '\\' && j+1<n) { j+=2; continue; }
+            if (q) { if (c == q) q = 0; }
             else if (c == '"' || c == '\'') q = c;
             else if (c == '(' || c == '[') dp++;
             else if (c == ')' || c == ']') dp--;
@@ -888,7 +928,8 @@ static void parse_block(const char *s, int n, const char *base, int author, int 
         q = 0;
         while (k < n && d) {
             char c = s[k];
-            if (q) { if (c == '\\') k++; else if (c == q) q = 0; }
+            if (c == '\\' && k+1<n) { k+=2; continue; }
+            if (q) { if (c == q) q = 0; }
             else if (c == '"' || c == '\'') q = c;
             else if (c == '{') d++;
             else if (c == '}') d--;
@@ -900,7 +941,7 @@ static void parse_block(const char *s, int n, const char *base, int author, int 
             else if (starts(s + i, "@supports")) {
                 int t = i + 9;
                 while (t < j && is_sp(s[t])) t++;
-                if (!starts(s + t, "not")) parse_block(s + bs, be - bs, base, author, depth);
+                if (!starts(s + t, "not") && !(j-t>=9 && strstr(s+t,"color-mix(") && strstr(s+t,"color-mix(")<s+j)) parse_block(s + bs, be - bs, base, author, depth);
             } else if (starts(s + i, "@layer") || starts(s + i, "@scope") || starts(s + i, "@document") ||
                        starts(s + i, "@-moz-document")) parse_block(s + bs, be - bs, base, author, depth);
             /* @font-face, @keyframes, @page, @container... — пропускаем */
@@ -914,6 +955,7 @@ static void parse_sheet(const char *s, int n, const char *base, int author, int 
     int o = 0;
     char q = 0;
     for (int i = 0; i < n; i++) {
+        if (s[i] == '\\' && i+1<n) { t[o++]=s[i++]; t[o++]=s[i]; continue; }
         if (!q && s[i] == '/' && i + 1 < n && s[i + 1] == '*') {
             i += 2;
             while (i + 1 < n && !(s[i] == '*' && s[i + 1] == '/')) i++;
@@ -932,6 +974,7 @@ static void parse_sheet(const char *s, int n, const char *base, int author, int 
 
 /* Стиль браузера по умолчанию (как в настоящих браузерах, чуть упрощённо) */
 static const char *ua_sheet =
+    "button,input,select,textarea{display:inline-block}"
     "html,address,blockquote,body,center,div,figure,figcaption,footer,form,header,hr,legend,listing,main,p,plaintext,"
     "pre,xmp,search,article,aside,h1,h2,h3,h4,h5,h6,hgroup,nav,section,dir,dd,dl,dt,menu,ol,ul,fieldset,details,"
     "summary,optgroup,address,frameset,frame,dialog[open]{display:block}"
@@ -1047,8 +1090,60 @@ int dom_layout_children(int id) {
     int count = 0;
     for (dnode *n = d_nodes[id]->first; n; n = n->next)
         if (n->type == DN_ELEMENT && strcmp(n->tag, "script") && strcmp(n->tag, "style") &&
-            strcmp(n->tag, "template") && !css_hidden(n)) count++;
+            strcmp(n->tag, "template") && !css_hidden(n) && (css_style(n)->fixed==0 || css_style(n)->fixed==3)) count++;
     return count;
+}
+
+/* Immediate visible element children, also used by the browser's flex sizing pass. */
+int dom_layout_next(int parent, int previous) {
+    if (parent < 0 || parent >= d_count) return -1;
+    dnode *n = previous >= 0 && previous < d_count ? d_nodes[previous]->next : d_nodes[parent]->first;
+    for (; n; n = n->next)
+        if (n->type == DN_ELEMENT && strcmp(n->tag,"script") && strcmp(n->tag,"style") &&
+            strcmp(n->tag,"template") && !css_hidden(n) && (css_style(n)->fixed==0 || css_style(n)->fixed==3)) return n->id;
+    return -1;
+}
+
+static int intrinsic_node(dnode *n,int (*measure)(const char *,int,int),int depth) {
+    if(depth>32)return 0;
+    if(n->type==DN_TEXT) {
+        char text[256];int used=0,space=0;
+        for(int i=0;i<n->tlen && used<254;i++) {
+            if(is_sp(n->text[i])) {space=used>0;continue;}
+            if(space)text[used++]=' ';
+            space=0;
+            text[used++]=n->text[i];
+        }
+        text[used]=0;const struct dom_style *s=css_style(n->parent);
+        return measure(text,s->font_px,s->bold);
+    }
+    if(n->type!=DN_ELEMENT || css_hidden(n) || !strcmp(n->tag,"script") || !strcmp(n->tag,"style"))return 0;
+    const struct dom_style *s=css_style(n);
+    if(s->fixed==1 || s->fixed==2)return 0;
+    int extra=s->padding[1]+s->padding[3]+s->border[1]+s->border[3];
+    if(s->width>=0 && !s->width_pct)return s->width+(s->border_box?0:extra);
+    if(!strcmp(n->tag,"svg") || !strcmp(n->tag,"img")) {
+        const char *width=dn_get_attr(n,"width"),*src=dn_get_attr(n,"src");
+        int w=width?atoi(width):src?measure(src,-1,0):24;return (w>0?w:24)+extra;
+    }
+    int width=0,line=0,count=0;
+    for(dnode *k=n->first;k;k=k->next) {
+        int w=intrinsic_node(k,measure,depth+1);
+        if(!w)continue;
+        if(s->flex_row) {if(count++)line+=s->column_gap;line+=w;}
+        else if(k->type==DN_ELEMENT && css_style(k)->display!=DS_INLINE && css_style(k)->display!=DS_INLINE_BLOCK) {
+            if(line>width)width=line;
+            line=0;
+            if(w>width)width=w;
+        } else line+=w;
+    }
+    if(line>width)width=line;
+    if(s->max_width>=0 && !s->max_width_pct && width>s->max_width)width=s->max_width;
+    return width+extra;
+}
+int dom_layout_intrinsic(int id,int (*measure)(const char *,int,int)) {
+    if(id<0 || id>=d_count)return 0;
+    return intrinsic_node(d_nodes[id],measure,0);
 }
 
 void css_reset(void) {
@@ -1070,7 +1165,7 @@ struct win { unsigned long long prio; const char *val; unsigned char sh, idx; };
 
 struct cascade {
     struct win w[S_COUNT];
-    struct { const char *name; const char *val; unsigned long long prio; } v[200];
+    struct { const char *name; const char *val; unsigned long long prio; } v[1024];
     int nv;
 };
 
@@ -1081,7 +1176,7 @@ static void apply_block(struct cascade *c, struct dblock *b, unsigned long long 
         if (d->prop < 0) {
             int k;
             for (k = 0; k < c->nv; k++) if (!strcmp(c->v[k].name, d->name)) break;
-            if (k == c->nv) { if (c->nv >= 200) continue; c->nv++; c->v[k].name = d->name; c->v[k].prio = 0; c->v[k].val = NULL; }
+            if (k == c->nv) { if (c->nv >= (int)(sizeof(c->v)/sizeof(c->v[0]))) continue; c->nv++; c->v[k].name = d->name; c->v[k].prio = 0; c->v[k].val = NULL; }
             if (prio >= c->v[k].prio) { c->v[k].prio = prio; c->v[k].val = d->val; }
             continue;
         }
@@ -1175,6 +1270,18 @@ static int sh_part(const char *v, int sh, int idx, char *out, int max) {
     case SH_PAIR:
         if (!n) return 0;
         PUT(idx < n ? idx : 0);
+    case SH_FLEX: {
+        if (n == 1 && word_is(w[0], wl[0], "none")) PUTS(idx == 2 ? "auto" : "0");
+        if (n == 1 && word_is(w[0], wl[0], "auto")) PUTS(idx == 2 ? "auto" : "1");
+        int numbers = 0, basis = -1;
+        for (int i = 0; i < n; i++) {
+            double d;
+            if (read_num(w[i], &d) == wl[i]) { if (numbers++ == idx && idx < 2) PUT(i); }
+            else basis = i;
+        }
+        if (idx == 2 && basis >= 0) PUT(basis);
+        PUTS(idx == 0 ? "1" : idx == 1 ? "1" : "0%");
+    }
     case SH_FIRST:
         if (!n) return 0;
         PUT(0);
@@ -1260,6 +1367,7 @@ static void initial_style(struct cstyle *c) {
     c->s.bg = -1;
     c->s.font_px = 16;
     c->s.width = c->s.max_width = -1;
+    c->s.height = -1; c->s.min_height = 0; c->s.flex_shrink = 100;
     for (int i = 0; i < 4; i++) c->s.border_color[i] = -1;
     c->eff_bg = 0xffffff;
 }
@@ -1361,10 +1469,16 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     /* унаследованное */
     o->color = p->color; o->bold = p->bold; o->italic = p->italic; o->underline = p->underline; o->strike = p->strike;
     o->align = p->align; o->transform = p->transform; o->pre = p->pre; o->nowrap = p->nowrap; o->list = p->list;
+    o->line_height = p->line_height;
     o->font_px = p->font_px; o->notext = p->notext; out->vis_hidden = ps->vis_hidden;
     /* сброшенное */
     o->display = DS_INLINE; o->bg = -1; o->hidden = 0; o->flex_row = 0; o->bg_image = 0;
     o->width = o->max_width = -1; o->width_pct = o->max_width_pct = 0;
+    o->height = -1; o->min_height = 0; o->grid_columns = 0; o->radius = 0; o->fixed=0; o->height_pct=o->position_pct=o->translate_pct=0;
+    o->translate_x=o->translate_y=0;
+    for(int i=0;i<4;i++)o->position_edge[i]=CSS_AUTO;
+    o->flex_grow = 0; o->flex_shrink = 100;
+    o->justify = o->align_items = o->align_self = 0;
     o->border_box = o->flex_wrap = 0; o->column_gap = o->row_gap = 0;
     for (int i = 0; i < 4; i++) { o->margin[i] = o->padding[i] = o->border[i] = 0; o->border_color[i] = -1; }
     struct cstyle init;
@@ -1379,6 +1493,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
             if (s == S_FW) o->bold = 0;
             if (s == S_FSTYLE) o->italic = 0;
             if (s == S_FSIZE) o->font_px = 16;
+            if (s == S_LINEHEIGHT) o->line_height = 0;
             if (s == S_TDEC) o->underline = o->strike = 0;
             if (s == S_TALIGN) o->align = 0;
             if (s == S_TTRANS) o->transform = 0;
@@ -1404,6 +1519,13 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     }
     if (!n->parent || n->parent->type != DN_ELEMENT) root_px = o->font_px;      /* <html> */
     struct lctx L = { o->font_px, root_px, VIEW_W };
+    if ((v = V(S_LINEHEIGHT))) {
+        int l = strlen(v), num = read_num(v, &d);
+        if (starts(v, "normal")) o->line_height = 0;
+        else if (num == l && d >= 0) o->line_height = -clamp_px(d * 100, 1, 10000);
+        else if (parse_len(v, l, &(struct lctx){o->font_px, root_px, o->font_px}, &d) == 1)
+            o->line_height = clamp_px(d, 1, 20000);
+    }
     if ((v = V(S_FW))) {
         if (word_is(v, strlen(v), "bold") || word_is(v, strlen(v), "bolder")) o->bold = 1;
         else if (word_is(v, strlen(v), "normal") || word_is(v, strlen(v), "lighter")) o->bold = 0;
@@ -1467,6 +1589,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     int disp = DS_INLINE;
     if (have[S_DISPLAY] == 2) disp = p->display;
     if ((v = V(S_DISPLAY))) { int dd = parse_display(v); if (dd >= 0) disp = dd; }
+    int grid_raw = disp == DS_GRID || (v && starts(v,"inline-grid"));
     int flex_raw = disp == DS_FLEX || (v && (starts(v, "inline-flex") || starts(v, "-webkit-inline") || starts(v, "-ms-inline-flex") || starts(v, "inline flex")));
     if (flex_raw) {
         const char *fd = V(S_FLEXDIR);
@@ -1478,6 +1601,17 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     if (ps->s.flex_row && (disp == DS_BLOCK || disp == DS_LIST_ITEM || disp == DS_FLEX || disp == DS_GRID || disp == DS_TABLE))
         disp = DS_INLINE_BLOCK;                                 /* элементы flex-строки — в ряд */
     o->display = disp;
+    if (grid_raw) {
+        o->grid_columns=1;
+        const char *cols=V(S_GRIDCOLS);
+        if (cols && starts(cols,"repeat(")) {
+            double count;
+            if (read_num(cols+7,&count)>0 && count>=1 && count<=64) o->grid_columns=(int)count;
+        } else if (cols && strstr(cols,"fr")) {
+            const char *words[64];int sizes[64]; o->grid_columns=split_words(cols,words,sizes,64);
+        }
+        o->flex_row=1; o->flex_wrap=1;
+    }
 
     /* отступы и рамки */
     static const int ms[4] = { S_MT, S_MR, S_MB, S_ML }, pss[4] = { S_PT, S_PR, S_PB, S_PL };
@@ -1503,6 +1637,18 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
             if (o->border_color[i] < 0) o->border[i] = 0;
         }
     }
+    if ((v = V(S_GROW)) && read_num(v, &d) == (int)strlen(v) && d >= 0) o->flex_grow = clamp_px(d * 100, 0, 10000);
+    if ((v = V(S_SHRINK)) && read_num(v, &d) == (int)strlen(v) && d >= 0) o->flex_shrink = clamp_px(d * 100, 0, 10000);
+    if ((v = V(S_JUSTIFY))) o->justify = strstr(v, "center") ? 1 : strstr(v, "end") ? 2 :
+        starts(v, "space-between") ? 3 : starts(v, "space-around") ? 4 : starts(v, "space-evenly") ? 5 : 0;
+    if ((v = V(S_ALIGNITEMS))) o->align_items = strstr(v, "center") ? 1 : strstr(v, "end") ? 2 : strstr(v, "start") ? 3 : 0;
+    if ((v = V(S_ALIGNSELF))) o->align_self = strstr(v, "center") ? 1 : strstr(v, "end") ? 2 : strstr(v, "start") ? 3 : strstr(v, "stretch") ? 4 : 0;
+    if ((v = V(S_HEIGHT))) {
+        if (parse_len(v, strlen(v), &(struct lctx){L.em,L.rem,-1}, &d) == 1) o->height = clamp_px(d, 0, 20000);
+        else if(strchr(v,'%') && read_num(v,&d)>0 && !strstr(v,"calc")) {o->height=clamp_px(d,0,2000);o->height_pct=1;}
+    }
+    if ((v = V(S_MINH)) && parse_len(v, strlen(v), &(struct lctx){L.em,L.rem,-1}, &d) == 1) o->min_height = clamp_px(d, 0, 20000);
+    if ((v=V(S_RADIUS)) && parse_len(v,strlen(v),&L,&d)==1) o->radius=clamp_px(d,0,20000);
     o->border_box = (v = V(S_BOXSIZING)) && starts(v, "border-box");
     if ((v = V(S_COLGAP)) && parse_len(v, strlen(v), &L, &d) == 1) o->column_gap = clamp_px(d, 0, 2000);
     if ((v = V(S_ROWGAP)) && parse_len(v, strlen(v), &L, &d) == 1) o->row_gap = clamp_px(d, 0, 2000);
@@ -1522,6 +1668,32 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     /* спрятан? */
     int hide = disp == DS_NONE || out->vis_hidden;
     const char *pos = V(S_POS);
+    o->fixed=pos?(starts(pos,"fixed")?2:starts(pos,"absolute")?1:starts(pos,"relative")?3:0):0;
+    static const int edge_slots[4]={S_TOP,S_RIGHT,S_BOTTOM,S_LEFT};
+    for(int i=0;i<4;i++)if((v=V(edge_slots[i]))) {
+        if(strchr(v,'%') && read_num(v,&d)>0 && !strstr(v,"calc")) {o->position_edge[i]=clamp_px(d,-2000,2000);o->position_pct|=1<<i;}
+        else if(parse_len(v,strlen(v),&(struct lctx){L.em,L.rem,-1},&d)==1)o->position_edge[i]=clamp_px(d,-20000,20000);
+    }
+    if((v=V(S_TRANSLATE))) {
+        const char *w[3];int wl[3],n=split_words(v,w,wl,3);
+        for(int i=0;i<n && i<2;i++) {
+            short value=0;
+            if((strchr(w[i],'%') && strchr(w[i],'%')<w[i]+wl[i]) && parse_len(w[i],wl[i],&(struct lctx){L.em,L.rem,100},&d)==1) {value=clamp_px(d,-2000,2000);o->translate_pct|=1<<i;}
+            else if(parse_len(w[i],wl[i],&(struct lctx){L.em,L.rem,-1},&d)==1)value=clamp_px(d,-20000,20000);
+            if(i)o->translate_y=value;else o->translate_x=value;
+        }
+    }
+    if(have[S_TRANSLATE]!=1 && (v=V(S_TRANSFORM))) {
+        int axis=starts(v,"translatex(")?0:starts(v,"translatey(")?1:-1;
+        if(axis>=0) {
+            const char *start=strchr(v,'(')+1,*end=strchr(start,')');
+            if(end && parse_len(start,end-start,&(struct lctx){L.em,L.rem,100},&d)==1) {
+                if(strchr(start,'%') && strchr(start,'%')<end)o->translate_pct|=1<<axis;
+                if(axis)o->translate_y=clamp_px(d,-20000,20000);else o->translate_x=clamp_px(d,-20000,20000);
+            }
+        }
+    }
+    if((v=V(S_OPACITY)) && read_num(v,&d)>0 && d<=0) hide=1;
     int abs = pos && (starts(pos, "absolute") || starts(pos, "fixed"));
     double wv = -1, hv = -1, mh = -1, lv = 0, tv = 0;
     if ((v = V(S_WIDTH))) { if (parse_len(v, strlen(v), &L, &d) == 1) wv = d; }
@@ -1529,6 +1701,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     if ((v = V(S_MAXH))) { struct lctx L2 = { L.em, L.rem, -1 }; if (parse_len(v, strlen(v), &L2, &d) == 1) mh = d; }
     const char *ov = V(S_OVERFLOW);
     int clipped = ov && (starts(ov, "hidden") || starts(ov, "clip"));
+    o->clip_overflow=clipped;
     if (abs) {
         if ((v = V(S_LEFT)) && parse_len(v, strlen(v), &L, &d) == 1) lv = d;
         if ((v = V(S_TOP)) && parse_len(v, strlen(v), &L, &d) == 1) tv = d;
