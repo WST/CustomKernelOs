@@ -58,7 +58,7 @@ $(BUILD)/user/spawncheck.o: tests/spawncheck.c user/lib/myos.h | $(BUILD)/user
 $(BUILD)/user/spawncheck: $(BUILD)/user/spawncheck.o $(BUILD)/user/libmyos.a user/user.ld
 	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
 
-$(BUILD)/user/desktop_launchcheck.o: tests/desktop_launchcheck.c user/desktop.c user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/desktop_launchcheck.o: tests/desktop_launchcheck.c user/desktop.c user/desktop_gpu.inc user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/desktop_launchcheck: $(BUILD)/user/desktop_launchcheck.o $(BUILD)/user/l_img.o $(BUILD)/user/libmyos.a user/user.ld
@@ -88,6 +88,7 @@ $(BUILD)/user/smpbench: $(BUILD)/user/smpbench.o $(BUILD)/user/libmyos.a user/us
 FORCE_BUILD_INFO:
 $(BUILD)/build_info.h: FORCE_BUILD_INFO VERSION tools/build_info.py | $(BUILD)
 	python3 tools/build_info.py $@
+$(BUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
 $(BUILD)/sysinfo.o: $(BUILD)/build_info.h
 $(OBJS): user/lib/sysinfo.h
 $(BUILD)/user/libc.o: user/lib/sysinfo.h
@@ -296,6 +297,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
@@ -321,9 +323,11 @@ DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
 QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk
 endif
-# видеокарта: vmware — VMware SVGA II с ускорением 2D и аппаратным курсором (по умолчанию),
-# std — простая Bochs VBE: make run VGA=std
-VGA ?= vmware
+# auto: verified hardware VirGL on Linux/WSL, portable software framebuffer on Mac.
+# GPU=on requires acceleration; GPU=off forces software; VGA=vmware/std overrides auto.
+VGA ?= auto
+GPU ?= auto
+QEMU_VIDEO = python3 tools/run_qemu.py --qemu "$(QEMU)" --gpu "$(GPU)" --vga "$(VGA)" --
 # сеть: карта e1000 за NAT QEMU; HOST_PORT хоста -> порт 80 MyOS (httpd)
 # Другой порт: make run HOST_PORT=8081
 HOST_PORT ?= 8080
@@ -331,10 +335,10 @@ QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80 -rtc base=localt
 
 # всё, что пишет консоль ядра (и browser -v), — ещё и в build/serial.log
 run: all
-	$(QEMU) -smp $(QEMU_CPUS) -m $(QEMU_MEM) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
+	$(QEMU_VIDEO) -smp $(QEMU_CPUS) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
 
 debug: all
-	$(QEMU) -smp $(QEMU_CPUS) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
+	$(QEMU_VIDEO) -smp $(QEMU_CPUS) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
 
 clean:
 	rm -rf $(BUILD)
@@ -474,6 +478,37 @@ cptest: $(BUILD)/cc-host
 	@sh tests/cp.sh $(BUILD)/cp-linux
 
 .PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest
+$(BUILD)/user/gpuscene.o: tests/gpu_scene.c user/desktop.c user/desktop_gpu.inc user/lib/gfx.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/gpuscene: $(BUILD)/user/gpuscene.o $(BUILD)/user/l_img.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
+$(BUILD)/user/mousecheck.o: tests/mousecheck.c user/lib/gfx.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/mousecheck: $(BUILD)/user/mousecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/inputlatency.o: tests/inputlatency.c user/lib/gfx.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/inputlatency: $(BUILD)/user/inputlatency.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+.PHONY: mousetest
+mousetest:
+	python3 tests/mouse_smoke.py
+
+.PHONY: graphicstest
+graphicstest:
+	python3 tests/graphics_launcher_test.py
+	python3 tests/graphics_smoke.py --backend gpu
+	python3 tests/graphics_smoke.py --backend std
+	python3 tests/graphics_smoke.py --backend virtio
+
+$(BUILD)/user/gpucheck.o: tests/gpucheck.c user/lib/gfx.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/gpucheck: $(BUILD)/user/gpucheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
 .SECONDARY:
 
 
@@ -496,6 +531,8 @@ codetest: | $(BUILD)
 	./$(BUILD)/code-document-test
 
 # Settings validates images; the desktop decodes the saved wallpaper.
+$(BUILD)/user/desktop.o: user/desktop_gpu.inc
+
 $(BUILD)/user/settings $(BUILD)/user/desktop: $(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/l_img.o $(ULIB) user/user.ld
 	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
 
@@ -514,6 +551,7 @@ sysinfotest:
 
 # Hardware/USB live build is isolated from the original QEMU boot image.
 HWBUILD := $(BUILD)/hardware
+$(HWBUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
 HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
 $(HWBUILD):
 	mkdir -p $@

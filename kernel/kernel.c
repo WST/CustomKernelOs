@@ -18,6 +18,7 @@
 #include "display.h"
 #include "net.h"
 #include "mouse.h"
+#include "virtinput.h"
 #include "xhci.h"
 #include "bootinfo.h"
 
@@ -77,10 +78,12 @@ void kmain(void) {
         vga_switch_to_fb();
         ok("Graphics: %s, %u MB VRAM, %ux%u, %u bpp -> console %ux%u",
            fi.driver, fi.vram >> 20, fi.width, fi.height, fi.bpp, vga_cols(), vga_rows());
-        if (fi.caps & FB_CAP_GPU)
+        if (fi.caps & FB_CAP_COMPOSITOR)
+            ok("GPU: VirGL textures, shader alpha composition, buffered frames");
+        else if (fi.caps & FB_CAP_GPU)
             ok("GPU 2D acceleration: rect copy, fill%s", fi.caps & FB_CAP_CURSOR ? ", hardware cursor" : "");
     } else {
-        ok("Graphics: no VMware SVGA / Bochs VBE adapter - staying in VGA text mode");
+        ok("Graphics: no supported framebuffer adapter - staying in VGA text mode");
     }
     fpu_init();
     tasking_init();
@@ -90,6 +93,10 @@ void kmain(void) {
     keyboard_init();
     bool have_mouse = mouse_init();
     if (have_mouse && fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }
+    if (virtinput_init()) {
+        if (fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }
+        ok("Input: VirtIO absolute pointer (%s)", virtinput_interrupts() ? "interrupts" : "timer fallback");
+    }
     __asm__ volatile ("sti");
     ok("PIT timer 100 Hz, PS/2 keyboard%s, FPU, interrupts on", have_mouse ? ", PS/2 mouse" : "");
 

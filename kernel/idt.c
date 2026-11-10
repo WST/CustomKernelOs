@@ -102,6 +102,11 @@ void idt_init(void) {
 void idt_reload(void) { idt_load(&idtr); }
 
 void irq_install(int irq, irq_handler_t handler) { irq_handlers[irq] = handler; }
+bool irq_try_install(int irq, irq_handler_t handler) {
+    if (irq < 0 || irq >= 16 || irq_handlers[irq]) return false;
+    irq_handlers[irq] = handler;
+    return true;
+}
 
 static void panic_header(void) {
     __asm__ volatile ("cli");

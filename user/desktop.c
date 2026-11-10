@@ -44,6 +44,7 @@ static int iabs(int v) { return v < 0 ? -v : v; }
 static int SW, SH;                      /* размер экрана */
 static color_t *wallpaper;              /* обои, нарисованные один раз */
 static color_t *back;                   /* сюда собираем кадр */
+static bool gpu_scene, gpu_wallpaper_ready;
 static bool hwcur;                      /* курсор рисует видеокарта */
 static int drag = -1;                   /* окно, которое тащим */
 static int capture = -1;                /* окно, где нажали кнопку */
@@ -131,7 +132,11 @@ static int n_launched;
 
 /* ------------------------------------------------------------ окна */
 
+struct rect { int x, y, w, h; };
+
 struct win {
+    struct rect gpu_damage;
+    bool gpu_dirty;
     bool used;
     int  owner;                         /* pid программы */
     int  shm;
@@ -159,7 +164,6 @@ static int outer_h(struct win *w) { return w->h + HEAD_H; }
 
 /* ------------------------------------------------------------ «грязные» прямоугольники */
 
-struct rect { int x, y, w, h; };
 #define MAXDIRTY 24
 static struct rect dirty[MAXDIRTY];
 static int ndirty;
@@ -432,6 +436,7 @@ static void custom_wallpaper(void) {
 }
 
 static void make_wallpaper(void) {
+    gpu_wallpaper_ready = false;
     wallpaper = malloc(SW * SH * 4);
     color_t *save = gfx_buf;
     int sw = gfx_w, sh = gfx_h;
@@ -986,12 +991,32 @@ static void compose(struct rect r) {
     }
 }
 
+#include "desktop_gpu.inc"
+
 static void flush(void) {
+    gfx_frame_begin();
     for (int i = 0; i < ndirty; i++) {
+        bool scene_ok = gpu_scene && !overview_open;
+        /* During resize the app may still own its previous, smaller buffer. */
+        for (int k = 0; k < nz && scene_ok; k++) {
+            struct win *w = &wins[zorder[k]];
+            if (!w->minimized && (w->bw < w->w || w->bh < w->h)) scene_ok = false;
+        }
+        if (scene_ok && gpu_compose(dirty[i])) continue;
+        if (scene_ok) {
+            /* Rebuild a complete, coherent CPU frame if a GPU resource upload
+             * cannot be satisfied. Never show a half-composited scene. */
+            gpu_scene = false;
+            dprintf(STDERR, "desktop: GPU surface failed; software composition fallback\n");
+            compose(mkrect(0, 0, SW, SH));
+            gfx_flip();
+            break;
+        }
         compose(dirty[i]);
         gfx_flip_rect(dirty[i].x, dirty[i].y, dirty[i].w, dirty[i].h);
     }
     ndirty = 0;
+    gfx_frame_end();
 }
 
 /* ------------------------------------------------------------ сообщения программам */
@@ -1039,6 +1064,7 @@ static void remove_window(int idx) {
     struct win *w = &wins[idx];
     if (!w->used) return;
     if (!w->minimized) dirty_win(w);
+    if (gpu_scene) { gfx_surface_upload(idx * 2, NULL, 0, 0, false); gfx_surface_upload(idx * 2 + 1, NULL, 0, 0, false); }
     shm_unmap(w->px);
     w->used = false;
     int k = 0, j = 0;
@@ -1169,6 +1195,7 @@ static void set_cursor_shape(int shape) {
 static void screen_resized(void) {
     SW = gfx_w; SH = gfx_h;
     back = gfx_buf;
+    gpu_reset();
     free(wallpaper);
     make_wallpaper();
     close_popups();
@@ -1269,6 +1296,7 @@ static void handle_msg(struct msg *m) {
         struct win *w = &wins[idx];
         memset(w, 0, sizeof(*w));
         w->used = true;
+        w->gpu_dirty = true; gpu_content_ready[idx] = false; gpu_frame_hash[idx] = 0;
         w->owner = m->from;
         w->shm = m->a;
         w->px = px;
@@ -1293,10 +1321,14 @@ static void handle_msg(struct msg *m) {
     case WM_UPDATE: {
         if (m->a < 0 || m->a >= MAXWIN || !wins[m->a].used || wins[m->a].owner != m->from) return;
         struct win *w = &wins[m->a];
-        if (w->minimized || overview_open) return;
         int rw = m->d & 0xFFFF, rh = (m->d >> 16) & 0xFFFF;
-        struct rect r = { m->b, m->c, rw, rh }, all = { 0, 0, w->w < w->bw ? w->w : w->bw, w->h < w->bh ? w->h : w->bh };
+        struct rect r = { m->b, m->c, rw, rh }, all = { 0, 0, w->bw, w->bh };
         if (!intersect(r, all, &r)) return;
+        w->gpu_dirty = true;
+        w->gpu_damage = w->gpu_damage.w ? bounding(w->gpu_damage, r) : r;
+        if (w->minimized || overview_open) return;
+        struct rect visible = { 0, 0, w->w, w->h };
+        if (!intersect(r, visible, &r)) return;
         add_dirty(w->x + r.x, w->y + HEAD_H + r.y, r.w, r.h);
         return;
     }
@@ -1330,6 +1362,8 @@ static void handle_msg(struct msg *m) {
         shm_unmap(w->px);
         w->px = px; w->shm = m->b;
         w->bw = m->c; w->bh = m->d;
+        w->gpu_dirty = true; gpu_content_ready[m->a] = false;
+        w->gpu_damage = mkrect(0, 0, 0, 0);
         if (!w->minimized && !overview_open) add_dirty(w->x, w->y + HEAD_H, w->w, w->h);
         request_buffer(m->a);                                     /* пока ждали, рамку могли ещё растянуть */
         return;
@@ -1824,6 +1858,7 @@ int main(void) {
     ttymode(TTY_RAW | TTY_NONBLOCK | TTY_NOSIG);
     SW = gfx_w; SH = gfx_h;
     back = gfx_buf;
+    gpu_reset();
     make_wallpaper();
     dock_build();
     struct mouse ms;
@@ -1832,8 +1867,10 @@ int main(void) {
     prev_buttons = ms.buttons;
     update_clock();
     kb_lang = kblayout(-1);
-    int cw, ch, want_hw = 0;
-    if (gfx_load_config(&cw, &ch, &want_hw) == 0 && want_hw) set_hw_cursor(true);
+    int cw, ch, want_hw = gpu_scene;
+    gfx_load_config(&cw, &ch, &want_hw);
+    if (want_hw) set_hw_cursor(true);
+    dprintf(STDERR, "desktop: %s cursor\n", hwcur ? "independent hardware" : "software");
 start_session:
     quit = false; logout_requested = false;
     if (!desktop_login()) {
@@ -1844,15 +1881,19 @@ start_session:
     mouse_get(&ms);
     prev_buttons = ms.buttons;
     unsigned last_wheel = ms.wheel;
+    gpu_reset();
+    dprintf(STDERR, "desktop: %s compositor\n", gpu_scene ? "GPU/VirGL" : "software");
     add_dirty(0, 0, SW, SH);
     flush();
 
     unsigned last_check = ticks();
     while (!quit) {
+        gfx_frame_begin();
         struct msg m;
-        if (msg_recv(&m, 10) == 0) {
+        if (msg_recv(&m, 100) == 0) {
             handle_msg(&m);
-            while (msg_recv(&m, 0) == 0) handle_msg(&m);
+            /* Give input and presentation a turn even under continuous app updates. */
+            for (int batch=0; batch<15 && msg_recv(&m,0)==0; batch++) handle_msg(&m);
         }
         if (gfx_check_mode()) screen_resized();
         mouse_get(&ms);
@@ -1905,6 +1946,7 @@ start_session:
             check_owners();
         }
         flush();
+        gfx_frame_end();
     }
 
     /* Include terminal shells and background children, even without windows. */

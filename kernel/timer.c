@@ -3,10 +3,11 @@
 #include "idt.h"
 #include "task.h"
 #include "fb.h"
+#include "virtinput.h"
 
 static volatile u32 ticks;
 
-static void timer_irq(struct regs *r) { (void)r; ticks++; fb_tick(); }
+static void timer_irq(struct regs *r) { (void)r; ticks++; virtinput_tick(); fb_tick(); }
 
 void timer_init(void) {
     u32 divisor = 1193182 / TIMER_HZ;   /* базовая частота PIT ~1.193 МГц */

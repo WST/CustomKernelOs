@@ -23,6 +23,8 @@
  * пишет в видеопамять, нужно дождаться, пока карта доделает очередь (SYNC),
  * иначе запоздавшее копирование затрёт свежие пиксели. */
 #include "fb.h"
+#include "virtgpu.h"
+#include "ipc.h"
 #include "pci.h"
 #include "paging.h"
 #include "string.h"
@@ -32,7 +34,8 @@
 static inline void outl(u16 port, u32 v) { __asm__ volatile ("outl %0, %1" : : "a"(v), "Nd"(port)); }
 static inline u32  inl(u16 port) { u32 v; __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
 
-enum { DRV_NONE, DRV_BOCHS, DRV_SVGA, DRV_FIRMWARE };
+enum { DRV_NONE, DRV_BOCHS, DRV_SVGA, DRV_FIRMWARE, DRV_VIRTIO };
+static u32 frame_depth;
 static int drv;
 static bool ready;
 static struct fb_info info;
@@ -241,7 +244,7 @@ bool fb_mode_ok(u32 w, u32 h) {
 static int dx0 = 1 << 30, dy0 = 1 << 30, dx1, dy1;
 
 static void mark(int x, int y, int w, int h) {
-    if (drv != DRV_SVGA || w <= 0 || h <= 0) return;
+    if ((drv != DRV_SVGA && drv != DRV_VIRTIO) || w <= 0 || h <= 0) return;
     u32 f = irq_save();
     if (x < dx0) dx0 = x;
     if (y < dy0) dy0 = y;
@@ -251,7 +254,17 @@ static void mark(int x, int y, int w, int h) {
 }
 
 static void present(void) {
-    if (drv != DRV_SVGA) return;
+    if (drv == DRV_VIRTIO) {
+        u32 f = irq_save();
+        if (dx1 > dx0 && dy1 > dy0) {
+            vgpu_upload(dx0, dy0, dx1 - dx0, dy1 - dy0);
+            dx0 = dy0 = 1 << 30; dx1 = dy1 = 0;
+        }
+        if (!frame_depth) vgpu_commit();
+        irq_restore(f);
+        return;
+    }
+    if (drv != DRV_SVGA || frame_depth) return;
     u32 f = irq_save();
     if (dx1 > dx0 && dy1 > dy0) {
         u32 c[5] = { CMD_UPDATE, dx0, dy0, dx1 - dx0, dy1 - dy0 };
@@ -264,7 +277,8 @@ static void present(void) {
 
 static u32 tick_count;
 void fb_tick(void) {
-    if (!ready) return;
+    if (drv == DRV_VIRTIO) vgpu_cursor_tick();
+    if (!ready || frame_depth) return;
     present();
     if (!gpu_ok && probe_tries && (++tick_count & 7) == 0) gpu_probe();
 }
@@ -319,6 +333,17 @@ int fb_set_mode(u32 w, u32 h) {
     if (!fb_mode_ok(w, h)) return -1;
     if (drv==DRV_FIRMWARE) return 0;
     u32 ow = info.width, oh = info.height;
+    if (drv == DRV_VIRTIO) {
+        u32 f = irq_save();
+        bool ok = vgpu_mode(w, h);
+        if (ok) {
+            info.width = w; info.height = h; info.pitch = w * 4; info.bpp = FB_BPP;
+            stride = w; fb = (volatile u32 *)FB_VIRT; info.gen++;
+            dx0 = dy0 = 1 << 30; dx1 = dy1 = 0;
+        }
+        irq_restore(f);
+        return ok ? 0 : -1;
+    }
     bool ok = drv == DRV_SVGA ? svga_set_mode(w, h) : bochs_set_mode(w, h);
     if (!ok) {                                                    /* не вышло — вернуть старый */
         if (ow) { if (drv == DRV_SVGA) svga_set_mode(ow, oh); else bochs_set_mode(ow, oh); }
@@ -351,7 +376,17 @@ bool fb_init(void) {
         info.max_w=boot->width; info.max_h=boot->height;
         info.caps=FB_CAP_COPY|FB_CAP_FILL; info.gen=1;
         info.driver="BIOS VBE framebuffer";
-    } else if (!svga_init() && !bochs_init()) return false;
+    } else {
+        /* Capture the BIOS font before a VirtIO scanout takes over VGA. */
+        if (vgpu_init(&info)) {
+            grab_font();
+            drv = DRV_VIRTIO;
+            if (fb_set_mode(FB_DEF_W, FB_DEF_H) < 0) return false;
+            ready = true;
+            return true;
+        }
+        if (!svga_init() && !bochs_init()) return false;
+    }
 
     /* отобразить видеопамять в ядро — до создания процессов, тогда эти записи
      * каталога попадут и во все каталоги процессов */
@@ -374,7 +409,8 @@ bool fb_init(void) {
 bool fb_ready(void) { return ready; }
 void fb_get_info(struct fb_info *out) {
     *out = info;
-    if (gpu_ok) out->caps |= FB_CAP_GPU_ON;
+    if (gpu_ok || (drv == DRV_VIRTIO && vgpu_accelerated())) out->caps |= FB_CAP_GPU_ON;
+    if (drv == DRV_VIRTIO && vgpu_accelerated()) out->caps |= FB_CAP_BUFFERED | FB_CAP_COMPOSITOR;
     if (cursor_on) out->caps |= FB_CAP_CURSOR_ON;
 }
 const u8 *fb_font(void) { return font; }
@@ -453,6 +489,16 @@ void fb_copy(int sx, int sy, int dx, int dy, int w, int h) {
     if (sy + h > H) h = H - sy;
     if (dy + h > H) h = H - dy;
     if (w <= 0 || h <= 0 || (sx == dx && sy == dy)) return;
+    bool virtio_copy = drv == DRV_VIRTIO && vgpu_accelerated();
+    if (virtio_copy) {
+        u32 f = irq_save();
+        /* Upload earlier CPU changes before the GPU reads its source. */
+        frame_depth++;
+        present();
+        virtio_copy = vgpu_copy(sx, sy, dx, dy, w, h);
+        frame_depth--;
+        irq_restore(f);
+    }
     if (use_gpu()) {
         u32 f = irq_save();
         present();
@@ -468,7 +514,10 @@ void fb_copy(int sx, int sy, int dx, int dy, int w, int h) {
     } else {                                                      /* та же строка, вправо */
         for (int j = 0; j < h; j++) copy32_back(fb + (dy + j) * stride + dx, fb + (sy + j) * stride + sx, w);
     }
-    mark(dx, dy, w, h);
+    /* Keep the RAM shadow coherent for console drawing and software fallback.
+     * The visible copy itself was executed between GPU textures. */
+    if (!virtio_copy) mark(dx, dy, w, h);
+    if (drv == DRV_VIRTIO && !frame_depth) present();
 }
 
 void fb_scroll(int pixels, u32 bg) {
@@ -492,6 +541,13 @@ void fb_blit(const u32 *src, u32 sstride, int x, int y, int w, int h) {
 
 
 int fb_cursor_define(const u32 *argb, int w, int h, int hot_x, int hot_y) {
+    if (drv == DRV_VIRTIO) {
+        u32 flags=irq_save();
+        bool ok=vgpu_cursor_define(argb,w,h,hot_x,hot_y);
+        cursor_defined=ok;
+        irq_restore(flags);
+        return ok ? 0 : -1;
+    }
     if (drv != DRV_SVGA || !(info.caps & FB_CAP_CURSOR)) return -1;
     if (w <= 0 || h <= 0 || w > 32 || h > 32) return -1;
     if (info.caps & FB_CAP_ALPHA_CURSOR) {
@@ -531,6 +587,13 @@ int fb_cursor_define(const u32 *argb, int w, int h, int hot_x, int hot_y) {
 }
 
 int fb_cursor_enable(bool on) {
+    if (drv == DRV_VIRTIO) {
+        u32 flags=irq_save();
+        bool ok=vgpu_cursor_enable(on);
+        if (ok) cursor_on=on;
+        irq_restore(flags);
+        return ok ? 0 : -1;
+    }
     if (on && (!cursor_defined || drv != DRV_SVGA || !(info.caps & FB_CAP_CURSOR))) return -1;
     u32 f = irq_save();
     cursor_on = on;
@@ -547,6 +610,7 @@ bool fb_cursor_enabled(void) { return cursor_on; }
 void fb_cursor_move(int x, int y) {
     if (!cursor_on) return;
     u32 f = irq_save();
+    if (drv == DRV_VIRTIO) { vgpu_cursor_move(x,y); irq_restore(f); return; }
     svga_write(R_CURSOR_ID, 0);
     svga_write(R_CURSOR_X, x);
     svga_write(R_CURSOR_Y, y);
@@ -557,6 +621,27 @@ void fb_cursor_move(int x, int y) {
 /* ---------------------------------------------------------------- владелец экрана
  * Пока программа рисует сама, консоль не должна поверх неё печатать. */
 static u32 owner;
+void fb_input_notify(void) { if (owner) msg_input_notify(owner); }
+
+void fb_upload_pending(void) {
+    u32 f = irq_save();
+    frame_depth++; present(); frame_depth--;
+    irq_restore(f);
+}
+
+int fb_frame(bool begin) {
+    u32 f = irq_save();
+    if (begin) {
+        if (frame_depth >= 8) { irq_restore(f); return -1; }
+        frame_depth++;
+    } else {
+        if (!frame_depth) { irq_restore(f); return -1; }
+        frame_depth--;
+        if (!frame_depth) present();
+    }
+    irq_restore(f);
+    return 0;
+}
 
 int fb_acquire(u32 pid, bool on) {
     if (!ready) return -1;
@@ -566,6 +651,8 @@ int fb_acquire(u32 pid, bool on) {
         vga_suspend(true);
     } else if (owner == pid) {
         owner = 0;
+        frame_depth = 0; present();
+        if (drv == DRV_VIRTIO) { u32 f = irq_save(); vgpu_surfaces_clear(); irq_restore(f); }
         fb_cursor_enable(false);
         vga_suspend(false);
     }
@@ -575,5 +662,5 @@ int fb_acquire(u32 pid, bool on) {
 bool fb_is_owner(u32 pid) { return owner && owner == pid; }
 
 void fb_release(u32 pid) {
-    if (owner && owner == pid) { owner = 0; fb_cursor_enable(false); vga_suspend(false); }
+    if (owner && owner == pid) fb_acquire(pid, false);
 }

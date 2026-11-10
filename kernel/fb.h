@@ -2,7 +2,9 @@
 #define FB_H
 #include "types.h"
 
-/* Графика. Два драйвера видеокарты:
+/* Графика. Драйверы видеокарт:
+ *   VirtIO-GPU / VirGL — GPU textures, shader alpha composition and hidden
+ *     render targets; VirtIO 2D remains available without VirGL.
  *   VMware SVGA II (QEMU -vga vmware, VirtualBox VMSVGA, VMware) — настоящий
  *     GPU-интерфейс: очередь команд FIFO, аппаратные заливка и копирование
  *     прямоугольников, аппаратный курсор;
@@ -15,7 +17,7 @@
 #define FB_MAX_W   2560
 #define FB_MAX_H   1600
 #define FB_BPP     32
-#define FB_VIRT    0xE0000000u     /* видеопамять в адресном пространстве ядра (до 16 МБ) */
+#define FB_VIRT    0xE0000000u     /* VRAM or private VirtIO upload RAM (up to 16 MB) */
 #define FB_VIRT_SZ 0x01000000u
 #define FIFO_VIRT  0xE2000000u     /* очередь команд SVGA (до 256 КБ) */
 #define FONT_W     8
@@ -29,6 +31,10 @@
 #define FB_CAP_GPU_ON  16          /* ...и в текущем режиме это проверено и работает */
 #define FB_CAP_CURSOR_ON 32        /* аппаратный курсор сейчас включён */
 #define FB_CAP_ALPHA_CURSOR 64     /* ...и он с прозрачностью (ARGB), а не только «есть/нет» */
+
+#define FB_CAP_BUFFERED 128    /* hidden GPU render target, scanout switch at frame end */
+
+#define FB_CAP_COMPOSITOR 256  /* retained GPU textures with source-over alpha composition */
 
 struct fb_info {
     u32 width, height, bpp, pitch;  /* pitch — байт в строке */
@@ -55,6 +61,8 @@ void fb_copy(int sx, int sy, int dx, int dy, int w, int h);    /* на GPU, ес
 void fb_scroll(int pixels, u32 bg);  /* сдвинуть всё изображение вверх */
 /* скопировать прямоугольник из буфера программы (stride пикселей в строке) */
 void fb_blit(const u32 *src, u32 stride, int x, int y, int w, int h);
+void fb_upload_pending(void);       /* preserve CPU-before-GPU command order */
+int fb_frame(bool begin);          /* owner-controlled, nested begin/end frame */
 void fb_tick(void);                 /* из таймера: показать накопленные изменения */
 
 /* аппаратный курсор: картинка 0xAARRGGBB (A = 0 — прозрачно), до 32x32 */
@@ -66,6 +74,7 @@ void fb_cursor_move(int x, int y);  /* из прерывания мыши */
 /* программа, которая рисует сама (консоль на это время молчит) */
 int  fb_acquire(u32 pid, bool on);  /* 0 ок, -1 нет графики, -2 занято */
 bool fb_is_owner(u32 pid);
+void fb_input_notify(void);
 void fb_release(u32 pid);           /* процесс умер — вернуть консоль */
 
 #endif

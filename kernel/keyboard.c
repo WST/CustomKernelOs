@@ -7,6 +7,7 @@
 #include "idt.h"
 #include "task.h"
 #include "process.h"
+#include "fb.h"
 
 static const char map_normal[128] = {
     0, 27, '1','2','3','4','5','6','7','8','9','0','-','=','\b',
@@ -70,6 +71,7 @@ static void keyboard_irq(struct regs *r) {
 }
 
 void kb_scancode(unsigned char sc) {
+    fb_input_notify();
 
     if (sc == 0xE0) { extended = true; return; }
     if (extended) {

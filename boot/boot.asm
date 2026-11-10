@@ -140,7 +140,7 @@ pm_entry:
     mov fs, ax
     mov gs, ax
     mov ss, ax
-    mov esp, 0x90000               ; стек ядра
+    mov esp, 0x9f000               ; стек ядра
     jmp KERNEL_ADDR                ; -> _start в kernel/entry.asm
 
 ; -----------------------------------------------------------------------------

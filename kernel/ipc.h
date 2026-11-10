@@ -19,8 +19,9 @@ int  shm_unmap(u32 addr);
 void shm_release_all(struct task *t, u32 dir);   /* процесс умер или сделал exec */
 
 int  msg_send(u32 pid, const void *msg);         /* msg в памяти ядра, MSG_SIZE байт */
-int  msg_recv(void *msg, int timeout_ms);        /* 0 — не ждать, <0 — ждать вечно */
+int  msg_recv(void *msg, int timeout_ms);        /* 0 — не ждать, <0 — ждать вечно; screen input wakes its owner with -EAGAIN */
 void msg_free(struct task *t);
+void msg_input_notify(u32 pid); /* wake the screen owner without fabricating an IPC message */
 
 int  svc_register(const char *name);
 int  svc_find(const char *name);

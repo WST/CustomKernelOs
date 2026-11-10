@@ -349,7 +349,7 @@ enter_kernel:
     mov fs,ax
     mov gs,ax
     mov ss,ax
-    mov esp,0x90000
+    mov esp,0x9f000
     jmp KERNEL
 [bits 16]
 align 8

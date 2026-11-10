@@ -16,6 +16,7 @@ typedef void (*irq_handler_t)(struct regs *r);
 void idt_init(void);
 void idt_reload(void);
 void irq_install(int irq, irq_handler_t handler);
+bool irq_try_install(int irq, irq_handler_t handler);
 void kpanic(const char *msg) __attribute__((noreturn));
 
 #endif

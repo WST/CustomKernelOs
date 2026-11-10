@@ -45,7 +45,8 @@ static void draw(void) {
     char line[96];
     snprintf(line, sizeof(line), "%s, %u MB video memory", gi.driver, gi.vram_kb / 1024);
     gfx_text(16, 58, line, UI_TEXT, TRANSPARENT);
-    const char *gpu = (gi.caps & GFX_CAP_GPU_ON) ? "on - copy and fill run on the video card"
+    const char *gpu = (gi.caps & GFX_CAP_COMPOSITOR) ? "VirGL - textures, alpha blending, buffered frames"
+                    : (gi.caps & GFX_CAP_GPU_ON) ? "on - copy and fill run on the video card"
                     : (gi.caps & GFX_CAP_GPU) ? "available, waiting for the card..."
                     : "none - the CPU draws everything";
     snprintf(line, sizeof(line), "GPU 2D: %s", gpu);

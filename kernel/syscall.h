@@ -146,6 +146,12 @@ struct gfx_info2 {
     char driver[24];
 };
 #define GA_COPY 1                   /* args: sx, sy, dx, dy, w, h */
+#define GA_SURFACE_UPDATE 8
+#define GA_READBACK 7
+#define GA_SURFACE_UPLOAD 5
+#define GA_SURFACE_BLIT 6
+#define GA_FRAME_BEGIN 3
+#define GA_FRAME_END 4
 #define GA_FILL 2                   /* args: x, y, w, h, цвет */
 struct gfx_cursor { int w, h, hot_x, hot_y; unsigned px[32 * 32]; };
 

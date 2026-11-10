@@ -128,7 +128,15 @@ void shm_release_all(struct task *t, u32 dir) {
 struct mbox {
     u8  msgs[MBOX_LEN][MSG_SIZE];
     int head, count;
+    bool input_pending;
 };
+
+void msg_input_notify(u32 pid) {
+    struct task *t = task_by_id(pid);
+    if (!t || !t->mbox) return; /* IRQ path must never allocate a mailbox. */
+    t->mbox->input_pending = true;
+    task_wakeup(t->mbox);
+}
 
 int msg_send(u32 pid, const void *msg) {
     struct task *to = task_by_id(pid);
@@ -172,6 +180,7 @@ int msg_recv(void *msg, int timeout_ms) {
             irq_restore(f);
             return 0;
         }
+        if (mb->input_pending) { mb->input_pending = false; irq_restore(f); return -EAGAIN; }
         if (timeout_ms == 0) { irq_restore(f); return -EAGAIN; }
         if (timeout_ms > 0) {
             i32 left = (i32)(deadline - timer_ticks());

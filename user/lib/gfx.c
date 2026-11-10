@@ -69,6 +69,22 @@ int gfx_check_mode(void) {
     return 1;
 }
 
+int gfx_surface_upload(int slot, const color_t *pixels, int w, int h, bool alpha) {
+    int a[6] = { slot, (int)pixels, w, h, alpha, 0 };
+    return sc(SYS_GFX_ACCEL, 5, (int)a);
+}
+int gfx_surface_update(int slot, const color_t *pixels, int sw, int sh, int x, int y, int w, int h) {
+    int a[8] = { slot, (int)pixels, sw, sh, x, y, w, h };
+    return sc(SYS_GFX_ACCEL, 8, (int)a);
+}
+int gfx_surface_blit(int slot, int sx, int sy, int dx, int dy, int w, int h) {
+    int a[7] = { slot, sx, sy, dx, dy, w, h };
+    return sc(SYS_GFX_ACCEL, 6, (int)a);
+}
+int gfx_readback(color_t *pixels) { return sc(SYS_GFX_ACCEL, 7, (int)pixels); }
+int gfx_frame_begin(void) { return sc(SYS_GFX_ACCEL, 3, 0); }
+int gfx_frame_end(void) { return sc(SYS_GFX_ACCEL, 4, 0); }
+
 int gfx_hw_copy(int sx, int sy, int dx, int dy, int w, int h) {
     int a[6];
     a[0] = sx; a[1] = sy; a[2] = dx; a[3] = dy; a[4] = w; a[5] = h;

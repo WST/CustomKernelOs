@@ -23,6 +23,7 @@
 #include "string.h"
 #include "process.h"
 #include "fb.h"
+#include "virtgpu.h"
 #include "mouse.h"
 #include "vga.h"
 #include "net.h"
@@ -531,6 +532,45 @@ static int sys_gfx_info2(u32 uout) {
 static int sys_gfx_accel(u32 op, u32 uargs) {
     if (!fb_ready()) return -ENODEV;
     if (!fb_is_owner(task_current()->id)) return -EPERM;
+    if (op == GA_SURFACE_UPDATE) {
+        if (!user_buf_ok(uargs, 8 * 4, false)) return -EFAULT;
+        u32 a[8]; memcpy(a, (const void *)uargs, sizeof(a));
+        if (!a[2] || !a[3] || a[2] > 4096 || a[3] > 4096 || a[2] * a[3] > FB_VIRT_SZ / 4) return -EINVAL;
+        if (!user_buf_ok(a[1], a[2] * a[3] * 4, false)) return -EFAULT;
+        u32 f = irq_save();
+        bool ok = vgpu_surface_update(a[0], (const u32 *)a[1], a[2], a[3], a[4], a[5], a[6], a[7]);
+        irq_restore(f);
+        return ok ? 0 : -EINVAL;
+    }
+    if (op == GA_READBACK) {
+        struct fb_info fi; fb_get_info(&fi);
+        if (!(fi.caps & FB_CAP_COMPOSITOR)) return -ENODEV;
+        if (!user_buf_ok(uargs, fi.width * fi.height * 4, true)) return -EFAULT;
+        u32 f = irq_save();
+        bool ok = vgpu_readback((u32 *)uargs);
+        irq_restore(f);
+        return ok ? 0 : -ENODEV;
+    }
+    if (op == GA_SURFACE_UPLOAD) {
+        if (!user_buf_ok(uargs, 6 * 4, false)) return -EFAULT;
+        u32 a[6]; memcpy(a, (const void *)uargs, sizeof(a));
+        if (a[0] >= VGPU_SURFACE_LIMIT || a[2] > 4096 || a[3] > 4096 || a[2] * a[3] > FB_VIRT_SZ / 4) return -EINVAL;
+        if ((a[2] || a[3]) && (!a[2] || !a[3] || !user_buf_ok(a[1], a[2] * a[3] * 4, false))) return -EFAULT;
+        u32 f = irq_save();
+        bool ok = vgpu_surface_upload(a[0], (const u32 *)a[1], a[2], a[3], a[4] != 0);
+        irq_restore(f);
+        return ok ? 0 : -ENODEV;
+    }
+    if (op == GA_SURFACE_BLIT) {
+        if (!user_buf_ok(uargs, 7 * 4, false)) return -EFAULT;
+        i32 a[7]; memcpy(a, (const void *)uargs, sizeof(a));
+        u32 f = irq_save();
+        fb_upload_pending();
+        bool ok = vgpu_surface_blit(a[0], a[1], a[2], a[3], a[4], a[5], a[6]);
+        irq_restore(f);
+        return ok ? 0 : -EINVAL;
+    }
+    if (op == GA_FRAME_BEGIN || op == GA_FRAME_END) return fb_frame(op == GA_FRAME_BEGIN) < 0 ? -EINVAL : 0;
     if (!user_buf_ok(uargs, 6 * 4, false)) return -EFAULT;
     const i32 *a = (const i32 *)uargs;
     if (op == GA_COPY) { fb_copy(a[0], a[1], a[2], a[3], a[4], a[5]); return 0; }

@@ -13,6 +13,7 @@ static void show(void) {
     printf("Resolution: %ux%u, %u bpp, %u bytes per line\n", gi.width, gi.height, gi.bpp, gi.pitch);
     printf("GPU 2D:     %s\n", (gi.caps & GFX_CAP_GPU_ON) ? "on (rect copy and fill on the card)" :
                             (gi.caps & GFX_CAP_GPU) ? "supported, not active yet" : "no (CPU)");
+    printf("Composition: %s\n", (gi.caps & GFX_CAP_COMPOSITOR) ? "GPU textures, alpha blending, buffered scanout" : "software");
     printf("HW cursor:  %s\n", !(gi.caps & GFX_CAP_CURSOR) ? "not supported" : gi.hw_cursor ? "on" : "off");
     struct gfx_mode m[32];
     int n = gfx_modes(m, 32);

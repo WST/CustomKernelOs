@@ -52,11 +52,19 @@ struct gfx_info2 {
 #define GFX_CAP_GPU       8         /* копирование/заливку умеет сама видеокарта */
 #define GFX_CAP_GPU_ON    16        /* ...и сейчас она это делает */
 #define GFX_CAP_CURSOR_ON 32
+#define GFX_CAP_COMPOSITOR 256  /* retained textures and alpha blending on GPU */
+#define GFX_CAP_BUFFERED 128    /* frame end switches a completed GPU render target */
 #define GFX_CAP_ALPHA_CURSOR 64      /* аппаратный курсор с прозрачностью */
 int  gfx_info2(struct gfx_info2 *gi);
 int  gfx_set_mode(int w, int h);    /* 0 или -EINVAL */
 int  gfx_check_mode(void);          /* 1 — разрешение сменилось, буфер пересоздан */
 /* Прямо на экране, минуя буфер: свой gfx_buf программа поправляет сама. */
+int  gfx_surface_upload(int slot, const color_t *pixels, int w, int h, bool alpha);
+int  gfx_surface_update(int slot, const color_t *pixels, int sw, int sh, int x, int y, int w, int h);
+int  gfx_surface_blit(int slot, int sx, int sy, int dx, int dy, int w, int h);
+int  gfx_readback(color_t *pixels); /* visible GPU scanout; buffer is gfx_w * gfx_h */
+int  gfx_frame_begin(void);
+int  gfx_frame_end(void);
 int  gfx_hw_copy(int sx, int sy, int dx, int dy, int w, int h);
 int  gfx_hw_fill(int x, int y, int w, int h, color_t c);
 int  gfx_hw_cursor(int on);         /* 0 или -ENODEV (нет аппаратного курсора) */

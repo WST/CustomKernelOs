@@ -15,6 +15,8 @@ static i32 max_x = 1023, max_y = 767;
 static u8  packet[4];
 static int packet_size = 3;
 static int idx;
+static bool absolute;
+static u32 absolute_x = 16384, absolute_y = 16384;
 
 static bool wait_write(void) { for (int i = 0; i < 100000; i++) if (!(inb(0x64) & 2)) return true; return false; }
 static bool wait_read(void)  { for (int i = 0; i < 100000; i++) if (inb(0x64) & 1) return true; return false; }
@@ -43,6 +45,7 @@ static void mouse_irq(struct regs *r) {
     idx = 0;
     if (packet[0] & 0xC0) return;                /* переполнение — пакет мусорный */
 
+    if (absolute) return; /* The active VirtIO tablet supplies complete reports. */
     i32 dx = (i32)packet[1] - ((packet[0] << 4) & 0x100);   /* 9-битные числа со знаком */
     i32 dy = (i32)packet[2] - ((packet[0] << 3) & 0x100);
     st.x += dx;
@@ -58,6 +61,7 @@ static void mouse_irq(struct regs *r) {
         st.wheel -= wheel;
     }
     st.events++;
+    fb_input_notify();
     fb_cursor_move(st.x, st.y);                  /* аппаратный курсор двигает сама карта */
 }
 
@@ -88,6 +92,7 @@ bool mouse_init(void) {
 }
 
 void mouse_usb_report(u32 buttons, i32 dx, i32 dy) {
+    if (absolute) return;
     u32 flags=irq_save();
     st.x+=dx; st.y+=dy;
     if (st.x<0) st.x=0;
@@ -95,13 +100,32 @@ void mouse_usb_report(u32 buttons, i32 dx, i32 dy) {
     if (st.x>max_x) st.x=max_x;
     if (st.y>max_y) st.y=max_y;
     st.buttons=buttons&7; st.events++;
+    fb_input_notify();
     fb_cursor_move(st.x,st.y);
+    irq_restore(flags);
+}
+
+void mouse_absolute_enable(bool on) { absolute = on; }
+
+void mouse_absolute_report(u32 buttons, u32 x, u32 y, i32 wheel) {
+    u32 flags = irq_save();
+    absolute_x = x > 32767 ? 32767 : x;
+    absolute_y = y > 32767 ? 32767 : y;
+    st.x = absolute_x * (u32)max_x / 32767;
+    st.y = absolute_y * (u32)max_y / 32767;
+    st.buttons = buttons & 7; st.wheel += wheel; st.events++;
+    fb_input_notify();
+    fb_cursor_move(st.x, st.y);
     irq_restore(flags);
 }
 
 void mouse_set_bounds(i32 w, i32 h) {
     u32 f = irq_save();
     max_x = w - 1; max_y = h - 1;
+    if (absolute) {
+        st.x = absolute_x * (u32)max_x / 32767;
+        st.y = absolute_y * (u32)max_y / 32767;
+    }
     if (st.x > max_x) st.x = max_x;
     if (st.y > max_y) st.y = max_y;
     irq_restore(f);
