@@ -453,6 +453,13 @@ int main(int argc, char **argv) {
             continue;
         }
         if (e.type == EV_KEY) { if (editing_name) name_key(e.key); else text_key(e.key); keep_visible(); }
+        else if (e.type == EV_MOUSE_WHEEL) {
+            if (e.y >= BAR_H && e.y < H - STATUS_H) {
+                top -= e.wheel * 3;
+                if (top > n_lines - VIS_ROWS) top = n_lines - VIS_ROWS;
+                if (top < 0) top = 0;
+            }
+        }
         else if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) { selecting = false; click(e.x, e.y); keep_visible(); }
         else if (e.type == EV_MOUSE_MOVE && selecting) {
             int r = top + (e.y - TEXT_Y) / 16;

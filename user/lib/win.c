@@ -165,6 +165,8 @@ int win_event(struct event *e, int timeout_ms) {
         e->win = find_win(m.a);
         switch (m.type) {
         case WM_KEY: e->type = EV_KEY; e->key = m.b; return 1;
+        case WM_MOUSE_WHEEL:
+            e->type = EV_MOUSE_WHEEL; e->x = m.b; e->y = m.c; e->wheel = m.d; return 1;
         case WM_MOUSE:
             e->x = m.b; e->y = m.c;
             e->buttons = m.d & 0xFF;

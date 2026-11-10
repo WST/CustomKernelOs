@@ -532,9 +532,13 @@ static int sys_gfx_cursor(u32 on, u32 ushape) {
     return 0;
 }
 
-static int sys_mouse(u32 uout) {
-    if (!user_buf_ok(uout, sizeof(struct mouse_state), true)) return -EFAULT;
-    mouse_get((struct mouse_state *)uout);
+static int sys_mouse(u32 uout, u32 size) {
+    /* Old binaries pass zero and expect the original four fields. */
+    u32 bytes = size >= sizeof(struct mouse_state) ? sizeof(struct mouse_state) : 16;
+    if (!user_buf_ok(uout, bytes, true)) return -EFAULT;
+    struct mouse_state state;
+    mouse_get(&state);
+    memcpy((void *)uout, &state, bytes);
     return 0;
 }
 
@@ -826,7 +830,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_GFX_INFO:    ret = sys_gfx_info(a); break;
     case SYS_GFX_ACQUIRE: ret = sys_gfx_acquire(a); break;
     case SYS_GFX_BLIT:    ret = sys_gfx_blit(a, b); break;
-    case SYS_MOUSE:       ret = sys_mouse(a); break;
+    case SYS_MOUSE:       ret = sys_mouse(a, b); break;
     case SYS_GFX_FONT:    ret = sys_gfx_font(a); break;
     case SYS_TERMSIZE: {
         struct tty *tt = tty_of(t);

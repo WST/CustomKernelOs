@@ -12,7 +12,8 @@
 
 static struct mouse_state st;
 static i32 max_x = 1023, max_y = 767;
-static u8  packet[3];
+static u8  packet[4];
+static int packet_size = 3;
 static int idx;
 
 static bool wait_write(void) { for (int i = 0; i < 100000; i++) if (!(inb(0x64) & 2)) return true; return false; }
@@ -38,7 +39,7 @@ static void mouse_irq(struct regs *r) {
     u8 b = inb(0x60);
     if (idx == 0 && !(b & 0x08)) return;        /* потеряли синхронизацию — ждём начала пакета */
     packet[idx++] = b;
-    if (idx < 3) return;
+    if (idx < packet_size) return;
     idx = 0;
     if (packet[0] & 0xC0) return;                /* переполнение — пакет мусорный */
 
@@ -51,6 +52,11 @@ static void mouse_irq(struct regs *r) {
     if (st.x > max_x) st.x = max_x;
     if (st.y > max_y) st.y = max_y;
     st.buttons = packet[0] & 7;
+    if (packet_size == 4) {
+        int wheel = packet[3] & 15;
+        if (wheel & 8) wheel -= 16;
+        st.wheel -= wheel;
+    }
     st.events++;
     fb_cursor_move(st.x, st.y);                  /* аппаратный курсор двигает сама карта */
 }
@@ -65,6 +71,14 @@ bool mouse_init(void) {
     cmd(0x60);
     data(conf);
     if (!mouse_cmd(0xF6)) return false;          /* настройки по умолчанию */
+    /* IntelliMouse negotiation; ordinary mice retain three-byte packets. */
+    packet_size = 3; idx = 0;
+    if (mouse_cmd(0xF3) && mouse_cmd(200) &&
+        mouse_cmd(0xF3) && mouse_cmd(100) &&
+        mouse_cmd(0xF3) && mouse_cmd(80) && mouse_cmd(0xF2) && wait_read()) {
+        u8 id = inb(0x60);
+        if (id == 3 || id == 4) packet_size = 4;
+    }
     if (!mouse_cmd(0xF4)) return false;          /* начать присылать пакеты */
     st.x = (max_x + 1) / 2;
     st.y = (max_y + 1) / 2;

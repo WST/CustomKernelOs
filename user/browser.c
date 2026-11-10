@@ -2831,7 +2831,10 @@ int main(int argc, char **argv) {
             continue;
         }
         if (e.type == EV_CLOSE) break;
-        if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) {
+        if (e.type == EV_MOUSE_WHEEL) {
+            if (e.y >= VIEW_Y && e.y < H - STATUS_H) { scroll_by(-e.wheel * 48); redraw(); }
+        }
+        else if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) {
             int hit = item_at(e.x, e.y);
             if (e.y >= VIEW_Y && e.y < H - STATUS_H && hit >= 0 && items[hit].kind == IT_TEXT) {
                 sel_item = sel_end_item = text_position(e.x, e.y, &sel_byte);

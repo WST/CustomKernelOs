@@ -544,3 +544,10 @@ $(BUILD)/user/terminalwindowcheck: $(BUILD)/user/terminalwindowcheck.o $(ULIB) u
 terminalwindowtest:
 	$(MAKE) build/os.img build/user/terminalwindowcheck install DISK=build/terminal-resize-test.img
 	python3 tests/terminal_window_smoke.py
+
+# Mouse wheel: terminal history on host + PS/2 packets in QEMU.
+.PHONY: wheeltest
+wheeltest: $(BUILD)/os.img
+	$(HOSTCC) -m32 -std=gnu11 -DMYOS_HOST_LIBC -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections -Iuser/lib tests/terminal_history.c -Wl,--gc-sections -o $(BUILD)/terminal-history-test
+	./$(BUILD)/terminal-history-test
+	python3 tests/wheel_smoke.py

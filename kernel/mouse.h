@@ -6,6 +6,7 @@ struct mouse_state {
     i32 x, y;                      /* координаты на экране */
     u32 buttons;                   /* бит 0 левая, 1 правая, 2 средняя */
     u32 events;                    /* счётчик пакетов — видно, что мышь шевелилась */
+    u32 wheel;                    /* cumulative steps, positive = up */
 };
 
 bool mouse_init(void);
