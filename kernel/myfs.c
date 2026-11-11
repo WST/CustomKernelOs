@@ -177,8 +177,10 @@ static u32 map_level(u32 *root, u32 index, bool alloc) {
     if (!*root && (!alloc || !(*root = balloc()))) return 0;
     if (bread(*root, ind)) return 0;
     if (!ind[index] && alloc) {
-        if (!(ind[index] = balloc())) return 0;
-        if (bwrite(*root, ind)) return 0;
+        u32 b = balloc();
+        if (!b) return 0;
+        ind[index] = b;
+        if (bwrite(*root, ind)) { ind[index] = 0; bfree(b); return 0; }
     }
     return ind[index];
 }
@@ -195,7 +197,7 @@ static u32 map_double(u32 *root, u32 idx, bool alloc) {
         u32 b = balloc();
         if (!b) return 0;
         top[slot] = b;
-        if (bwrite(*root, top)) return 0;
+        if (bwrite(*root, top)) { top[slot] = 0; bfree(b); return 0; }
     }
     u32 mid = top[slot];
     return map_level(&mid, idx % NINDIRECT, alloc);
@@ -213,7 +215,7 @@ static u32 map_triple(u32 *root, u32 idx, bool alloc) {
         u32 b = balloc();
         if (!b) return 0;
         top[slot] = b;
-        if (bwrite(*root, top)) return 0;
+        if (bwrite(*root, top)) { top[slot] = 0; bfree(b); return 0; }
     }
     u32 child = top[slot];
     return map_double(&child, idx % NDINDIRECT, alloc);
