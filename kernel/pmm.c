@@ -8,6 +8,7 @@
 #include "pmm.h"
 #include "string.h"
 #include "bootinfo.h"
+#include "idt.h"
 
 #define LOW_RESERVED  0x100000        /* первый 1 МБ не раздаём никогда */
 #define MAX_PHYS      0x40000000u     /* работаем с первым 1 ГБ (выше — память программ, см. paging.h) */
@@ -101,6 +102,7 @@ void pmm_init(void) {
             break;
         }
     }
+    if (!refs) kpanic("no memory for page refcounts");
 
 #ifdef MYOS_HARDWARE
     extern u8 __kernel_start[], __bss_end[];
