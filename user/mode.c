@@ -11,6 +11,8 @@ static void show(void) {
     if (gfx_info2(&gi) < 0) { printf("mode: no graphics (VGA text mode)\n"); return; }
     printf("Adapter:    %s, %u KB video memory\n", gi.driver, gi.vram_kb);
     printf("Resolution: %ux%u, %u bpp, %u bytes per line\n", gi.width, gi.height, gi.bpp, gi.pitch);
+    if(gi.caps&GFX_CAP_FIXED_MODE)
+        printf("Mode switching: driver unavailable; run dmesg | grep VBE\n");
     printf("GPU 2D:     %s\n", (gi.caps & GFX_CAP_GPU_ON) ? "on (rect copy and fill on the card)" :
                             (gi.caps & GFX_CAP_GPU) ? "supported, not active yet" : "no (CPU)");
     printf("Composition: %s\n", (gi.caps & GFX_CAP_COMPOSITOR) ? "GPU textures, alpha blending, buffered scanout" : "software");
@@ -49,6 +51,10 @@ int main(int argc, char **argv) {
     int h = x ? atoi(x + 1) : 0;
     if (w <= 0 || h <= 0) { dprintf(STDERR, "mode: expected WIDTHxHEIGHT, e.g. 1280x720\n"); return 1; }
     if (gfx_set_mode(w, h) < 0) {
+        if(gi.caps&GFX_CAP_FIXED_MODE) {
+            dprintf(STDERR,"mode: video BIOS runtime unavailable; run dmesg | grep VBE\n");
+            return 1;
+        }
         dprintf(STDERR, "mode: %dx%d is not supported (width must be a multiple of 8, max %ux%u)\n",
                 w, h, gi.max_w, gi.max_h);
         return 1;

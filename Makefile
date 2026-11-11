@@ -40,14 +40,16 @@ LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
            $(shell $(LD) --help 2>/dev/null | grep -q no-warn-rwx && echo --no-warn-rwx-segments)
 
 BUILD   := build
+HWBUILD := $(BUILD)/hardware
 DISK    := disk.img
 # Новый disk.img, если файла ещё нет. Готовый образ сам не растёт:
 # build/myfs disk.img grow 8192  (прежний остаётся как disk.img.bak)
 # 4 ГБ — разреженный файл: место на компьютере занимает только записанное.
 # Потолок ФС — 8 ГБ (FS_MAX_BLOCKS). Версия 2 хранит файл любого размера в этих пределах.
 DISK_MB := 4096
+VIDEO_SRC := $(wildcard drivers/video/*.c)
 C_SRC   := $(wildcard kernel/*.c)
-OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
+OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC)) $(patsubst drivers/video/%.c,$(BUILD)/video/%.o,$(VIDEO_SRC))
 
 all: $(BUILD)/os.img install
 
@@ -130,6 +132,14 @@ clipboardtest:
 
 $(BUILD) $(BUILD)/user:
 	mkdir -p $@
+
+$(BUILD)/video/%.o: drivers/video/%.c drivers/video/*.h kernel/*.h
+	mkdir -p $(@D)
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/fb.o $(HWBUILD)/fb.o: drivers/video/video.h
+$(HWBUILD)/video/%.o: drivers/video/%.c drivers/video/*.h kernel/*.h
+	mkdir -p $(@D)
+	$(CC) $(CFLAGS) -DMYOS_HARDWARE -c $< -o $@
 
 # ------------------------------------------------------------------ ядро
 
@@ -743,18 +753,22 @@ sysinfotest:
 	python3 tests/sysinfo_smoke.py
 
 # Hardware/USB live build is isolated from the original QEMU boot image.
-HWBUILD := $(BUILD)/hardware
 $(HWBUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
 $(BUILD)/e1000.o $(HWBUILD)/e1000.o: kernel/e1000_pch.inc
-HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
+EMU_SRC := $(wildcard drivers/video/x86emu/*.c)
+EMU_OBJS := $(patsubst drivers/video/x86emu/%.c,$(HWBUILD)/x86emu/%.o,$(EMU_SRC))
+$(HWBUILD)/x86emu/%.o: drivers/video/x86emu/%.c drivers/video/x86emu/include/*.h drivers/video/emu_port.h drivers/video/emu_io.h
+	mkdir -p $(@D)
+	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -w -c $< -o $@
+HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC)) $(patsubst drivers/video/%.c,$(HWBUILD)/video/%.o,$(VIDEO_SRC))
 $(HWBUILD):
 	mkdir -p $@
 $(HWBUILD)/%.o: kernel/%.c kernel/*.h $(BUILD)/build_info.h | $(HWBUILD)
 	$(CC) $(CFLAGS) -DMYOS_HARDWARE -c $< -o $@
 $(HWBUILD)/%.o: kernel/%.asm | $(HWBUILD)
 	$(NASM) -f elf32 $< -o $@
-$(HWBUILD)/kernel.elf: $(HWOBJS) boot/hardware.ld
-	$(LD) -m elf_i386 -T boot/hardware.ld -nostdlib $(HWOBJS) -o $@
+$(HWBUILD)/kernel.elf: $(HWOBJS) $(EMU_OBJS) boot/hardware.ld
+	$(LD) -m elf_i386 -T boot/hardware.ld -nostdlib --gc-sections $(HWOBJS) $(EMU_OBJS) $(shell $(CC) -m32 -print-libgcc-file-name) -o $@
 $(HWBUILD)/kernel.bin: $(HWBUILD)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
 $(BUILD)/user/consoleload.o: tests/console_load.c user/lib/myos.h | $(BUILD)/user
@@ -775,8 +789,9 @@ consoleloadtest: usb-image $(BUILD)/user/consoleload
 consoletest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/console_output.c -o $(BUILD)/console-output-test
 	./$(BUILD)/console-output-test
+USB_VIDEO ?= auto
 usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
-	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm
+	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm --video "$(USB_VIDEO)"
 usbtest: usb-image
 	python3 tests/hardware_smoke.py
 
@@ -844,3 +859,26 @@ $(BUILD)/user/klogcheck: $(BUILD)/user/klogcheck.o $(ULIB) user/user.ld
 .PHONY: klog-smoke
 klog-smoke: usb-image $(BUILD)/user/klogcheck
 	python3 tests/klog_smoke.py
+
+.PHONY: videodrivertest videotest
+videodrivertest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/video_driver.c -o $(BUILD)/video-driver-test
+	./$(BUILD)/video-driver-test
+videotest: usb-image videodrivertest
+	python3 tests/video_smoke.py
+
+.PHONY: videoruntimetest
+videoruntimetest: usb-image
+	python3 tests/video_runtime_smoke.py
+
+.PHONY: usbmousetest usbmouse-smoke
+usbmousetest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections tests/usb_mouse_test.c -Wl,--gc-sections -o $(BUILD)/usb-mouse-test
+	./$(BUILD)/usb-mouse-test
+usbmouse-smoke: usb-image usbmousetest
+	python3 tests/usb_mouse_smoke.py
+
+.PHONY: nvidia-iotest
+nvidia-iotest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections tests/nvidia_io_test.c -Wl,--gc-sections -o $(BUILD)/nvidia-io-test
+	./$(BUILD)/nvidia-io-test

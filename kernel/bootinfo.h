@@ -5,6 +5,7 @@
 struct boot_info {
     u32 magic, version, root_phys, root_bytes, font_phys;
     u32 fb_phys, width, height, bpp, pitch;
+    u32 bios_snapshot_magic; /* 0x49564256: page zero saved at 0x2000 */
 };
 /* Only the separate hardware build trusts the low-memory boot contract. */
 static inline const struct boot_info *boot_info_get(void) {

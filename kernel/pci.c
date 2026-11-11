@@ -57,3 +57,21 @@ bool pci_find_class(u8 class_code, u8 subclass, struct pci_dev *out) {
         }
     return false;
 }
+
+/* Discrete GPUs can reside on secondary buses and nonzero functions. */
+bool pci_find_display_vendor(u16 vendor, struct pci_dev *out) {
+    struct pci_dev d;
+    for (u32 bus=0; bus<256; bus++) {
+        for (u8 dev=0; dev<32; dev++) {
+            if (!probe((u8)bus,dev,0,&d)) continue;
+            u32 functions=(pci_read((u8)bus,dev,0,0x0c)&0x00800000u)?8:1;
+            for (u8 func=0; func<functions; func++) {
+                if (probe((u8)bus,dev,func,&d) && d.vendor==vendor && d.class_code==3) {
+                    *out=d;
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}

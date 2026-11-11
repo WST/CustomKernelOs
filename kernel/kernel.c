@@ -117,7 +117,7 @@ void kmain(void) {
     timer_init();
     keyboard_init();
     bool have_mouse = mouse_init();
-    if (have_mouse && fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }
+    if (fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }
     boot_stage("VirtIO pointer");
     if (virtinput_init()) {
         if (fb_ready()) { struct fb_info fi; fb_get_info(&fi); mouse_set_bounds(fi.width, fi.height); }

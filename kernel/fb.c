@@ -30,6 +30,7 @@
 #include "string.h"
 #include "vga.h"
 #include "bootinfo.h"
+#include "../drivers/video/video.h"
 
 static inline void outl(u16 port, u32 v) { __asm__ volatile ("outl %0, %1" : : "a"(v), "Nd"(port)); }
 static inline u32  inl(u16 port) { u32 v; __asm__ volatile ("inl %1, %0" : "=a"(v) : "Nd"(port)); return v; }
@@ -232,7 +233,7 @@ static bool bochs_init(void) {
 }
 
 bool fb_mode_ok(u32 w, u32 h) {
-    if (drv==DRV_FIRMWARE) return w==info.width && h==info.height;
+    if (drv==DRV_FIRMWARE) return (w==info.width && h==info.height) || video_runtime_mode_ok(w,h);
     if (!drv || w < 640 || h < 480 || (w & 7)) return false;
     if (w > info.max_w || h > info.max_h || w > FB_MAX_W || h > FB_MAX_H) return false;
     u32 room = info.vram < FB_VIRT_SZ ? info.vram : FB_VIRT_SZ;
@@ -334,7 +335,21 @@ static bool clip(int *x, int *y, int *w, int *h) {
 
 int fb_set_mode(u32 w, u32 h) {
     if (!fb_mode_ok(w, h)) return -1;
-    if (drv==DRV_FIRMWARE) return 0;
+    if (drv==DRV_FIRMWARE) {
+        if(w==info.width && h==info.height)return 0;
+        u32 f=irq_save();
+        bool ok=video_runtime_set_mode(w,h,&info);
+        if(ok) {
+            /* Tables for the entire window were allocated before processes. */
+            for(u32 off=0;off<FB_VIRT_SZ;off+=4096)
+                if(vmm_map(FB_VIRT+off,info.phys+off,PG_WRITE|paging_video_flags())) {
+                    irq_restore(f);return -1;
+                }
+            stride=info.pitch/4;frame_depth=0;
+        }
+        irq_restore(f);
+        return ok?0:-1;
+    }
     u32 ow = info.width, oh = info.height;
     if (drv == DRV_VIRTIO) {
         u32 f = irq_save();
@@ -368,17 +383,15 @@ int fb_set_mode(u32 w, u32 h) {
 bool fb_init(void) {
     const struct boot_info *boot=boot_info_get();
     if (boot && boot->fb_phys) {
-        if (boot->font_phys!=0x5000 || boot->bpp!=32 || boot->width<640 || boot->width>FB_MAX_W ||
-            boot->height<480 || boot->height>FB_MAX_H ||
-            (boot->fb_phys&4095) || (boot->pitch&3) ||
-            boot->pitch<boot->width*4 || boot->pitch>FB_VIRT_SZ/boot->height ||
-            boot->fb_phys>0xffffffffu-boot->pitch*boot->height) return false;
+        if (!video_firmware_init(boot,&info)) return false;
         drv=DRV_FIRMWARE;
-        info.phys=boot->fb_phys; info.width=boot->width; info.height=boot->height;
-        info.bpp=32; info.pitch=boot->pitch; info.vram=boot->pitch*boot->height;
-        info.max_w=boot->width; info.max_h=boot->height;
-        info.caps=FB_CAP_COPY|FB_CAP_FILL; info.gen=1;
-        info.driver="BIOS VBE framebuffer";
+        nvidia_firmware_identify(&info);
+        /* Reserve every page-table slot before creating process directories. */
+        if(info.phys<=0xffffffffu-FB_VIRT_SZ) {
+            for(u32 off=0;off<FB_VIRT_SZ;off+=4096)
+                if(vmm_map(FB_VIRT+off,info.phys+off,PG_WRITE|paging_video_flags()))return false;
+            video_runtime_init(boot,&info);
+        }
     } else {
         /* Capture the BIOS font before a VirtIO scanout takes over VGA. */
         if (vgpu_init(&info)) {

@@ -2,6 +2,10 @@
 ; protected-mode copies load the kernel and root image above 1 MiB.
 [bits 16]
 [org 0x9000]
+%ifndef VIDEO_WIDTH
+%define VIDEO_WIDTH 0
+%define VIDEO_HEIGHT 0
+%endif
 INFO equ 0x6000
 FONT equ 0x5000
 BOUNCE equ 0x70000
@@ -108,27 +112,59 @@ start:
     cld
     rep movsb
     pop ds
-    ; Enumerate BIOS VBE modes. Prefer 1024x768, fall back to 800x600.
+    call video_select
+    ; Firmware display path for real GPUs, including NVIDIA legacy VBIOS.
     mov dword [0x1000],0x32454256
     mov ax,0x4f00
     mov di,0x1000
-    int 0x10
+    call video_bios
     cmp ax,0x004f
     jne no_video
+    cmp dword [0x1000],0x41534556 ; 'VESA'
+    jne no_video
+    cmp word [0x1004],0x200
+    jb no_video
     mov eax,[0x100e]
     mov [mode_list],eax
-    mov word [want_w],1024
-    mov word [want_h],768
+    cmp word [want_w],0
+    je .automatic
     call find_mode
     jnc video_done
-    mov word [want_w],800
-    mov word [want_h],600
+    jmp .fallback
+.automatic:
+    ; Prefer the monitor's first detailed timing when DDC/EDID is available.
+    call edid_preferred
+    jc .fallback
     call find_mode
     jnc video_done
+.fallback:
+    mov word [preference],video_modes
+.try:
+    mov si,[preference]
+    lodsw
+    test ax,ax
+    jz no_video
+    mov [want_w],ax
+    lodsw
+    mov [want_h],ax
+    mov [preference],si
+    call find_mode
+    jc .try
+    jmp video_done
 no_video:
     mov si,video_error
     call print
 video_done:
+    ; Preserve IVT/BDA for the runtime interpreter before page zero is unmapped.
+    xor ax,ax
+    mov ds,ax
+    mov es,ax
+    xor si,si
+    mov di,0x2000
+    mov cx,4096/2
+    cld
+    rep movsw
+    mov dword [INFO+40],0x49564256 ; optional runtime snapshot contract
     cli
     lgdt [gdt_desc]
     mov eax,cr0
@@ -176,15 +212,140 @@ usable:
     test bx,bx
     jz memory_error
     ret
+video_select:
+    mov word [want_w],VIDEO_WIDTH
+    mov word [want_h],VIDEO_HEIGHT
+    mov si,video_hint
+    call print
+    mov ax,[0x46c]
+    mov [video_start],ax
+.wait:
+    mov ah,1
+    int 0x16
+    jz .time
+    xor ah,ah
+    int 0x16
+    cmp al,'v'
+    je .menu
+    cmp al,'V'
+    je .menu
+    cmp al,13
+    je .done
+.time:
+    mov ax,[0x46c]
+    sub ax,[video_start]
+    cmp ax,54                  ; about three seconds
+    jb .wait
+    ret
+.menu:
+    mov si,video_choices
+    call print
+.key:
+    xor ah,ah
+    int 0x16
+    cmp al,13
+    je .done
+    cmp al,'0'
+    jb .key
+    cmp al,'9'
+    ja .key
+    sub al,'0'
+    xor ah,ah
+    shl ax,2
+    mov si,select_modes
+    add si,ax
+    lodsw
+    mov [want_w],ax
+    lodsw
+    mov [want_h],ax
+.done:
+    ret
+
+; Firmware may change segment registers and the direction flag.
+video_bios:
+    push ds
+    push es
+    push fs
+    int 0x10
+    pop fs
+    pop es
+    pop ds
+    cld
+    ret
+
+edid_preferred:
+    xor ax,ax
+    mov es,ax
+    mov di,0x1400
+    mov cx,128/2
+    rep stosw
+    mov ax,0x4f15
+    mov bx,1                   ; read base EDID block, default display
+    xor cx,cx
+    xor dx,dx
+    mov di,0x1400
+    call video_bios
+    cmp ax,0x004f
+    jne .fail
+    cmp dword [0x1400],0xffffff00
+    jne .fail
+    cmp dword [0x1404],0x00ffffff
+    jne .fail
+    mov si,0x1400
+    mov cx,128
+    xor al,al
+.checksum:
+    add al,[si]
+    inc si
+    loop .checksum
+    test al,al
+    jnz .fail
+    cmp byte [0x1412],1         ; EDID 1.x
+    jne .fail
+    test byte [0x1418],2        ; first DTD is preferred timing
+    jz .fail
+    cmp word [0x1436],0         ; pixel clock, not a monitor descriptor
+    je .fail
+    movzx ax,byte [0x143a]
+    and ax,0xf0
+    shl ax,4
+    mov al,[0x1438]
+    mov [want_w],ax
+    movzx ax,byte [0x143d]
+    and ax,0xf0
+    shl ax,4
+    mov al,[0x143b]
+    mov [want_h],ax
+    clc
+    ret
+.fail:
+    stc
+    ret
+
 find_mode:
+    ; Match the kernel framebuffer/console limits before changing hardware.
+    cmp word [want_w],640
+    jb .fail
+    cmp word [want_w],2560
+    ja .fail
+    cmp word [want_h],480
+    jb .fail
+    cmp word [want_h],1600
+    ja .fail
+    mov word [mode_budget],1024
     mov eax,[mode_list]
     mov [cursor],eax
 .next:
+    dec word [mode_budget]
+    jz .fail
     mov si,[cursor]
     mov ax,[cursor+2]
     mov fs,ax
     mov cx,[fs:si]
     add word [cursor],2
+    jnc .cursor_ok
+    add word [cursor+2],0x1000
+.cursor_ok:
     cmp cx,0xffff
     je .fail
     mov [mode],cx
@@ -192,7 +353,7 @@ find_mode:
     mov es,ax
     mov di,0x1200
     mov ax,0x4f01
-    int 0x10
+    call video_bios
     cmp ax,0x004f
     jne .next
     mov ax,[0x1200]
@@ -229,18 +390,29 @@ find_mode:
     jne .next
     cmp word [si+4],0x0008
     jne .next
-    movzx eax,ax
-    mov [INFO+36],eax
+    mov [candidate_pitch],eax
+    movzx edx,word [want_h]
+    imul edx,eax
+    cmp edx,0x01000000         ; FB_VIRT_SZ: pitch includes scanline padding
+    ja .next
     mov eax,[0x1228]
     test eax,eax
     jz .next
-    mov [INFO+20],eax
+    test eax,4095
+    jnz .next
+    add edx,eax
+    jc .next
+    mov [candidate_phys],eax
     mov bx,[mode]
     or bx,0x4000
     mov ax,0x4f02
-    int 0x10
+    call video_bios
     cmp ax,0x004f
     jne .next
+    mov eax,[candidate_phys]
+    mov [INFO+20],eax
+    mov eax,[candidate_pitch]
+    mov [INFO+36],eax
     movzx eax,word [want_w]
     mov [INFO+24],eax
     movzx eax,word [want_h]
@@ -366,8 +538,23 @@ destination: dd 0
 mode_list: dd 0
 cursor: dd 0
 mode: dw 0
+mode_budget: dw 0
+preference: dw 0
+candidate_pitch: dd 0
+candidate_phys: dd 0
+; Only firmware-advertised 32-bit RGB modes are ever programmed.
+video_modes: dw 1920,1080, 1920,1200, 1600,900, 1680,1050
+             dw 1280,1024, 1280,720, 1024,768, 800,600, 640,480, 0
 want_w: dw 0
 want_h: dw 0
+video_start: dw 0
+select_modes: dw 0,0, 640,480, 800,600, 1024,768, 1280,720
+              dw 1280,1024, 1600,900, 1920,1080, 1920,1200, 2560,1440
+video_hint: db 'Press V for resolution menu, Enter to boot (3 seconds).',13,10,0
+video_choices: db 'Resolution (BIOS must support it):',13,10
+    db '0 Auto, 1 640x480, 2 800x600, 3 1024x768, 4 1280x720',13,10
+    db '5 1280x1024, 6 1600x900, 7 1920x1080, 8 1920x1200, 9 2560x1440',13,10
+    db 'Choose 0-9, or Enter for build default: ',0
 align 4
 dap: db 16,0
 dap_count: dw 64

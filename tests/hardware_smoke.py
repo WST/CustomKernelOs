@@ -82,12 +82,12 @@ class VM:
     def send(self,text,marker):
         start=len(clean(self.log))
         for char in text:
-            if char=='>':
+            if char in ('>','&'):
                 self.qmp('send-key',{'keys':[{'type':'qcode','data':'shift'},
-                                           {'type':'qcode','data':'dot'}],'hold-time':35})
+                                           {'type':'qcode','data':'dot' if char=='>' else '7'}],'hold-time':35})
                 time.sleep(.08)
             else:
-                self.key({' ':'spc','/':'slash','.':'dot','-':'minus',':':'semicolon'}.get(char,char))
+                self.key({' ':'spc','/':'slash','.':'dot','-':'minus',':':'semicolon',"'":'apostrophe'}.get(char,char))
         self.key('ret')
         return self.wait(marker,start)
     def stop(self):
@@ -101,15 +101,15 @@ class VM:
     def mouse_state(self):
         symbols=subprocess.check_output(['nm','-n','build/hardware/kernel.elf'],text=True)
         address=next(int(line.split()[0],16) for line in symbols.splitlines() if line.endswith(' b st'))
-        result=self.qmp('human-monitor-command',{'command-line':f'xp /4uw 0x{address:x}'})
-        return [int(n) for n in result.split(':',1)[1].split()]
+        result=self.qmp('human-monitor-command',{'command-line':f'xp /5uw 0x{address:x}'})
+        return [int(n) for line in result.splitlines() if ':' in line for n in line.split(':',1)[1].split()]
 
-    def check_console_pixels(self):
+    def check_console_pixels(self,prefix="hardware-scroll"):
         symbols=subprocess.check_output(['nm','-n','build/hardware/kernel.elf'],text=True)
         addresses={line.split()[2]:int(line.split()[0],16) for line in symbols.splitlines() if len(line.split())==3}
         self.qmp('stop')
         try:
-            ppm=B/'hardware-scroll.ppm'
+            ppm=B/(prefix+'.ppm')
             self.qmp('screendump',{'filename':str(ppm.resolve())})
             magic,dimensions,maximum,pixels=ppm.read_bytes().split(b'\n',3)
             width,height=map(int,dimensions.split()); columns=width//8; rows=height//16
@@ -133,7 +133,7 @@ class VM:
                         expected=b''.join(fg if bits&(0x80>>x) else bg for x in range(8))
                         offset=((row*16+y)*width+col*8)*3
                         assert pixels[offset:offset+24]==expected, ('console pixels differ',row,col,y,hex(cell))
-            save_png(ppm,B/'hardware-scroll.png')
+            save_png(ppm,B/(prefix+'.png'))
         finally: self.qmp('cont')
 
 def main():

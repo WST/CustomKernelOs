@@ -1213,6 +1213,14 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 в [docs/sysinfo.md](docs/sysinfo.md). Проверка: `make sysinfotest`.
 
 
+## NVIDIA и высокое разрешение
+
+В аппаратном образе добавлен выбор VBE-режима по EDID и явный запрос
+`make usb-image USB_VIDEO=1920x1080` (до 2560×1600, если режим предлагает BIOS).
+Это framebuffer без GPU-ускорения; runtime VBE позволяет менять разрешение
+внутри ОС через `mode` и Display, если видеобиос совместим с интерпретатором.
+[Поддержка NVIDIA, ограничения и проверка](docs/nvidia.md).
+
 ## Загрузка с USB на реальном ПК (BIOS/CSM)
 
 `make usb-image` создаёт отдельный `build/myos-usb.img`: загрузчик BIOS,
