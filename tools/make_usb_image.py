@@ -1,7 +1,6 @@
 """Build a BIOS/CSM USB-HDD image without modifying disk.img or any device."""
 import argparse
 import pathlib
-import shutil
 import subprocess
 import hashlib
 import json
@@ -16,9 +15,10 @@ def main():
     if not kernel or len(kernel)>15*1024*1024:
         raise SystemExit('Kernel is empty or overlaps the live root')
     live=b/'live-root.img'
-    if not pathlib.Path('disk.img').is_file():
-        raise SystemExit('disk.img is missing: run make first')
-    shutil.copyfile('disk.img',live)
+    # The live root is loaded into RAM and must stay within 64 MiB.
+    # The developer disk.img is larger than that, so the USB image starts empty.
+    with live.open('wb') as f:
+        f.truncate(64 * 1024 * 1024)
     # Install onto the copy, leaving the user's original filesystem untouched.
     subprocess.run(['make','install',f'DISK={live}'],check=True)
     size=live.stat().st_size

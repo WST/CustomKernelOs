@@ -11,7 +11,7 @@
 #   build/myfs disk.img ls /bin            — посмотреть диск с компьютера
 #   build/myfs disk.img put file.txt /f    — положить свой файл на диск
 #   build/myfs disk.img cat /etc/display   — вывести файл с диска
-#   build/myfs disk.img grow 128           — расширить ФС до 128 МБ, старый образ остаётся как disk.img.bak
+#   build/myfs disk.img grow 8192          — расширить ФС до 8 ГБ, старый образ остаётся как disk.img.bak
 
 # На macOS (и вообще не на x86-Linux) системный gcc — это clang под arm64/x86_64-darwin,
 # он не умеет собирать 32-битный ELF. Нужен кросс-тулчейн:
@@ -42,8 +42,10 @@ LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
 BUILD   := build
 DISK    := disk.img
 # Новый disk.img, если файла ещё нет. Готовый образ сам не растёт:
-# build/myfs disk.img grow 64  (прежний остаётся как disk.img.bak)
-DISK_MB := 64
+# build/myfs disk.img grow 8192  (прежний остаётся как disk.img.bak)
+# 4 ГБ — разреженный файл: место на компьютере занимает только записанное.
+# Потолок ФС — 8 ГБ (FS_MAX_BLOCKS). Версия 2 хранит файл любого размера в этих пределах.
+DISK_MB := 4096
 C_SRC   := $(wildcard kernel/*.c)
 OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
 

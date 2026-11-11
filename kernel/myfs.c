@@ -25,9 +25,9 @@ void *malloc(unsigned long); void free(void *);
 #define MAX_FILE_BLKS (NDIRECT + NINDIRECT + NDINDIRECT) /* предел версии 1 */
 #define INODES_PER_BLK (BS / sizeof(struct inode))
 #define BITS_PER_BLK  (BS * 8)
-#define MAX_BLOCKS    2097152u                  /* 1 GiB, 512-byte sectors */
+#define MAX_BLOCKS    FS_MAX_BLOCKS             /* 8 GiB; one inode per 64 KiB up to MAX_INODES */
 #define MIN_INODES    256u
-#define MAX_INODES    16384u
+#define MAX_INODES    131072u                   /* an 8 GiB volume at the ratio above */
 
 struct superblock {
     u32 magic;

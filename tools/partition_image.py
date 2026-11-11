@@ -21,8 +21,8 @@ def main():
         size = path.stat().st_size
         with path.open("rb") as src:
             magic = src.read(4)
-        if size % 512 or size > 1024 * 1024 * 1024 or magic != b"MYFS":
-            parser.error(f"{path}: expected a sector-aligned MyFS volume <= 1 GiB")
+        if size % 512 or size > 8 * 1024 * 1024 * 1024 or magic != b"MYFS":
+            parser.error(f"{path}: expected a sector-aligned MyFS volume <= 8 GiB")
         entries.append((path, start, size // 512))
         start = (start + size // 512 + 2047) // 2048 * 2048
     mbr = bytearray(512)

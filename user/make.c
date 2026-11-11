@@ -17,7 +17,7 @@
 
 #define MAX_VARS  48
 #define MAX_RULES 64
-#define MAX_PRE   16
+#define MAX_PRE   40          /* bash линкуется из нескольких десятков архивов */
 #define MAX_REC   8
 #define MAX_NODE  96
 #define MAX_STACK 16

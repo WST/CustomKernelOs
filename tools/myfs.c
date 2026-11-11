@@ -5,7 +5,7 @@
  *   myfs disk.img put <file> <path>  скопировать файл компьютера на диск
  *   myfs disk.img cat <path>         вывести (текстовый) файл с диска
  *   myfs disk.img rm <path>          удалить файл; если его нет — не ошибка
- *   myfs disk.img grow <MB>          скопировать ФС в новый образ этого размера (1..1024)
+ *   myfs disk.img grow <MB>          скопировать ФС в новый образ этого размера (1..8192)
  *
  * Используется ТОТ ЖЕ kernel/fs.c, что и в ядре: вместо драйвера ATA ему
  * подсовываются функции, читающие и пишущие сектора файла-образа. */
@@ -209,15 +209,15 @@ static unsigned parse_mb(const char *s) {
     unsigned v = 0;
     if (!s || !*s) return 0;
     for (; *s; s++) {
-        if (*s < '0' || *s > '9' || v > 1024) return 0;
+        if (*s < '0' || *s > '9' || v > 8192) return 0;
         v = v * 10 + (unsigned)(*s - '0');
     }
-    return v >= 1 && v <= 1024 ? v : 0;
+    return v >= 1 && v <= 8192 ? v : 0;
 }
 
 static int cmd_grow(const char *image, const char *mb_text) {
     unsigned mb = parse_mb(mb_text);
-    if (!mb) { err("myfs: grow size is megabytes, from 1 to 1024\n"); return FS_EINVAL; }
+    if (!mb) { err("myfs: grow size is megabytes, from 1 to 8192\n"); return FS_EINVAL; }
     if (block_partitioned()) { err("myfs: grow works on a whole MyFS disk, not a partition table\n"); return FS_EINVAL; }
 
     unsigned old_kb = host_sectors() / 2;
