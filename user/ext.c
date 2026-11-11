@@ -8,11 +8,15 @@
  *   descr <текст>
  *   workdir <путь>          создать каталог и перейти в него
  *   mkdir <путь>            создать каталог, в том числе вложенный
+ *   depend <имя>            сначала поставить этот пакет, если его ещё нет
  *   fetch [-r N] <url> [куда]
+ *   tar <аргументы tar>     /bin/tar, в том числе xzf для tar.gz
+ *   make [аргументы]        /bin/make
  *   cc <аргументы cc>
  * # до конца строки — комментарий.
  * fetch вызывает /bin/download. Без -r повторов два.
- * tar, git и svn в этом языке задуманы, но пока это неизвестная команда.
+ * Поставленный пакет отмечается в /ext/installed/<имя>. Запрошенный пакет
+ * ставится снова, зависимость с отметкой пропускается. Цикл — ошибка.
  */
 #include "myos.h"
 #include "stdio.h"
@@ -111,10 +115,24 @@ static int cmd_cc(int argc, char **argv) {
     return run_prog("/bin/cc", argv);
 }
 
-static int exec_args(int argc, char **argv) {
+static int cmd_tool(const char *path, int argc, char **argv) {
+    int i;
+    printf("%s", argv[0]);
+    for (i = 1; i < argc; i++) printf(" %s", argv[i]);
+    printf("\n");
+    return run_prog(path, argv);
+}
+
+static int install_name(const char *dir, const char *name, int as_dep);
+
+static int exec_args(const char *dir, int argc, char **argv) {
     int r;
     if (argc < 1) return 0;
     if (!strcmp(argv[0], "name") || !strcmp(argv[0], "descr")) return 0;
+    if (!strcmp(argv[0], "depend")) {
+        if (argc != 2) { dprintf(STDERR, "ext: depend needs one package\n"); return 1; }
+        return install_name(dir, argv[1], 1);
+    }
     if (!strcmp(argv[0], "workdir")) {
         if (argc != 2) { dprintf(STDERR, "ext: workdir needs one path\n"); return 1; }
         r = mkdir_p(argv[1]);
@@ -130,6 +148,11 @@ static int exec_args(int argc, char **argv) {
         return 0;
     }
     if (!strcmp(argv[0], "fetch")) return cmd_fetch(argc, argv);
+    if (!strcmp(argv[0], "tar")) {
+        if (argc < 2) { dprintf(STDERR, "ext: tar: arguments required\n"); return 1; }
+        return cmd_tool("/bin/tar", argc, argv);
+    }
+    if (!strcmp(argv[0], "make")) return cmd_tool("/bin/make", argc, argv);
     if (!strcmp(argv[0], "cc")) return cmd_cc(argc, argv);
     dprintf(STDERR, "ext: unknown command '%s'\n", argv[0]);
     return 1;
@@ -148,7 +171,7 @@ static int read_line(FILE *f, char *buf, int max) {
     return 1;
 }
 
-static int run_file(const char *path) {
+static int run_file(const char *dir, const char *path) {
     FILE *f = fopen(path, "r");
     char buf[1024];
     int line = 0, rc;
@@ -160,7 +183,7 @@ static int run_file(const char *path) {
         if (rc < 0) { dprintf(STDERR, "ext: %s:%d: line too long\n", path, line); fclose(f); return 1; }
         n = split_line(buf, av);
         if (n < 0) { dprintf(STDERR, "ext: %s:%d: too many words\n", path, line); fclose(f); return 1; }
-        if (exec_args(n, av) != 0) { fclose(f); return 1; }
+        if (exec_args(dir, n, av) != 0) { fclose(f); return 1; }
     }
     fclose(f);
     return 0;
@@ -259,13 +282,106 @@ static int inst_path(const char *dir, const char *name, char *out, int max) {
     return -1;
 }
 
-static int install_name(const char *dir, const char *name) {
+#define MAX_DEPTH 32
+static char dep_stack[MAX_DEPTH][32];
+static int dep_depth;
+
+static int valid_pkg(const char *name) {
+    int i;
+    if (!name || !name[0] || strlen(name) >= 32) return 0;
+    for (i = 0; name[i]; i++) {
+        char c = name[i];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_' || c == '-' || c == '+' || c == '.')
+            continue;
+        return 0;
+    }
+    return 1;
+}
+
+static int parent_dir(const char *path, char *out, int max) {
+    int n = (int)strlen(path);
+    while (n > 1 && path[n - 1] == '/') n--;
+    while (n > 0 && path[n - 1] != '/') n--;
+    if (n <= 0) return -1;
+    if (n == 1) {
+        if (max < 2) return -1;
+        out[0] = '/';
+        out[1] = 0;
+        return 0;
+    }
+    if (n >= max) return -1;
+    memcpy(out, path, (size_t)(n - 1));
+    out[n - 1] = 0;
+    return 0;
+}
+
+static int stamp_path(const char *dir, const char *name, char *out, int max) {
+    char parent[128];
+    if (parent_dir(dir, parent, (int)sizeof parent) < 0) return -1;
+    if (snprintf(out, (size_t)max, "%s/installed/%s", parent, name) >= max) return -1;
+    return 0;
+}
+
+static int stamp_exists(const char *dir, const char *name) {
     char path[160];
+    FILE *f;
+    if (stamp_path(dir, name, path, (int)sizeof path) < 0) return 0;
+    f = fopen(path, "r");
+    if (!f) return 0;
+    fclose(f);
+    return 1;
+}
+
+static int write_stamp(const char *dir, const char *name) {
+    char parent[128], instd[160], path[160];
+    FILE *f;
+    if (parent_dir(dir, parent, (int)sizeof parent) < 0) return -1;
+    if (snprintf(instd, sizeof instd, "%s/installed", parent) >= (int)sizeof instd) return -1;
+    if (mkdir_p(instd) < 0) return -1;
+    if (stamp_path(dir, name, path, (int)sizeof path) < 0) return -1;
+    f = fopen(path, "w");
+    if (!f) return -1;
+    fputs("ok\n", f);
+    fclose(f);
+    return 0;
+}
+
+static int install_name(const char *dir, const char *name, int as_dep) {
+    char path[160];
+    int i, rc;
+    if (!valid_pkg(name)) {
+        dprintf(STDERR, "ext: %s: bad package name\n", name ? name : "");
+        return 1;
+    }
+    for (i = 0; i < dep_depth; i++)
+        if (!strcmp(dep_stack[i], name)) {
+            dprintf(STDERR, "ext: dependency cycle:");
+            for (i = 0; i < dep_depth; i++) dprintf(STDERR, " %s", dep_stack[i]);
+            dprintf(STDERR, " %s\n", name);
+            return 1;
+        }
+    if (as_dep && stamp_exists(dir, name)) {
+        printf("already installed %s\n", name);
+        return 0;
+    }
+    if (dep_depth >= MAX_DEPTH) {
+        dprintf(STDERR, "ext: dependency chain is too long\n");
+        return 1;
+    }
     if (inst_path(dir, name, path, (int)sizeof path) < 0) {
         dprintf(STDERR, "ext: %s: no instruction in %s\n", name, dir);
         return 1;
     }
-    if (run_file(path) != 0) return 1;
+    memcpy(dep_stack[dep_depth], name, strlen(name) + 1);
+    dep_depth++;
+    rc = run_file(dir, path);
+    dep_depth--;
+    if (rc != 0) return 1;
+    if (write_stamp(dir, name) != 0) {
+        dprintf(STDERR, "ext: %s: cannot record install\n", name);
+        return 1;
+    }
     printf("installed %s\n", name);
     return 0;
 }
@@ -299,12 +415,103 @@ static int selftest(void) {
         || strcmp(name, "demo") || strcmp(descr, "hello there")) {
         printf("FAIL meta '%s' '%s'\n", name, descr); fails++;
     }
-    if (install_name("/tmp/myos-ext-test/instructions", "demo") != 0) { printf("FAIL install\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "demo", 0) != 0) { printf("FAIL install\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/demo/nested", &st) != 0 || st.type != 2) { printf("FAIL nested\n"); fails++; }
     f = fopen("/tmp/myos-ext-test/instructions/bad.inst", "w");
-    if (f) { fputs("name bad\ndescr x\ntar xf a.tgz\n", f); fclose(f); }
-    if (install_name("/tmp/myos-ext-test/instructions", "bad") == 0) { printf("FAIL unknown accepted\n"); fails++; }
-    if (install_name("/tmp/myos-ext-test/instructions", "missing") == 0) { printf("FAIL missing accepted\n"); fails++; }
+    if (f) { fputs("name bad\ndescr x\ngit clone x\n", f); fclose(f); }
+    if (install_name("/tmp/myos-ext-test/instructions", "bad", 0) == 0) { printf("FAIL unknown accepted\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "missing", 0) == 0) { printf("FAIL missing accepted\n"); fails++; }
+
+    unlink("/tmp/myos-ext-test/base.log");
+    unlink("/tmp/myos-ext-test/installed/base");
+    unlink("/tmp/myos-ext-test/installed/mid");
+    unlink("/tmp/myos-ext-test/installed/top");
+    unlink("/tmp/myos-ext-test/installed/untar");
+    unlink("/tmp/myos-ext-test/installed/c1");
+    unlink("/tmp/myos-ext-test/installed/c2");
+    mkdir_p("/tmp/myos-ext-test/base");
+    f = fopen("/tmp/myos-ext-test/base/Makefile", "w");
+    if (!f) { printf("FAIL makefile\n"); return 1; }
+    fputs("all:\n\techo base >> /tmp/myos-ext-test/base.log\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/base.inst", "w");
+    if (!f) { printf("FAIL base inst\n"); return 1; }
+    fputs("name base\ndescr base\nworkdir /tmp/myos-ext-test/base\nmake\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/mid.inst", "w");
+    if (!f) { printf("FAIL mid inst\n"); return 1; }
+    fputs("name mid\ndescr mid\ndepend base\nworkdir /tmp/myos-ext-test/mid\nmkdir middir\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/top.inst", "w");
+    if (!f) { printf("FAIL top inst\n"); return 1; }
+    fputs("name top\ndescr top\ndepend mid\nworkdir /tmp/myos-ext-test/top\nmkdir topdir\n", f);
+    fclose(f);
+    if (install_name("/tmp/myos-ext-test/instructions", "top", 0) != 0) { printf("FAIL chain\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/mid/middir", &st) != 0 || st.type != 2) { printf("FAIL middir\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/top/topdir", &st) != 0 || st.type != 2) { printf("FAIL topdir\n"); fails++; }
+    {
+        char got[64];
+        FILE *lf = fopen("/tmp/myos-ext-test/base.log", "r");
+        int n = 0, c;
+        if (!lf) { printf("FAIL base log missing\n"); fails++; }
+        else {
+            while ((c = fgetc(lf)) != EOF && n < (int)sizeof got - 1) got[n++] = (char)c;
+            got[n] = 0;
+            fclose(lf);
+            if (strcmp(got, "base\n")) { printf("FAIL base log '%s'\n", got); fails++; }
+        }
+    }
+    if (install_name("/tmp/myos-ext-test/instructions", "top", 0) != 0) { printf("FAIL chain again\n"); fails++; }
+    {
+        char got[64];
+        FILE *lf = fopen("/tmp/myos-ext-test/base.log", "r");
+        int n = 0, c;
+        if (!lf) { printf("FAIL base log after skip\n"); fails++; }
+        else {
+            while ((c = fgetc(lf)) != EOF && n < (int)sizeof got - 1) got[n++] = (char)c;
+            got[n] = 0;
+            fclose(lf);
+            if (strcmp(got, "base\n")) { printf("FAIL dep rebuilt '%s'\n", got); fails++; }
+        }
+    }
+
+    {
+        static const unsigned char hello_gz[] = {
+            31,139,8,0,0,0,0,0,2,255,237,205,49,10,131,64,20,4,208,95,231,20,57,65,88,204,98,206,99,33,40,8,
+            66,178,129,28,223,141,149,216,43,132,188,215,204,48,205,12,253,52,205,183,242,41,113,156,84,181,57,175,89,237,
+            179,186,111,250,119,127,180,169,137,107,138,19,188,95,165,123,214,203,248,79,195,120,9,0,0,0,0,0,0,0,0,0,126,
+            207,2,97,63,34,243,0,40,0,0
+        };
+        char got[16];
+        int n = 0, c;
+        FILE *hf;
+        f = fopen("/tmp/myos-ext-test/hello.tar.gz", "w");
+        if (!f) { printf("FAIL write gz\n"); return 1; }
+        if (fwrite(hello_gz, 1, sizeof hello_gz, f) != sizeof hello_gz) { printf("FAIL short gz\n"); fclose(f); return 1; }
+        fclose(f);
+        f = fopen("/tmp/myos-ext-test/instructions/untar.inst", "w");
+        if (!f) { printf("FAIL untar inst\n"); return 1; }
+        fputs("name untar\ndescr u\nworkdir /tmp/myos-ext-test/untar\ntar xf /tmp/myos-ext-test/hello.tar.gz\n", f);
+        fclose(f);
+        if (install_name("/tmp/myos-ext-test/instructions", "untar", 0) != 0) { printf("FAIL untar\n"); fails++; }
+        hf = fopen("/tmp/myos-ext-test/untar/hello.txt", "r");
+        if (!hf) { printf("FAIL hello missing\n"); fails++; }
+        else {
+            while ((c = fgetc(hf)) != EOF && n < (int)sizeof got - 1) got[n++] = (char)c;
+            got[n] = 0;
+            fclose(hf);
+            if (strcmp(got, "hi\n")) { printf("FAIL hello '%s'\n", got); fails++; }
+        }
+    }
+
+    f = fopen("/tmp/myos-ext-test/instructions/c1.inst", "w");
+    if (f) { fputs("name c1\ndescr c\ndepend c2\n", f); fclose(f); }
+    f = fopen("/tmp/myos-ext-test/instructions/c2.inst", "w");
+    if (f) { fputs("name c2\ndescr c\ndepend c1\n", f); fclose(f); }
+    if (install_name("/tmp/myos-ext-test/instructions", "c1", 0) == 0) { printf("FAIL cycle accepted\n"); fails++; }
+    if (stamp_exists("/tmp/myos-ext-test/instructions", "c1") || stamp_exists("/tmp/myos-ext-test/instructions", "c2")) {
+        printf("FAIL cycle stamp\n"); fails++;
+    }
     return fails != 0;
 }
 #endif
@@ -314,7 +521,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--selftest")) return selftest();
 #endif
     if (argc == 2 && !strcmp(argv[1], "list")) return list_dir(INST_DIR);
-    if (argc == 3 && !strcmp(argv[1], "install")) return install_name(INST_DIR, argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "install")) return install_name(INST_DIR, argv[2], 0);
     usage();
     return 2;
 }
