@@ -14,6 +14,7 @@
 #include "signal.h"
 #include "fcntl.h"
 #include "pwd.h"
+#include "sys/ioctl.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
 
@@ -259,7 +260,7 @@ int   dup2(int oldfd, int newfd)                 { return syscall3(SYS_DUP2, old
 int   chdir(const char *path)                    { return syscall3(SYS_CHDIR, (int)path, 0, 0); }
 int   getcwd(char *buf, size_t len)              { return syscall3(SYS_GETCWD, (int)buf, len, 0); }
 int   dirread(const char *p, int i, struct dirent_info *o) { return syscall3(SYS_READDIR, (int)p, i, (int)o); }
-int   mkdir(const char *path)                    { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
+int   mkdir(const char *path, ...)             { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
 int   unlink(const char *path)                   { return syscall3(SYS_UNLINK, (int)path, 0, 0); }
 int   ps(struct proc_info *buf, int max)         { return syscall3(SYS_PS, (int)buf, max, 0); }
 int   dirstat(const char *p, struct dirent_info *o) { return syscall3(SYS_STAT, (int)p, (int)o, 0); }
@@ -356,6 +357,8 @@ int strncmp(const char *a, const char *b, size_t n) {
 char *strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++)) ; return r; }
 char *strcat(char *d, const char *s) { strcpy(d + strlen(d), s); return d; }
 char *strchr(const char *s, int c) { for (; *s; s++) if (*s == (char)c) return (char *)s; return c ? NULL : (char *)s; }
+void bcopy(const void *src, void *dst, size_t n) { memmove(dst, src, n); }
+
 void *memmove(void *d, const void *s, size_t n) {
     uint8_t *p = d;
     const uint8_t *q = s;
@@ -497,6 +500,7 @@ const char *strerror(int e) {
     case ECHILD:    return "no child processes";
     case EAGAIN:    return "too many processes";
     case ENOMEM:    return "out of memory";
+    case EACCES:    return "permission denied";
     case EFAULT:    return "bad address";
     case EEXIST:    return "already exists";
     case ENOTDIR:   return "not a directory";
@@ -1873,6 +1877,11 @@ mode_t umask(mode_t mask) {
     current_umask = mask & 0777;
     return old;
 }
+int access(const char *path, int mode) {
+    struct stat st;
+    (void)mode;
+    return stat(path, &st);
+}
 int chmod(const char *path, mode_t mode) { (void)path; (void)mode; return 0; }
 int fchmod(int fd, mode_t mode) { (void)fd; (void)mode; return 0; }
 
@@ -1883,6 +1892,7 @@ int fstat(int fd, struct stat *st) {
     if (r == 0) {
         st->st_dev = 1;
         st->st_blocks = (st->st_size + 511) / 512;
+        st->st_nlink = 1;
     }
     return r;
 }
@@ -1941,6 +1951,7 @@ int stat(const char *path, struct stat *st) {
     st->st_dev = 1;
     st->st_ino = path_stamp(path);
     st->st_blocks = (st->st_size + 511) / 512;
+    st->st_nlink = 1;
     return 0;
 }
 
@@ -1958,6 +1969,7 @@ int lstat(const char *path, struct stat *st) {
     st->st_dev = 1;
     st->st_ino = path_stamp(path);
     st->st_blocks = (st->st_size + 511) / 512;
+    st->st_nlink = 1;
     return 0;
 }
 
@@ -2539,6 +2551,48 @@ time_t time(time_t *tloc) {
 #endif
     if (tloc && t != (time_t)-1) *tloc = t;
     return t;
+}
+
+int gettimeofday(struct timeval *tv, void *tz) {
+    time_t t;
+    (void)tz;
+    t = time(NULL);
+    if (t == (time_t)-1) return -1;
+    if (tv) { tv->tv_sec = t; tv->tv_usec = 0; }
+    return 0;
+}
+
+int ioctl(int fd, unsigned long request, ...) {
+    if (request == TIOCGWINSZ) {
+        struct winsize *ws;
+        va_list ap;
+        va_start(ap, request);
+        ws = va_arg(ap, struct winsize *);
+        va_end(ap);
+        if (!ws) { errno = EFAULT; return -1; }
+        memset(ws, 0, sizeof *ws);
+        ws->ws_col = (unsigned short)term_cols();
+        ws->ws_row = (unsigned short)term_rows();
+        (void)fd;
+        return 0;
+    }
+    (void)fd;
+    errno = EINVAL;
+    return -1;
+}
+
+char *mktemp(char *template) {
+    char *p;
+    unsigned n;
+    if (!template) { errno = EINVAL; return NULL; }
+    p = template + strlen(template);
+    n = (unsigned)getpid();
+    while (p > template && p[-1] == 'X') {
+        *--p = "0123456789abcdef"[n & 15];
+        n >>= 4;
+        if (!n) n = (unsigned)getpid() + 1;
+    }
+    return template;
 }
 
 double difftime(time_t a, time_t b) { return (double)(a - b); }

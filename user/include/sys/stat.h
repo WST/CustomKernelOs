@@ -13,6 +13,7 @@ struct stat {
     unsigned st_dev;
     unsigned st_ino;
     unsigned st_blocks;
+    unsigned st_nlink;
 };
 
 #define S_IFMT   0170000

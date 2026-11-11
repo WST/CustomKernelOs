@@ -109,6 +109,8 @@
 #define HAVE_STRCOLL 1
 #define HAVE_STRTOK 1
 #define HAVE_QSORT 1
+#define HAVE_SETVBUF 1
+#define HAVE_GETTIMEOFDAY 1
 #define HAVE_ISATTY 1
 #define HAVE_DUP2 1
 #define HAVE_PIPE 1
@@ -157,5 +159,8 @@
 #define LOCALEDIR "/usr/share/locale"
 
 #include "config-bot.h"
+
+extern int locale_utf8locale;
+#include <sys/time.h>
 
 #endif /* _CONFIG_H_ */

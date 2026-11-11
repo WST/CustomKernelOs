@@ -103,6 +103,7 @@ _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes
 #define ECHILD       10
 #define EAGAIN       11
 #define ENOMEM       12
+#define EACCES       13
 #define EBUSY        16
 #define EFAULT       14
 #define EEXIST       17

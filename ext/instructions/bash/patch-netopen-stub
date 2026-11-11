@@ -1,0 +1,12 @@
+--- a/lib/sh/netopen.c
++++ b/lib/sh/netopen.c
+@@ -326,6 +326,9 @@
+ 
+ #else /* !HAVE_NETWORK */
+ 
++#include "bashintl.h"
++#include "error.h"
++
+ int
+ netopen (char *path)
+ {

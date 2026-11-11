@@ -89,6 +89,7 @@ extern int errno;
 #define ECHILD 10
 #define EAGAIN 11
 #define ENOMEM 12
+#define EACCES 13
 #define EFAULT 14
 #define EEXIST 17
 #define ESPIPE 29
@@ -198,7 +199,7 @@ int   dup2(int oldfd, int newfd);
 int   chdir(const char *path);
 int   getcwd(char *buf, size_t len);
 int   dirread(const char *path, int index, struct dirent_info *out);  /* 1 есть, 0 конец */
-int   mkdir(const char *path);
+int   mkdir(const char *path, ...);   /* второй аргумент — права, MyFS их не хранит */
 int   unlink(const char *path);
 int   ps(struct proc_info *buf, int max);
 int   dirstat(const char *path, struct dirent_info *out);   /* 0 или -errno */

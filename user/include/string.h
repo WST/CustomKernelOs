@@ -8,4 +8,5 @@ size_t strcspn(const char *s, const char *reject);
 char *strpbrk(const char *s, const char *accept);
 int strcoll(const char *a, const char *b);
 char *strtok(char *s, const char *delim);
+void bcopy(const void *src, void *dst, size_t n);
 #endif

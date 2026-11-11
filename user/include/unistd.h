@@ -9,6 +9,7 @@
 #define X_OK 1
 #define W_OK 2
 #define R_OK 4
+int access(const char *path, int mode);
 extern char *optarg;
 extern int optind, opterr, optopt;
 int getopt(int argc, char *const argv[], const char *optstring);
