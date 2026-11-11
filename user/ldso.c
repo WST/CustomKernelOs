@@ -119,7 +119,10 @@ static void *alloc(unsigned n) {
         a.off = 0;
         r = __syscall(SYS_MMAP, (int)&a);
         if (bad(r)) die("out of memory");
-        if (heap) mem_copy((void *)(unsigned)r, heap, heap_used);
+        if (heap) {
+            mem_copy((void *)(unsigned)r, heap, heap_used);
+            __syscall(SYS_MUNMAP, (int)heap, (int)heap_cap);
+        }
         heap = (unsigned char *)(unsigned)r;
         heap_cap = cap;
     }
