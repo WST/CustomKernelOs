@@ -19,7 +19,7 @@
 #include "dirent.h"
 
 #define INST_DIR "/ext/instructions"
-#define MAX_ARG  24
+#define MAX_ARG  64
 #define MAX_PKG  64
 
 static int split_line(char *s, char **av) {
@@ -150,7 +150,7 @@ static int read_line(FILE *f, char *buf, int max) {
 
 static int run_file(const char *path) {
     FILE *f = fopen(path, "r");
-    char buf[512];
+    char buf[1024];
     int line = 0, rc;
     if (!f) { dprintf(STDERR, "ext: %s: %s\n", path, strerror(errno)); return 1; }
     while ((rc = read_line(f, buf, (int)sizeof buf)) != 0) {
@@ -179,7 +179,7 @@ static void copy_field(char *dst, int max, int argc, char **argv) {
 
 static int read_meta(const char *path, char *name, int nmax, char *descr, int dmax) {
     FILE *f = fopen(path, "r");
-    char buf[512];
+    char buf[1024];
     int rc;
     name[0] = descr[0] = 0;
     if (!f) return -1;

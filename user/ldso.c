@@ -120,12 +120,12 @@ static void *alloc(unsigned n) {
         a.off = 0;
         r = __syscall(SYS_MMAP, (int)&a);
         if (bad(r)) die("out of memory");
-        if (heap) {
-            mem_copy((void *)(unsigned)r, heap, heap_used);
-            __syscall(SYS_MUNMAP, (int)heap, (int)heap_cap);
-        }
+        /* Старую арену не переносим и не освобождаем: в ней уже лежат пути
+         * библиотек. Иначе вторая .so (libc выросла и вместе с libgfx не
+         * влезает в первый кусок) оставляет висячий указатель, и str_eq падает. */
         heap = (unsigned char *)(unsigned)r;
         heap_cap = cap;
+        heap_used = 0;
     }
     p = heap + heap_used;
     heap_used += n;

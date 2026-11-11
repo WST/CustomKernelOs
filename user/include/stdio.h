@@ -4,6 +4,7 @@
 
 #define EOF (-1)
 #define BUFSIZ 512
+#define L_tmpnam 64
 #define _IOFBF 0
 #define _IOLBF 1
 #define _IONBF 2
@@ -20,6 +21,9 @@ typedef struct FILE {
 extern FILE *stdin, *stdout, *stderr;
 
 FILE *fopen(const char *path, const char *mode);
+FILE *freopen(const char *path, const char *mode, FILE *f);
+FILE *tmpfile(void);
+char *tmpnam(char *s);
 FILE *fdopen(int fd, const char *mode);
 FILE *fmemopen(void *buf, size_t size, const char *mode);
 int fclose(FILE *f);

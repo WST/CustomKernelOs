@@ -96,7 +96,7 @@ Token *copy_token(Token *t);
 /* ------------------------------------------------------------ препроцессор (pp.c) */
 
 Token *preprocess(Token *tok);
-void   define_macro(const char *name, const char *body);
+void pp_define(const char *spec);   /* -Dname или -Dname=body */
 
 /* ------------------------------------------------------------ типы (type.c) */
 
@@ -110,6 +110,7 @@ struct Type {
     int  size;
     int  align;
     bool is_unsigned;
+    bool is_volatile;           /* чтение и запись каждый раз идут в память */
     Type *origin;               /* для совместимости typedef-копий */
 
     Type *base;                 /* указатель / массив: на что */

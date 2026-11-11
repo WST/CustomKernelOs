@@ -164,14 +164,17 @@ ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(filter-out ldso,$(basename $(notdir $(wildcard user/*.c)))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
-ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
+ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
 ULIB := $(BUILD)/user/libmyos.a
 
 $(ULIB): $(ULIB_OBJS)
 	rm -f $@ && $(AR) rcs $@ $^
 
-$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/setjmp.o: user/lib/setjmp.S | $(BUILD)/user
+	$(CC) -m32 -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
@@ -201,8 +204,8 @@ DYNLDFLAGS := -m elf_i386 -nostdlib -s --gc-sections -dynamic-linker /lib/ld.so 
 $(BUILD)/user/crt0.o: user/lib/crt0.asm | $(BUILD)/user
 	$(NASM) -f elf32 $< -o $@
 
-$(BUILD)/user/libc.so: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
-	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ $<
+$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ user/lib/libc.c user/lib/setjmp.S
 
 $(BUILD)/user/pic/%.o: user/lib/%.c user/lib/myos.h | $(BUILD)/user/pic
 	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
@@ -290,7 +293,7 @@ programs: $(UBINS)
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
 CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
-CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
+CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/math.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
@@ -308,13 +311,13 @@ $(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
 	@mkdir -p $(@D)
 	$(BUILD)/cc-host -B $(CCROOT) -c $< -o $@
 
-$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c
+$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c user/lib/math.c
 
-$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o
+$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/user/setjmp.o
 	rm -f $@ && $(AR) rcs $@ $^
 $(CCROOT)/lib/libgfx.a: $(patsubst %,$(BUILD)/libobj-linux/%.o,$(GFX_PARTS))
 	rm -f $@ && $(AR) rcs $@ $^
-$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o
+$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/user/setjmp.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
 $(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))
@@ -363,7 +366,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in libc.c regex.c math.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libc.so /lib/libc.so >/dev/null || exit 1
@@ -528,6 +531,10 @@ largetest: | $(BUILD)
 	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/large_fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/large-host-io.o -o $(BUILD)/large-fs-test
 	python3 tests/run_large_fs.py $(BUILD)/large-fs-test
 
+# Lua 5.4.8 тем же cc, которым его соберёт ext install lua внутри системы.
+luatest: $(BUILD)/cc-host $(CCROOT_READY)
+	@sh tests/lua.sh $(BUILD)/cc-host $(CCROOT)
+
 # ext без сети: разбор инструкций, каталоги, отказ на неизвестной команде.
 exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/ext
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
@@ -569,7 +576,7 @@ ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUIL
 	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
 	python3 tests/ldso_smoke.py
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest tartest cptest ldsotest dynsystest
+.PHONY: all run debug clean cleandisk test programs install cctest luatest jstest gfxtest vfstest largetest exttest gztest tartest cptest ldsotest dynsystest
 .SECONDARY:
 
 
