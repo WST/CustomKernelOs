@@ -1432,7 +1432,14 @@ static Node *cast(Token **rest, Token *tok) {
         Token *start = tok;
         Type *ty = typename_(&tok, tok->next);
         tok = skip(tok, ")");
-        if (equal(tok, "{")) error_tok(start, "compound literals are not supported");
+        if (equal(tok, "{")) {
+            /* (тип){...} — безымянная локальная переменная с инициализатором. */
+            if (!current_fn) error_tok(start, "compound literal outside a function");
+            Obj *var = new_lvar(new_unique_name(), ty);
+            Node *init = lvar_initializer(&tok, tok, var);
+            *rest = tok;
+            return new_binary(ND_COMMA, init, new_var_node(var, start), start);
+        }
         Node *node = new_cast(cast(rest, tok), ty);
         node->tok = start;
         return node;
