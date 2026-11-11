@@ -112,7 +112,8 @@ UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -O2 -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
 # --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
 ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
-PROGRAMS := $(basename $(notdir $(wildcard user/*.c))) cc
+# ldso.c — не команда /bin, а исходник /lib/ld.so (собирается отдельно, своим cc).
+PROGRAMS := $(filter-out ldso,$(basename $(notdir $(wildcard user/*.c)))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
 ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
@@ -486,6 +487,11 @@ gztest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
 	@sh tests/gzip.sh $(BUILD)/gzip-linux
 
+# tar на хосте: тот же cc, синтетические архивы и настоящий исходник zlib.
+tartest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -o $(BUILD)/tar-linux
+	@sh tests/tar.sh $(BUILD)/tar-linux
+
 cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
 	@sh tests/cp.sh $(BUILD)/cp-linux
@@ -512,7 +518,7 @@ ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUIL
 	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
 	python3 tests/ldso_smoke.py
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest ldsotest dynsystest
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest tartest cptest ldsotest dynsystest
 .SECONDARY:
 
 

@@ -1100,7 +1100,7 @@ user/lib/gfx.c     графическая библиотека для прогр
 user/mandel.c      фрактал Мандельброта
 user/paint.c       рисовалка
 user/fputest.c     проверка сохранения FPU
-user/*.c           утилиты и программы: ls cat echo grep head wc ps kill mkdir rm sleep yes ...
+user/*.c           утилиты и программы: ls cat echo grep head wc ps kill mkdir rm sleep yes tar ...
 user/user.ld       раскладка программы: код с 0x40000000
 tools/myfs.c       утилита для disk.img на компьютере: ls, put, cat, rm, grow
 kernel/ata.c       драйвер жёсткого диска ATA PIO
