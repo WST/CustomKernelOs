@@ -134,7 +134,7 @@ static void add_include(char *path) {
 static void usage(void) {
     dprintf(STDERR,
         "usage: cc [-c] [-fPIC] [-shared] [-static] [-soname name] [-o out] [-E]\n"
-        "          [-I dir] [-L dir] [-l name] [-nostdlib] file.c... file.o... lib.a... lib.so...\n"
+        "          [-I dir] [-L dir] [-D name] [-l name] [-nostdlib] file.c... file.o... lib.a... lib.so...\n"
         "  -c          only compile: each file.c -> file.o (ELF relocatable object)\n"
         "  -fPIC       position-independent code (GOT, PLT)\n"
         "  -shared     build a shared library (.so); implies -fPIC\n"
@@ -144,6 +144,7 @@ static void usage(void) {
         "              (default: first file without .c or .o)\n"
         "  -E          only preprocess, print the result\n"
         "  -I dir      also look for #include files in dir\n"
+        "  -D name     predefined macro, name or name=body\n"
         "  -L dir      also look for -l libraries in dir (before /lib and /usr/lib)\n"
         "  -l name     link libname.so if it exists, otherwise libname.a (-static: only .a)\n"
         "  -nostdlib   do not link /lib/libgfx.a and /lib/libc.a\n"
@@ -251,6 +252,8 @@ int main(int argc, char **argv) {
         if (!strcmp(a, "-B") && i + 1 < argc) { base_dir = argv[++i]; continue; }
         if (!strcmp(a, "-I") && i + 1 < argc) { add_include(argv[++i]); continue; }
         if (!strncmp(a, "-I", 2) && a[2]) { add_include(a + 2); continue; }
+        if (!strcmp(a, "-D") && i + 1 < argc) { pp_define(argv[++i]); continue; }
+        if (!strncmp(a, "-D", 2) && a[2]) { pp_define(a + 2); continue; }
         if (!strcmp(a, "-L") && i + 1 < argc) { push(&lib_dirs, argv[++i]); continue; }
         if (!strncmp(a, "-L", 2) && a[2]) { push(&lib_dirs, a + 2); continue; }
         /* -l ищется после разбора всех -L: место в списке библиотек запоминаем сразу */

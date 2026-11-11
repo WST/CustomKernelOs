@@ -4,7 +4,7 @@
 #include "idt.h"
 
 #define USER_STACK_PAGES 16             /* 64 КБ стека у программы */
-#define PROC_MAX_ARGS    32
+#define PROC_MAX_ARGS    64             /* хватает на сборку lua одной командой cc */
 
 enum {
     PROC_ENOENT  = -1,

@@ -207,6 +207,8 @@ static void cmp_zero(Type *ty) {
         E("DA E9");                                             /* fucompp */
         E("DF E0");                                             /* fnstsw ax */
         E("9E");                                                /* sahf */
+        E("7B 02");                                             /* jnp: порядок есть, ZF уже верен */
+        E("09 C0");                                             /* or eax, eax: NaN не равен нулю */
     } else if (ty->kind == TY_LONGLONG) {
         E("09 D0 85 C0");                                       /* or eax, edx; test eax, eax */
     } else {
@@ -459,11 +461,12 @@ static void gen_cmp_double(Node *node) {
     gen_expr(node->lhs);
     E("DC 1C 24");                                              /* fcomp qword [esp] */
     E("DF E0 9E");                                              /* fnstsw ax; sahf */
+    /* NaN неупорядочен: PF=1. Равенство и порядок только при PF=0. */
     switch (node->kind) {
-    case ND_EQ: E("0F 94 C0"); break;                           /* sete */
-    case ND_NE: E("0F 95 C0"); break;                           /* setne */
-    case ND_LT: E("0F 92 C0"); break;                           /* setb */
-    default:    E("0F 96 C0"); break;                           /* setbe */
+    case ND_EQ: E("0F 94 C0 0F 9B C1 20 C8"); break;            /* sete al; setnp cl; and al, cl */
+    case ND_NE: E("0F 95 C0 0F 9A C1 08 C8"); break;            /* setne al; setp cl; or al, cl */
+    case ND_LT: E("0F 92 C0 0F 9B C1 20 C8"); break;            /* setb al; setnp cl; and al, cl */
+    default:    E("0F 96 C0 0F 9B C1 20 C8"); break;            /* setbe al; setnp cl; and al, cl */
     }
     E("0F B6 C0");
     pop_double_cmp();

@@ -2,10 +2,15 @@
 #define STDLIB_H
 #include "stddef.h"
 void abort(void) __attribute__((noreturn));
+#define EXIT_SUCCESS 0
+#define EXIT_FAILURE 1
 extern char *__progname;
 long strtol(const char *nptr, char **endptr, int base);
 unsigned long strtoul(const char *nptr, char **endptr, int base);
 long long strtoll(const char *nptr, char **endptr, int base);
+double strtod(const char *nptr, char **endptr);
+int system(const char *command);
+int abs(int x);
 unsigned long long strtoull(const char *nptr, char **endptr, int base);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);
