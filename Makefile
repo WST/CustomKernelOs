@@ -249,6 +249,11 @@ $(BUILD)/user/pic/math.o: user/include/math.h
 $(BUILD)/user/libm.so: $(BUILD)/user/pic/math.o $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libm.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/math.o -L$(BUILD)/user -lc
 
+$(BUILD)/user/pic/libdl.o: user/lib/libdl.c user/include/dlfcn.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
+$(BUILD)/user/libdl.so: $(BUILD)/user/pic/libdl.o
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libdl.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/libdl.o
+
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -371,9 +376,20 @@ $(CCROOT)/lib/libm.a: $(BUILD)/libobj-linux/math.o
 $(BUILD)/mlib/libm.a: $(BUILD)/libobj-myos/math.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/libobj-linux/libdl.o: user/lib/libdl.c user/include/dlfcn.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -DDL_STUB -c $< -o $@
+$(BUILD)/libobj-myos/libdl.o: user/lib/libdl.c user/include/dlfcn.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -DDL_STUB -c $< -o $@
+$(CCROOT)/lib/libdl.a: $(BUILD)/libobj-linux/libdl.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libdl.a: $(BUILD)/libobj-myos/libdl.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -391,7 +407,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -433,6 +449,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libgfx.so /lib/libgfx.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libz.so /lib/libz.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libm.so /lib/libm.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libdl.so /lib/libdl.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -621,6 +638,11 @@ luatest: $(BUILD)/cc-host $(CCROOT_READY)
 exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/ext
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
+
+# libdl: -ldl находит библиотеку. Без загрузчика dlopen возвращает ошибку.
+dltest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/dl_test.c -ldl -o $(BUILD)/dl-test
+	@./$(BUILD)/dl-test
 
 # libm: -lm находит библиотеку, а вызов без флага по-прежнему берётся из libc.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)
