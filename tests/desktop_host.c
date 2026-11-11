@@ -88,7 +88,7 @@ int exec(const char *p, char **a) { (void)p; (void)a; return -1; }
 int pipe(int f[2]) { (void)f; return -1; }
 int dup2(int a, int b) { (void)a; (void)b; return -1; }
 int waitpid(int p, int *s, int o) { (void)p; (void)s; (void)o; return 0; }
-int kill(int p) { (void)p; return 0; }
+int kill(int p, ...) { (void)p; return 0; }
 
 /* -------- сценарий */
 static char **script;

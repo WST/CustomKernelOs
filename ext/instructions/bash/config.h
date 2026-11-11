@@ -3,8 +3,12 @@
 #ifndef _CONFIG_H_
 #define _CONFIG_H_
 
+#define _POSIX_VERSION 200809L
 #define SHELL 1
 #define EXTGLOB_DEFAULT 0
+#define BASH_SOURCE_FULLPATH_DEFAULT 0
+#define GLOBASCII_DEFAULT 1
+#define MB_CUR_MAX 1
 
 #define PROTOTYPES 1
 #define __PROTOTYPES 1
@@ -59,6 +63,7 @@
 #define HAVE_TIME_H 1
 #define HAVE_DIRENT_H 1
 #define HAVE_SYS_STAT_H 1
+#define HAVE_SYS_TIME_H 1
 #define HAVE_SYS_TYPES_H 1
 #define HAVE_FCNTL_H 1
 #define HAVE_REGEX_H 1
@@ -109,6 +114,7 @@
 #define HAVE_PIPE 1
 #define HAVE_FORK 1
 #define HAVE_GETPID 1
+#define HAVE_WAITPID 1
 #define HAVE_GETUID 1
 #define HAVE_GETEUID 1
 #define HAVE_GETGID 1

@@ -38,6 +38,9 @@ struct stat {
 #define S_IXOTH 0001
 #define S_IXUGO (S_IXUSR | S_IXGRP | S_IXOTH)
 
+mode_t umask(mode_t mask);
+int chmod(const char *path, mode_t mode);
+int fchmod(int fd, mode_t mode);
 int fstat(int fd, struct stat *st);
 int stat(const char *path, struct stat *st);
 int lstat(const char *path, struct stat *st);

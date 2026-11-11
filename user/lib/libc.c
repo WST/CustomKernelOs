@@ -246,9 +246,12 @@ int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int
 int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
 int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
 int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
+int   execve(const char *path, char *const argv[], char *const envp[]) {
+    (void)envp; return exec(path, (char **)argv);
+}
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
 int   getppid(void)                              { return syscall3(SYS_GETPPID, 0, 0, 0); }
-int   kill(int pid)                              { return syscall3(SYS_KILL, pid, 0, 0); }
+int   kill(int pid, ...)                         { return syscall3(SYS_KILL, pid, 0, 0); }
 int   setpgid(int pid, int pgid)                 { return syscall3(SYS_SETPGID, pid, pgid, 0); }
 int   setfg(int pgid)                            { return syscall3(SYS_SETFG, pgid, 0, 0); }
 int   pipe(int fds[2])                           { return syscall3(SYS_PIPE, (int)fds, 0, 0); }
@@ -488,6 +491,7 @@ const char *strerror(int e) {
     case ESRCH:     return "no such process";
     case EINTR:     return "interrupted";
     case EIO:       return "I/O error";
+    case E2BIG:     return "argument list too long";
     case ENOEXEC:   return "not an executable";
     case EBADF:     return "bad file descriptor";
     case ECHILD:    return "no child processes";
@@ -1863,6 +1867,15 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
     return (ssize_t)i;
 }
 
+static mode_t current_umask = 022;
+mode_t umask(mode_t mask) {
+    mode_t old = current_umask;
+    current_umask = mask & 0777;
+    return old;
+}
+int chmod(const char *path, mode_t mode) { (void)path; (void)mode; return 0; }
+int fchmod(int fd, mode_t mode) { (void)fd; (void)mode; return 0; }
+
 int fstat(int fd, struct stat *st) {
     int r;
     memset(st, 0, sizeof *st);
@@ -2774,6 +2787,10 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
 }
 
 static void (*sig_handlers[32])(int);
+
+int sigblock(int mask) { (void)mask; return 0; }
+int sigsetmask(int mask) { (void)mask; return 0; }
+int siginterrupt(int sig, int flag) { (void)sig; (void)flag; return 0; }
 
 void (*signal(int sig, void (*handler)(int)))(int) {
     void (*old)(int);

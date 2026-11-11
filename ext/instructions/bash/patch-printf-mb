@@ -1,0 +1,12 @@
+--- a/builtins/printf.def
++++ b/builtins/printf.def
+@@ -355,7 +355,9 @@
+ 
+   garglist = orig_arglist = list->next;
+ 
++#if defined (HANDLE_MULTIBYTE)
+   mb_cur_max = MB_CUR_MAX;
++#endif
+ 
+   /* Basic algorithm is to scan the format string for conversion
+      specifications -- once one is found, find out if the field

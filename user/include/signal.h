@@ -25,8 +25,20 @@ typedef int sig_atomic_t;
 #define SIGTTIN 21
 #define SIGTTOU 22
 #define SIGWINCH 28
+#define NSIG 64
 #define SIG_ERR ((void (*)(int))-1)
 #define SIG_DFL ((void (*)(int))0)
 #define SIG_IGN ((void (*)(int))1)
 void (*signal(int sig, void (*handler)(int)))(int);
+
+#ifndef sigset_t
+typedef int sigset_t;
+#endif
+#define SIG_BLOCK   2
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 3
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+int sigblock(int mask);
+int sigsetmask(int mask);
+int siginterrupt(int sig, int flag);
 #endif

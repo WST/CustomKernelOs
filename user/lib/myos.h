@@ -83,6 +83,7 @@ extern int errno;
 #define ESRCH 3
 #define EINTR 4
 #define EIO 5
+#define E2BIG 7
 #define ENOEXEC 8
 #define EBADF 9
 #define ECHILD 10
@@ -189,7 +190,7 @@ int   fork(void);                         /* 0 в потомке, pid потом
 int   exec(const char *path, char **argv);/* при успехе не возвращается */
 int   waitpid(int pid, int *status, int options);   /* pid -1 = любой ребёнок */
 int   getppid(void);
-int   kill(int pid);
+int   kill(int pid, ...);          /* второй аргумент — номер сигнала, его можно не передавать */
 int   setpgid(int pid, int pgid);
 int   setfg(int pgid);                    /* кого убьёт Ctrl+C (0 — никого) */
 int   pipe(int fds[2]);                   /* fds[0] — читать, fds[1] — писать */

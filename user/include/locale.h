@@ -6,7 +6,9 @@
 #define LC_MONETARY 3
 #define LC_NUMERIC  4
 #define LC_TIME     5
+#ifndef MB_CUR_MAX
 #define MB_CUR_MAX  1
+#endif
 
 struct lconv {
     char *decimal_point;
