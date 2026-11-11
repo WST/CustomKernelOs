@@ -48,6 +48,9 @@ static bool user_buf_ok(u32 addr, u32 len, bool write) {
         u32 flags;
         if (!vmm_lookup(dir, p, NULL, &flags) || !(flags & PG_USER)) return false;
         if (write && !(flags & (PG_WRITE | PG_COW))) return false;
+        /* CR0.WP is off: a supervisor store does not fault on COW pages.
+         * Detach before writing, including kernel-updated userspace mutexes. */
+        if (write && (flags & PG_COW) && !vmm_cow_fault(p)) return false;
     }
     return true;
 }
@@ -110,7 +113,7 @@ static int alloc_fd(struct file *f) {
     struct task *t = task_current();
     u32 flags=irq_save();
     int fd=-EMFILE;
-    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; fd=i; break; }
+    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; task_process(t)->cloexec&=~(1u<<i); fd=i; break; }
     irq_restore(flags); return fd;
 }
 
@@ -151,6 +154,8 @@ static int sys_clipboard(u32 op, u32 addr, u32 size) {
     mutex_unlock(&clipboard_lock);
     return result;
 }
+
+#include "ssh-syscall.inc"
 
 static int sys_write(u32 fd, u32 buf, u32 len) {
     struct file *f = get_fd(fd);
@@ -213,7 +218,7 @@ static int sys_close(u32 fd) {
     if (fd>=MAX_FDS) return -EBADF;
     u32 flags=irq_save();
     struct task *p=task_process(task_current());
-    struct file *f=p->fds[fd]; p->fds[fd]=NULL;
+    struct file *f=p->fds[fd]; p->fds[fd]=NULL; p->cloexec&=~(1u<<fd);
     irq_restore(flags);
     if (!f) return -EBADF;
     file_close(f); return 0;
@@ -236,6 +241,10 @@ static int sys_fstat(u32 fd, u32 ust) {
         size = st.size;
         if (st.type == FS_TYPE_DIR) mode = 0040000;
         else if (st.type == FS_TYPE_FILE) mode = 0100000;
+    } else if(f->type==FILE_SOCKET || f->type==FILE_LOCAL) {
+        mode=0140000;
+    } else if(f->type==FILE_PIPE) {
+        mode=0010000;
     } else if (f->type == FILE_CONSOLE || f->type == FILE_PTY_SLAVE) {
         mode = 0020000;                                 /* S_IFCHR: isatty */
     }
@@ -293,6 +302,7 @@ static int sys_dup2(u32 oldfd, u32 newfd) {
     if (oldfd == newfd) { irq_restore(flags); return newfd; }
     struct file *old=task_process(t)->fds[newfd];
     task_process(t)->fds[newfd] = file_dup(f);
+    task_process(t)->cloexec &= ~(1u<<newfd);
     irq_restore(flags);
     file_close(old); return newfd;
 }
@@ -831,6 +841,8 @@ static int sys_listen(u32 fd, u32 backlog) {
 }
 
 static int sys_accept(u32 fd, u32 uaddr) {
+    struct file *listener=get_fd(fd);
+    if(listener && (listener->status_flags&04000) && !(file_ready(listener,1)&(1|8|16))) return -EAGAIN;
     struct sock *s = get_sock(fd);
     if (!s) return -EBADF;
     if (uaddr && !user_buf_ok(uaddr, sizeof(struct user_sockaddr), true)) return -EFAULT;
@@ -1017,6 +1029,7 @@ void syscall_dispatch(struct regs *r) {
         volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;
     }
+    case SYS_SSHCTL: ret = sys_sshctl(a,b,c); break;
     case SYS_KLOG_READ: {
         if(b>KLOG_CAPACITY) { ret=-EINVAL;break; }
         if(!user_buf_ok(c,sizeof(struct klog_cursor),true) || !user_buf_ok(a,b,true)) {

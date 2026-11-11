@@ -1,0 +1,29 @@
+--- a/sshd.c
++++ b/sshd.c
+@@ -1810,13 +1810,13 @@
+ 	}
+ 	rexec_argv[rexec_argc++] = "-R";
+ 	rexec_argv[rexec_argc] = NULL;
+-	if (stat(rexec_argv[0], &sb) != 0 || !(sb.st_mode & (S_IXOTH|S_IXUSR)))
++	if (stat(rexec_argv[0], &sb) != 0 || access(rexec_argv[0], X_OK) != 0)
+ 		fatal("%s does not exist or is not executable", rexec_argv[0]);
+ 	debug3("using %s for re-exec", rexec_argv[0]);
+ 
+ 	/* Ensure that the privsep binary exists now too. */
+ 	if (stat(options.sshd_auth_path, &sb) != 0 ||
+-	    !(sb.st_mode & (S_IXOTH|S_IXUSR))) {
++	    access(options.sshd_auth_path, X_OK) != 0) {
+ 		fatal("%s does not exist or is not executable",
+ 		    options.sshd_auth_path);
+ 	}
+--- a/auth.c
++++ b/auth.c
+@@ -127,7 +127,7 @@
+ 			return 0;
+ 		}
+ 		if (S_ISREG(st.st_mode) == 0 ||
+-		    (st.st_mode & (S_IXOTH|S_IXUSR|S_IXGRP)) == 0) {
++		    access(shell, X_OK) != 0) {
+ 			logit("User %.100s not allowed because shell %.100s "
+ 			    "is not executable", pw->pw_name, shell);
+ 			free(shell);

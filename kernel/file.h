@@ -7,10 +7,11 @@
  * dup2() несколько дескрипторов (даже в разных процессах) указывают на ОДИН
  * объект: у них общее смещение, а закрыт он будет, когда уйдёт последняя ссылка. */
 
-enum file_type { FILE_CONSOLE, FILE_DISK, FILE_PIPE, FILE_SOCKET, FILE_PTY_MASTER, FILE_PTY_SLAVE };
+enum file_type { FILE_CONSOLE, FILE_DISK, FILE_PIPE, FILE_SOCKET, FILE_PTY_MASTER, FILE_PTY_SLAVE, FILE_LOCAL };
 
 struct sock;
 struct tty;
+struct local_pair;
 
 #define PIPE_SIZE 4096
 
@@ -23,12 +24,19 @@ struct pipe {
 struct file {
     enum file_type type;
     u32  refs;
+    u32 status_flags;
+    struct local_pair *local;
     u8   mode;                      /* диск: биты FMODE_*; канал: 0 чтение, иначе запись */
     u32  ino, off;                  /* FILE_DISK */
     struct pipe *pipe;              /* FILE_PIPE */
     struct sock *sock;              /* FILE_SOCKET */
     struct tty *tty;                /* FILE_PTY_* */
 };
+
+int local_pair_create(struct file **a, struct file **b);
+int local_sendfd(struct file *f, struct file *passed);
+struct file *local_recvfd(struct file *f, int *err);
+int file_ready(struct file *f, int events);
 
 extern struct file console_file;    /* клавиатура + экран: stdin/stdout/stderr */
 
@@ -37,6 +45,7 @@ extern struct file console_file;    /* клавиатура + экран: stdin/
 #define TTY_RESIZE_EVENT 8             /* readkey-only: resize interrupts the pending read. */
 #define TTY_NOSIG    4                 /* Ctrl+C — обычная клавиша (код 3), а не убийство */
 
+u32 console_get_mode(void);
 u32  console_set_mode(u32 mode);       /* -> прежний режим */
 bool console_isig(void);
 void console_release(u32 pid);         /* процесс умер — вернуть терминал в норму */

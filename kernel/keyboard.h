@@ -20,6 +20,7 @@ void kb_scancode(unsigned char sc); /* shared PS/2 / USB layout and shortcut pat
 int  kb_getchar(void);   /* блокирующее чтение клавиши */
 int  kb_layout(void);    /* 0 — US, 1 — русская */
 void kb_set_layout(int l);
+int kb_has_key(void);
 int  kb_poll(void);      /* без ожидания: код или -1 */
 void *kb_channel(void);  /* на чём спать в ожидании клавиши */
 

@@ -86,6 +86,7 @@ enum {
     SYS_CPUINFO,        /* cpuinfo(&cpu_info, capacity) */
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX,
     SYS_KLOG_READ,      /* klog_read(buf, capacity, &cursor), nondestructive */
+    SYS_SSHCTL,         /* POSIX adapter operations, see ssh-syscall.inc */
     SYS_COUNT
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */

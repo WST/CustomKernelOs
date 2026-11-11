@@ -3,7 +3,7 @@
 #include "types.h"
 #include "idt.h"
 
-#define USER_STACK_PAGES 16             /* 64 КБ стека у программы */
+#define USER_STACK_PAGES 256            /* 1 MiB: recursive native C compilation (OpenSSH packet.c) */
 #define PROC_MAX_ARGS    64             /* хватает на сборку lua одной командой cc */
 
 enum {

@@ -54,7 +54,7 @@ static int readdir_impl(u32 dir,u32 *pos,struct fs_dirent *out) {
     }
     *pos=dir==FS_ROOT ? p+1 : p; return r;
 }
-static int lookup(u32 dir,const char *name,u32 *out) {
+static int lookup_uncached(u32 dir,const char *name,u32 *out) {
     struct fs_stat st; int r=stat_impl(dir,&st); if(r) return r;
     if(st.type!=FS_TYPE_DIR) return FS_ENOTDIR;
     if(!strcmp(name,".")) { *out=dir; return 0; }
@@ -67,6 +67,33 @@ static int lookup(u32 dir,const char *name,u32 *out) {
     u32 pos=0; struct fs_dirent de;
     while((r=readdir_impl(dir,&pos,&de))==1) if(!strcmp(name,de.name)) { *out=de.ino; return 0; }
     return r<0 ? r : FS_ENOENT;
+}
+/* Positive inode identities only: creates cannot invalidate existing names.
+ * Removal, rename, format and mount changes flush the cache under the VFS lock.
+ * Keep virtual devices and dot entries on their dynamic lookup paths. */
+#define LOOKUP_CACHE_SIZE 256
+static struct { u32 dir,ino,age; char name[FS_NAME_MAX+1]; } lookup_cache[LOOKUP_CACHE_SIZE];
+static u32 lookup_age;
+static void lookup_cache_clear(void) {
+    for(unsigned i=0;i<LOOKUP_CACHE_SIZE;i++) lookup_cache[i].age=0;
+    lookup_age=0;
+}
+static int lookup(u32 dir,const char *name,u32 *out) {
+    if(isdev(dir) || !strcmp(name,".") || !strcmp(name,"..")) return lookup_uncached(dir,name,out);
+    if(!++lookup_age) {lookup_cache_clear();lookup_age=1;}
+    unsigned slot=0;u32 oldest=0xffffffffu;
+    for(unsigned i=0;i<LOOKUP_CACHE_SIZE;i++) {
+        if(lookup_cache[i].age && lookup_cache[i].dir==dir && !strcmp(lookup_cache[i].name,name)) {
+            lookup_cache[i].age=lookup_age;*out=lookup_cache[i].ino;return 0;
+        }
+        if(lookup_cache[i].age<oldest) {slot=i;oldest=lookup_cache[i].age;}
+    }
+    int ret=lookup_uncached(dir,name,out);
+    if(!ret && !isdev(*out)) {
+        lookup_cache[slot].dir=dir;lookup_cache[slot].ino=*out;lookup_cache[slot].age=lookup_age;
+        strcpy(lookup_cache[slot].name,name);
+    }
+    return ret;
 }
 /* Текст цели в буфер с завершающим нулём. Размер ссылки меньше cap. */
 static int link_text(u32 ino,char *buf,u32 cap) {
@@ -84,6 +111,14 @@ static int link_text(u32 ino,char *buf,u32 cap) {
  * unlink, rename, readlink и lstat — нет. Промежуточные компоненты всегда
  * раскрываются. Хвост «/» тоже требует раскрытия: дальше нужен каталог.
  * Обход итеративный: два буфера пути, не рекурсия по стеку ядра. */
+static u32 process_root(void) {
+#ifdef HOST_TEST
+    return FS_ROOT;
+#else
+    struct task *t=task_process(task_current());
+    return t && t->fs_root ? t->fs_root : FS_ROOT;
+#endif
+}
 static int resolve_impl(u32 cwd,const char *path,u32 *out,bool follow_last) {
     if(!ready) return FS_ENODEV;
     if(!path || !*path) return FS_ENOENT;
@@ -91,7 +126,8 @@ static int resolve_impl(u32 cwd,const char *path,u32 *out,bool follow_last) {
     u32 len=strlen(path);
     if(len>=FS_PATH_MAX) return FS_ENAMETOOLONG;
     memcpy(curpath,path,len+1);
-    u32 dir=curpath[0]=='/' ? FS_ROOT : cwd;
+    u32 root=process_root();
+    u32 dir=curpath[0]=='/' ? root : cwd;
     char *p=curpath;
     int nlinks=0;
     for(;;) {
@@ -101,7 +137,10 @@ static int resolve_impl(u32 cwd,const char *path,u32 *out,bool follow_last) {
         while(p[n] && p[n]!='/') { if(n==FS_NAME_MAX) return FS_ENAMETOOLONG; name[n]=p[n]; n++; }
         name[n]=0; p+=n;
         bool slash=*p=='/';
-        u32 next; int r=lookup(dir,name,&next); if(r) return r;
+        u32 next; int r;
+        if(dir==root && !strcmp(name,"..")) {next=root;r=0;}
+        else r=lookup(dir,name,&next);
+        if(r) return r;
         struct fs_stat st; r=stat_impl(next,&st); if(r) return r;
         bool more=false;
         if(slash) { more=true; while(*p=='/') p++; }
@@ -116,7 +155,7 @@ static int resolve_impl(u32 cwd,const char *path,u32 *out,bool follow_last) {
             memcpy(scratch+tl,p,rl+1);
             memcpy(curpath,scratch,tl+rl+1);
             p=curpath;
-            if(curpath[0]=='/') dir=FS_ROOT;
+            if(curpath[0]=='/') dir=root;
             continue;
         }
         if(more && st.type!=FS_TYPE_DIR) return FS_ENOTDIR;
@@ -132,7 +171,7 @@ static int parent_impl(u32 cwd,const char *path,u32 *parent,char *name) {
     if(!*base || !strcmp(base,".") || !strcmp(base,"..")) return FS_EINVAL;
     if(strlen(base)>FS_NAME_MAX) return FS_ENAMETOOLONG;
     strcpy(name,base); int r=0;
-    if(slash<0) *parent=cwd; else if(slash==0) *parent=FS_ROOT;
+    if(slash<0) *parent=cwd; else if(slash==0) *parent=process_root();
     else { buf[slash]=0; r=resolve_impl(cwd,buf,parent,true); }
     if(r) return r;
     struct fs_stat st; r=stat_impl(*parent,&st); return r ? r : st.type==FS_TYPE_DIR ? 0 : FS_ENOTDIR;
@@ -149,7 +188,8 @@ static bool protected(u32 ino) {
 static int getpath_impl(u32 ino,char *buf,u32 len) {
     /* Номера inode, а не сами имена: 64 имени по 256 байт не помещаются в стек ядра. */
     u32 chain[64]; int depth=0;
-    while(ino!=FS_ROOT) {
+    u32 root=process_root();
+    while(ino!=root) {
         if(depth==64) return FS_ENAMETOOLONG;
         chain[depth++]=ino;
         u32 parent; int r=lookup(ino,"..",&parent); if(r) return r;
@@ -159,7 +199,7 @@ static int getpath_impl(u32 ino,char *buf,u32 len) {
     if(len<2) return FS_ENAMETOOLONG;
     u32 p=0; buf[p++]='/';
     for(int i=depth-1;i>=0;i--) {
-        u32 want=chain[i], parent=i==depth-1 ? FS_ROOT : chain[i+1];
+        u32 want=chain[i], parent=i==depth-1 ? root : chain[i+1];
         u32 pos=0; struct fs_dirent de; bool found=false;
         while(readdir_impl(parent,&pos,&de)==1) if(de.ino==want) { found=true; break; }
         if(!found) return FS_ENOENT;
@@ -180,21 +220,21 @@ int fs_init(bool *formatted) {
             if(!r) { mounts[0].used=true; mounts[0].device=d; ready=true; break; }
         }
     } else r=FS_EIO;
-    mutex_unlock(&lock); return r;
+    lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
 bool fs_ready(void) { return ready; }
 int fs_format(void) {
     mutex_lock(&lock); int r=ready ? 0 : FS_ENODEV;
     for(int s=1;s<4;s++) if(mounts[s].used) r=FS_EBUSY;
     if(!r) { myfs_select(0,mounts[0].device); r=myfs_format(); }
-    mutex_unlock(&lock); return r;
+    lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
 #ifdef HOST_TEST
 int fs_format_legacy(void) {
     mutex_lock(&lock); int r=ready ? 0 : FS_ENODEV;
     for(int s=1;s<4;s++) if(mounts[s].used) r=FS_EBUSY;
     if(!r) { myfs_select(0,mounts[0].device); r=myfs_format_legacy(); }
-    mutex_unlock(&lock); return r;
+    lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
 #endif
 int fs_mount(u32 cwd,const char *device,const char *target) {
@@ -213,7 +253,7 @@ int fs_mount(u32 cwd,const char *device,const char *target) {
     if(!r && !slot) r=FS_ENOSPC;
     if(!r) { bool formatted; myfs_select(slot,d); r=myfs_init(&formatted,false); }
     if(!r) { mounts[slot].used=true; mounts[slot].device=d; mounts[slot].covered=ino; mounts[slot].parent=parent; }
-    mutex_unlock(&lock); return r;
+    lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
 int fs_mount_info(u32 index,char *device,char *target) {
     mutex_lock(&lock); int r=0;
@@ -334,7 +374,7 @@ int fs_remove(u32 cwd,const char *path) {
     if(!r && protected(ino)) r=FS_EBUSY;
     if(!r) r=parent_impl(cwd,path,&parent,name);
     if(!r) { r=select_inode(parent); if(!r) r=myfs_remove(LOCAL(parent),name); }
-    mutex_unlock(&lock); return r;
+    lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
 int fs_rename(u32 cwd,const char *src,const char *dst) {
     mutex_lock(&lock); u32 ino,sp,dp,dest; char sn[FS_NAME_MAX+1],dn[FS_NAME_MAX+1]; int r=resolve_impl(cwd,src,&ino,false);
@@ -355,7 +395,7 @@ int fs_rename(u32 cwd,const char *src,const char *dst) {
             else { if(n>1) destpath[n++]='/'; strcpy(destpath+n,dn); r=myfs_rename(LOCAL(sp),sn,destpath); }
         }
     }
-    mutex_unlock(&lock); return r;
+    lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
 int fs_truncate(u32 ino) {
     mutex_lock(&lock); int r;

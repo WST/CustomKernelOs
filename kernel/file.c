@@ -9,6 +9,8 @@
 #include "string.h"
 #include "syscall.h"
 #include "tty.h"
+static int console_readable(void);
+#include "ssh-local.inc"
 
 struct file console_file = { .type = FILE_CONSOLE, .refs = 1, .mode = 2 };   /* не освобождается */
 
@@ -29,6 +31,7 @@ void file_close(struct file *f) {
     struct sock *to_close = NULL;
     if (--f->refs == 0) {
         if (f->type == FILE_SOCKET) to_close = f->sock;
+        if (f->type == FILE_LOCAL) local_close(f);
         if (f->type == FILE_PIPE) {
             struct pipe *p = f->pipe;
             if (f->mode == 0) p->readers--; else p->writers--;
@@ -105,6 +108,8 @@ static int console_write(const char *buf, u32 len, bool err) {
  * вернёт терминал в нормальное состояние (иначе упавшая игра «сломала» бы консоль). */
 static u32 tty_mode, tty_owner;
 
+u32 console_get_mode(void) {return tty_mode;}
+
 u32 console_set_mode(u32 mode) {
     u32 old = tty_mode;
     tty_mode = mode;
@@ -124,6 +129,7 @@ void console_release(u32 pid) {
 
 static u8  pend[8];
 static u32 pend_n, pend_pos;
+static int console_readable(void){return pend_pos<pend_n || kb_has_key();}
 
 static void translate(int c) {
     const char *seq = NULL;
@@ -259,8 +265,11 @@ static int pipe_write(struct pipe *p, const u8 *buf, u32 len) {
 /* ---------------------------------------------------------------- общий ввод-вывод */
 
 int file_read(struct file *f, void *buf, u32 len) {
+    if (!len) return 0;
+    if ((f->status_flags & 04000) && !(file_ready(f,1)&(1|16))) return -EAGAIN;
     switch (f->type) {
     case FILE_CONSOLE: return console_read(buf, len);
+    case FILE_LOCAL: return pipe_read(&f->local->p[f->mode], buf, len);
     case FILE_PIPE:    return f->mode == 0 ? pipe_read(f->pipe, buf, len) : -EBADF;
     case FILE_SOCKET:  return sock_read(f->sock, buf, len);
     case FILE_PTY_MASTER: case FILE_PTY_SLAVE: return pty_read(f, buf, len);
@@ -275,8 +284,21 @@ int file_read(struct file *f, void *buf, u32 len) {
 }
 
 int file_write(struct file *f, const void *buf, u32 len, bool is_stderr) {
+    if (!len) return 0;
+    if (f->status_flags & 04000) {
+        if (!(file_ready(f,4)&(4|8|16))) return -EAGAIN;
+        u32 room=len;
+        if(f->type==FILE_LOCAL) room=PIPE_SIZE-f->local->p[1-f->mode].count;
+        if(f->type==FILE_PIPE) room=PIPE_SIZE-f->pipe->count;
+        if(f->type==FILE_SOCKET) room=SOCK_TXBUF-f->sock->tx_len;
+        if(f->type==FILE_PTY_MASTER) room=TTY_BUF-f->tty->in.count;
+        if(f->type==FILE_PTY_SLAVE) room=TTY_BUF-f->tty->out.count;
+        if(!room) return -EAGAIN;
+        if(len>room) len=room;
+    }
     switch (f->type) {
     case FILE_CONSOLE: return console_write(buf, len, is_stderr);
+    case FILE_LOCAL: return pipe_write(&f->local->p[1-f->mode], buf, len);
     case FILE_PIPE:    return f->mode ? pipe_write(f->pipe, buf, len) : -EBADF;
     case FILE_SOCKET:  return sock_write(f->sock, buf, len);
     case FILE_PTY_MASTER: case FILE_PTY_SLAVE: return pty_write(f, buf, len);

@@ -1,0 +1,35 @@
+--- a/readpass.c
++++ b/readpass.c
+@@ -149,7 +149,7 @@
+ 		}
+ 	} else {
+ 		rppflags |= RPP_REQUIRE_TTY;
+-		ttyfd = open(_PATH_TTY, O_RDWR);
++		ttyfd = isatty(STDIN_FILENO) ? dup(STDIN_FILENO) : (errno = ENOTTY, -1);
+ 		if (ttyfd >= 0) {
+ 			/*
+ 			 * If we're on a tty, ensure that show the prompt at
+--- a/openbsd-compat/readpassphrase.c
++++ b/openbsd-compat/readpassphrase.c
+@@ -95,7 +95,7 @@
+ # define O_CLOEXEC 0
+ #endif
+ 	if ((flags & RPP_STDIN) ||
+-	    (input = output = open(_PATH_TTY, O_RDWR | O_CLOEXEC)) == -1) {
++	    (input = output = (isatty(STDIN_FILENO) ? dup(STDIN_FILENO) : (errno = ENOTTY, -1))) == -1) {
+ 		if (flags & RPP_REQUIRE_TTY) {
+ 			errno = ENOTTY;
+ 			return(NULL);
+@@ -148,6 +148,12 @@
+ 	end = buf + bufsiz - 1;
+ 	p = buf;
+ 	while ((nr = read(input, &ch, 1)) == 1 && ch != '\n' && ch != '\r') {
++		/* MyOS uses raw input to suppress echo; provide line editing here. */
++		if (ch == 8 || ch == 127) {
++			if (p > buf) { p--; while (p > buf && ((unsigned char)*p & 0xc0) == 0x80) p--; }
++			continue;
++		}
++		if (ch == 21) { p = buf; continue; }
+ 		if (p < end) {
+ 			if ((flags & RPP_SEVENBIT))
+ 				ch &= 0x7f;

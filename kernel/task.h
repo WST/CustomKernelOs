@@ -47,6 +47,8 @@ struct task {
     struct file *syscall_fds[MAX_FDS]; /* transient refs while a syscall blocks */
     struct file *fds[MAX_FDS];      /* открытые файлы (общие объекты, см. file.h) */
     u32 uid;
+    u32 real_uid, saved_uid, cloexec, fs_root;
+    u32 gid, real_gid, saved_gid;
     bool authenticated;
     u32   parent;                   /* id родителя (0 — ядро/сирота) */
     u32   pgid;                     /* группа процессов: Ctrl+C убивает всю группу */

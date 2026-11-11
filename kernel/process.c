@@ -8,7 +8,7 @@
  *   0x80000000  динамический загрузчик, если в ELF есть PT_INTERP
  *   0xA0000000  общая память shm
  *   0xB0000000  mmap (анонимные страницы и частные копии файлов)
- *   0xBFFF0000  стек программы, 64 КБ, растёт вниз
+ *   0xBFF00000  стек программы, 1 МиБ, растёт вниз
  *   0xBFFFFFFF  на вершине: строки аргументов, argv[], argc
  *               у программы с PT_INTERP ещё envp и auxv
  */
@@ -344,6 +344,13 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
     task_process(t)->cwd = cwd;
     if (parent) {
         task_process(t)->uid = task_process(parent)->uid;
+    task_process(t)->real_uid = task_process(parent)->real_uid;
+    task_process(t)->saved_uid = task_process(parent)->saved_uid;
+    task_process(t)->cloexec = task_process(parent)->cloexec;
+    task_process(t)->fs_root = task_process(parent)->fs_root;
+    task_process(t)->gid = task_process(parent)->gid;
+    task_process(t)->real_gid = task_process(parent)->real_gid;
+    task_process(t)->saved_gid = task_process(parent)->saved_gid;
         task_process(t)->authenticated = task_process(parent)->authenticated;
         t->parent = parent->id;
         t->pgid = parent->pgid;
@@ -396,6 +403,13 @@ int proc_fork(struct regs *r) {
     task_process(t)->brk        = task_process(parent)->brk;
     task_process(t)->user_pages = pages;
     task_process(t)->uid = task_process(parent)->uid;
+    task_process(t)->real_uid = task_process(parent)->real_uid;
+    task_process(t)->saved_uid = task_process(parent)->saved_uid;
+    task_process(t)->cloexec = task_process(parent)->cloexec;
+    task_process(t)->fs_root = task_process(parent)->fs_root;
+    task_process(t)->gid = task_process(parent)->gid;
+    task_process(t)->real_gid = task_process(parent)->real_gid;
+    task_process(t)->saved_gid = task_process(parent)->saved_gid;
     task_process(t)->authenticated = task_process(parent)->authenticated;
     task_process(t)->cwd        = task_process(parent)->cwd;
     t->parent     = parent->id;
@@ -420,6 +434,8 @@ int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
     int err = load_image(path, task_process(t)->cwd, argc, argv, &im);
     if (err) return err;
 
+    for(int fd=0;fd<MAX_FDS;fd++) if(t->cloexec&(1u<<fd)) {file_close(t->fds[fd]);t->fds[fd]=NULL;}
+    t->cloexec=0;
     u32 old = t->page_dir;
     t->page_dir = im.dir;
     vmm_switch(im.dir);                                  /* уходим со старого каталога... */

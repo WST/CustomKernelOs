@@ -427,6 +427,8 @@ QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive format=raw,file=$(DISK),index=1,media=disk
 QEMU_MEM ?= 256M
 QEMU_CPUS ?= 4
+QEMU_CPU ?=
+QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
@@ -440,14 +442,19 @@ QEMU_VIDEO = python3 tools/run_qemu.py --qemu "$(QEMU)" --gpu "$(GPU)" --vga "$(
 # сеть: карта e1000 за NAT QEMU; HOST_PORT хоста -> порт 80 MyOS (httpd)
 # Другой порт: make run HOST_PORT=8081
 HOST_PORT ?= 8080
-QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80 -rtc base=localtime
+SSH_PORT ?=
+QEMU_SSH_FORWARD :=
+ifneq ($(SSH_PORT),)
+QEMU_SSH_FORWARD := ,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22
+endif
+QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80$(QEMU_SSH_FORWARD) -rtc base=localtime
 
 # всё, что пишет консоль ядра (и browser -v), — ещё и в build/serial.log
 run: all
-	$(QEMU_VIDEO) -smp $(QEMU_CPUS) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
+	$(QEMU_VIDEO) $(QEMU_CPU_FLAGS) -smp $(QEMU_CPUS) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
 
 debug: all
-	$(QEMU_VIDEO) -smp $(QEMU_CPUS) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
+	$(QEMU_VIDEO) $(QEMU_CPU_FLAGS) -smp $(QEMU_CPUS) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
 
 clean:
 	rm -rf $(BUILD)
@@ -842,3 +849,26 @@ usbmouse-smoke: usb-image usbmousetest
 nvidia-iotest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections tests/nvidia_io_test.c -Wl,--gc-sections -o $(BUILD)/nvidia-io-test
 	./$(BUILD)/nvidia-io-test
+
+# OpenSSH ext port; host build uses the same compiler and static libc as ext.
+$(BUILD)/file.o $(HWBUILD)/file.o: kernel/ssh-local.inc
+$(BUILD)/syscall.o $(HWBUILD)/syscall.o: kernel/ssh-syscall.inc
+.PHONY: openssh-build openssh-recipetest openssh-tests-ready opensshtest openssh-exttest
+openssh-build: $(BUILD)/cc-host $(CCROOT)/.stamp $(BUILD)/mlib/libc.a
+	python3 tests/openssh_build.py
+openssh-recipetest: $(BUILD)/cc-host $(CCROOT_READY)
+	$(BUILD)/cc-host -B $(CCROOT) -linux user/make.c -o $(BUILD)/make-linux
+	python3 tests/openssh_recipe.py
+openssh-tests-ready: openssh-build openssh-recipetest fslookuptest
+	$(BUILD)/cc-host -B $(BUILD)/openssh-native/sysroot -I$(BUILD)/openssh-native/openssh-10.6p2 -I$(BUILD)/openssh-native/openssh-10.6p2/myos-include -I$(BUILD)/openssh-native/openssh-10.6p2/openbsd-compat tests/sshcheck.c $(BUILD)/openssh-native/openssh-10.6p2/myos-posix.o $(BUILD)/openssh-native/openssh-10.6p2/c0.a $(BUILD)/openssh-native/openssh-10.6p2/c1.a -o $(BUILD)/openssh-native/sshcheck
+opensshtest: openssh-tests-ready
+	python3 tests/openssh_smoke.py
+openssh-exttest: openssh-tests-ready
+	python3 tests/openssh_smoke.py --ext
+	python3 tests/openssh_service.py
+
+$(BUILD)/fs-lookup-test: tests/fs_lookup_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/myfs
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_lookup_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $@
+.PHONY: fslookuptest
+fslookuptest: $(BUILD)/fs-lookup-test
+	python3 -c 'import tempfile,pathlib,subprocess; t=tempfile.TemporaryDirectory(prefix="myos-lookup-"); p=pathlib.Path(t.name)/"disk.img"; f=p.open("wb"); f.truncate(64*1024*1024); f.close(); subprocess.run(["$(BUILD)/fs-lookup-test",str(p)],check=True)'
