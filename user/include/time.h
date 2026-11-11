@@ -5,6 +5,11 @@
 typedef long clock_t;
 #define CLOCKS_PER_SEC 1000
 
+struct timespec {
+    time_t tv_sec;
+    long tv_nsec;
+};
+
 struct tm {
     int tm_sec;
     int tm_min;

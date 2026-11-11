@@ -12,6 +12,8 @@
 #include "math.h"
 #include "locale.h"
 #include "signal.h"
+#include "fcntl.h"
+#include "pwd.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
 
@@ -1861,18 +1863,71 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
     return (ssize_t)i;
 }
 
-int fstat(int fd, struct stat *st) { return ioerr(syscall3(SYS_FSTAT, fd, (int)st, 0)); }
+int fstat(int fd, struct stat *st) {
+    int r;
+    memset(st, 0, sizeof *st);
+    r = ioerr(syscall3(SYS_FSTAT, fd, (int)st, 0));
+    if (r == 0) {
+        st->st_dev = 1;
+        st->st_blocks = (st->st_size + 511) / 512;
+    }
+    return r;
+}
+
+char *ttyname(int fd) { (void)fd; return (char *)"/dev/tty"; }
+
+/* Ядро не хранит флаги дескриптора. F_DUPFD ищет свободный номер и делает dup2.
+ * F_GETFD/F_SETFD пока ничего не запоминают: close-on-exec нет. */
+int fcntl(int fd, int cmd, ...) {
+    struct stat st;
+    if (cmd == F_GETFD || cmd == F_GETFL || cmd == F_SETFD || cmd == F_SETFL) {
+        if (fstat(fd, &st) < 0) return -1;
+        return 0;
+    }
+    if (cmd == F_DUPFD) {
+        va_list ap;
+        int i, min;
+        va_start(ap, cmd);
+        min = va_arg(ap, int);
+        va_end(ap);
+        if (min < 0) { errno = EINVAL; return -1; }
+        if (fstat(fd, &st) < 0) return -1;
+        for (i = min; i < 16; i++) {
+            if (fstat(i, &st) == 0) continue;
+            if (errno != EBADF) return -1;
+            return ioerr(syscall3(SYS_DUP2, fd, i, 0));
+        }
+        errno = EMFILE;
+        return -1;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static unsigned path_stamp(const char *path) {
+    unsigned h = 2166136261u;
+    if (!path) return 1;
+    for (const char *p = path; *p; p++) {
+        h ^= (unsigned char)*p;
+        h *= 16777619u;
+    }
+    return h ? h : 1;
+}
 
 int stat(const char *path, struct stat *st) {
     struct dirent_info info;
     int r = syscall3(SYS_STAT, (int)path, (int)&info, 0);
     if (r < 0) { errno = -r; return -1; }
+    memset(st, 0, sizeof *st);
     if (info.type == 2) st->st_mode = S_IFDIR;
     else if (info.type == 4) st->st_mode = S_IFCHR;
-    else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 3) st->st_mode = S_IFBLK;
     else if (info.type == 5) st->st_mode = S_IFLNK;
     else st->st_mode = S_IFREG;
     st->st_size = info.size;
+    st->st_dev = 1;
+    st->st_ino = path_stamp(path);
+    st->st_blocks = (st->st_size + 511) / 512;
     return 0;
 }
 
@@ -1880,12 +1935,16 @@ int lstat(const char *path, struct stat *st) {
     struct dirent_info info;
     int r = syscall3(SYS_LSTAT, (int)path, (int)&info, 0);
     if (r < 0) { errno = -r; return -1; }
+    memset(st, 0, sizeof *st);
     if (info.type == 2) st->st_mode = S_IFDIR;
     else if (info.type == 4) st->st_mode = S_IFCHR;
-    else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 3) st->st_mode = S_IFBLK;
     else if (info.type == 5) st->st_mode = S_IFLNK;
     else st->st_mode = S_IFREG;
     st->st_size = info.size;
+    st->st_dev = 1;
+    st->st_ino = path_stamp(path);
+    st->st_blocks = (st->st_size + 511) / 512;
     return 0;
 }
 
@@ -2434,6 +2493,15 @@ unsigned sleep(unsigned seconds) {
 uid_t getuid(void) { return 0; }
 uid_t geteuid(void) { return 0; }
 gid_t getgid(void) { return 0; }
+gid_t getegid(void) { return 0; }
+unsigned alarm(unsigned seconds) { (void)seconds; return 0; }
+int setuid(uid_t uid) { (void)uid; return 0; }
+int setgid(gid_t gid) { (void)gid; return 0; }
+
+static struct passwd only_user = { "root", "", 0, 0, "root", "/root", "/bin/sh" };
+struct passwd *getpwuid(uid_t uid) { (void)uid; return &only_user; }
+struct passwd *getpwnam(const char *name) { (void)name; return &only_user; }
+void endpwent(void) {}
 
 static int leap(unsigned y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 
