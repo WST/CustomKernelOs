@@ -434,17 +434,21 @@ static int write_v2(u32 dir, u32 off, u32 ino, const char *name, u16 reclen) {
     return w == (int)reclen ? FS_OK : FS_EIO;
 }
 
-/* найти запись name; вернуть inode (0 — нет) и смещение записи */
-static u32 dir_lookup(u32 dir, const char *name, u32 *offset) {
+/* Найти запись name. *ino = 0, если имени нет. Отрицательный код — ошибка чтения,
+ * её нельзя путать с «не найдено»: иначе создание добавит вторую запись. */
+static int dir_lookup(u32 dir, const char *name, u32 *ino, u32 *offset) {
     u32 off = 0;
+    *ino = 0;
     if (legacy()) {
         struct dirent_v1 de;
         for (;;) {
             int r = read_v1(dir, off, &de);
-            if (r <= 0) return 0;
+            if (r < 0) return r;
+            if (r == 0) return FS_OK;
             if (de.ino && !strcmp(de.name, name)) {
                 if (offset) *offset = off;
-                return de.ino;
+                *ino = de.ino;
+                return FS_OK;
             }
             off += sizeof(de);
         }
@@ -454,10 +458,12 @@ static u32 dir_lookup(u32 dir, const char *name, u32 *offset) {
         char got[FS_NAME_MAX + 1];
         u32 start = off;
         int r = read_v2(dir, off, &h, got);
-        if (r <= 0) return 0;
+        if (r < 0) return r;
+        if (r == 0) return FS_OK;
         if (h.ino && h.namelen == strlen(name) && !memcmp(got, name, h.namelen)) {
             if (offset) *offset = start;
-            return h.ino;
+            *ino = h.ino;
+            return FS_OK;
         }
         off += h.reclen;
     }
@@ -516,14 +522,16 @@ static int dir_set(u32 dir, u32 off, u32 ino, const char *name) {
     return write_v2(dir, off, ino, name, h.reclen);
 }
 
-static bool dir_empty(u32 dir) {
+/* 1 — пуст, 0 — есть записи, отрицательное — ошибка чтения. */
+static int dir_empty(u32 dir) {
     u32 off = 0;
     if (legacy()) {
         struct dirent_v1 de;
         for (;;) {
             int r = read_v1(dir, off, &de);
-            if (r <= 0) return true;
-            if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) return false;
+            if (r < 0) return r;
+            if (r == 0) return 1;
+            if (de.ino && strcmp(de.name, ".") && strcmp(de.name, "..")) return 0;
             off += sizeof(de);
         }
     }
@@ -531,8 +539,9 @@ static bool dir_empty(u32 dir) {
         struct dirent_v2 h;
         char name[FS_NAME_MAX + 1];
         int r = read_v2(dir, off, &h, name);
-        if (r <= 0) return true;
-        if (h.ino && strcmp(name, ".") && strcmp(name, "..")) return false;
+        if (r < 0) return r;
+        if (r == 0) return 1;
+        if (h.ino && strcmp(name, ".") && strcmp(name, "..")) return 0;
         off += h.reclen;
     }
 }
@@ -588,7 +597,9 @@ static int myfs_resolve_impl(u32 cwd, const char *path, u32 *ino) {
 
         int r = dir_check(cur);
         if (r) return r;
-        u32 next = dir_lookup(cur, name, NULL);
+        u32 next;
+        r = dir_lookup(cur, name, &next, NULL);
+        if (r) return r;
         if (!next) return FS_ENOENT;
         cur = next;
     }
@@ -626,7 +637,10 @@ static int myfs_create_impl(u32 cwd, const char *path, int type, u32 *out) {
     char name[FS_NAME_MAX + 1];
     int r = resolve_parent(cwd, path, &parent, name);
     if (r) return r;
-    if (dir_lookup(parent, name, NULL)) return FS_EEXIST;
+    u32 existing;
+    r = dir_lookup(parent, name, &existing, NULL);
+    if (r) return r;
+    if (existing) return FS_EEXIST;
 
     u32 ino = ialloc(type);
     if (!ino) return FS_ENOSPC;
@@ -644,12 +658,18 @@ static int myfs_remove_impl(u32 cwd, const char *path) {
     char name[FS_NAME_MAX + 1];
     int r = resolve_parent(cwd, path, &parent, name);
     if (r) return r;
-    u32 ino = dir_lookup(parent, name, &off);
+    u32 ino;
+    r = dir_lookup(parent, name, &ino, &off);
+    if (r) return r;
     if (!ino) return FS_ENOENT;
 
     struct inode in;
     if ((r = iread(ino, &in))) return r;
-    if (in.type == FS_TYPE_DIR && !dir_empty(ino)) return FS_ENOTEMPTY;
+    if (in.type == FS_TYPE_DIR) {
+        int empty = dir_empty(ino);
+        if (empty < 0) return empty;
+        if (!empty) return FS_ENOTEMPTY;
+    }
 
     free_all_blocks(&in);
     in.type = FS_TYPE_FREE;
@@ -665,7 +685,9 @@ static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
     char sname[FS_NAME_MAX + 1], dname[FS_NAME_MAX + 1];
     int r = resolve_parent(cwd, src, &sparent, sname);
     if (r) return r;
-    u32 ino = dir_lookup(sparent, sname, &soff);
+    u32 ino;
+    r = dir_lookup(sparent, sname, &ino, &soff);
+    if (r) return r;
     if (!ino) return FS_ENOENT;
 
     /* mv file dir  ->  dir/file */
@@ -675,30 +697,42 @@ static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
     } else if ((r = resolve_parent(cwd, dst, &dparent, dname))) {
         return r;
     }
-    if (dir_lookup(dparent, dname, NULL)) return FS_EEXIST;
+    u32 taken;
+    r = dir_lookup(dparent, dname, &taken, NULL);
+    if (r) return r;
+    if (taken) return FS_EEXIST;
 
     /* нельзя переместить каталог внутрь самого себя */
-    for (u32 p = dparent; ; p = dir_lookup(p, "..", NULL)) {
+    for (u32 p = dparent; ;) {
         if (p == ino) return FS_EINVAL;
-        if (p == FS_ROOT || p == 0) break;
+        if (p == FS_ROOT) break;
+        u32 parent;
+        r = dir_lookup(p, "..", &parent, NULL);
+        if (r) return r;
+        if (!parent) return FS_EIO;
+        p = parent;
     }
 
     if ((r = dir_add(dparent, dname, ino))) return r;
     if ((r = dir_set(sparent, soff, 0, NULL))) return r;
 
-    u32 dotdot;
-    if (dir_check(ino) == FS_OK && dparent != sparent && dir_lookup(ino, "..", &dotdot))
-        return dir_set(ino, dotdot, dparent, "..");
+    u32 dotdot, dotdot_ino;
+    if (dir_check(ino) == FS_OK && dparent != sparent) {
+        r = dir_lookup(ino, "..", &dotdot_ino, &dotdot);
+        if (r) return r;
+        if (dotdot_ino) return dir_set(ino, dotdot, dparent, "..");
+    }
     return FS_OK;
 }
 
 static int myfs_getpath_impl(u32 ino, char *buf, u32 len) {
     u32 chain[32];
-    int depth = 0;
+    int depth = 0, r;
     while (ino != FS_ROOT) {
         if (depth == 32) return FS_EINVAL;
         chain[depth++] = ino;
-        ino = dir_lookup(ino, "..", NULL);
+        r = dir_lookup(ino, "..", &ino, NULL);
+        if (r) return r;
         if (!ino) return FS_ENOENT;
     }
     u32 pos = 0;
