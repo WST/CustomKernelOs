@@ -2,12 +2,14 @@
  *
  * Путь программы через компилятор:
  *   текст  --lex.c-->  токены  --pp.c-->  токены без #директив и макросов
- *          --parse.c-->  дерево (AST) с типами  --gen.c-->  машинный код x86
- *          --elf.c-->  исполняемый файл ELF, который ядро MyOS загружает как любую программу.
+ *          --parse.c-->  дерево (AST) с типами  --gen.c-->  объектный файл в памяти
+ *          --link.c-->  исполняемый файл ELF, который ядро MyOS загружает как любую программу
+ *                       (или, с -c, объектный файл .o).
  *
- * Ассемблера и компоновщика нет: компилятор сам кодирует инструкции в байты
- * и сам раскладывает код и данные по адресам (код с 0x40000000). Библиотеку
- * (libc, gfx) он компилирует вместе с программой из исходников в /lib.
+ * Ассемблера нет: компилятор сам кодирует инструкции в байты. Свой компоновщик
+ * (link.c) раскладывает код и данные по адресам (код с 0x40000000) и принимает
+ * .o — свои и от gcc — и библиотеки .a (/lib/libc.a, /lib/libgfx.a). Если архивов
+ * нет, библиотеку cc компилирует из исходников в /lib.
  *
  * Собирается и для MyOS (gcc в WSL), и для Linux (CC_HOST) — так его удобно тестировать. */
 #ifndef CC_H
@@ -47,6 +49,10 @@ void *xcalloc(int n);
 extern char **include_paths;
 extern int    n_include_paths;
 extern bool   opt_linux;                            /* -linux: ELF для Linux (тесты на хосте) */
+extern bool   opt_pic;                              /* -fPIC: код не зависит от адреса загрузки */
+extern bool   opt_shared;                           /* -shared: собрать ET_DYN */
+extern bool   opt_static;                           /* -static: не искать .so, даже если они есть */
+extern char  *opt_soname;                           /* -soname: DT_SONAME, иначе имя файла -o */
 
 /* ------------------------------------------------------------ токены (lex.c) */
 
@@ -181,8 +187,10 @@ struct Obj {
     int   n_refs, cap_refs;
 
     /* для генератора кода */
-    int   section;              /* 0 — нет, 1 — код, 2 — данные, 3 — bss */
+    int   section;              /* 0 — нет, 1 — код, 2 — данные, 3 — bss, 4 — COMMON */
     unsigned addr;
+    unsigned code_end;          /* функция: где в буфере кода кончается */
+    int   sym;                  /* номер символа в объектном файле */
 };
 
 /* Ссылка из данных глобальной переменной на другую (указатель в инициализаторе) */
@@ -249,7 +257,7 @@ int   const_expr(Token **rest, Token *tok);
 Node *new_cast(Node *expr, Type *ty);
 int   new_label(void);
 
-/* ------------------------------------------------------------ код (gen.c, elf.c) */
+/* ------------------------------------------------------------ код (gen.c) */
 
 #define TEXT_BASE 0x40000000u
 
@@ -262,6 +270,93 @@ void buf_put(Buf *b, const void *p, int n);
 void buf_byte(Buf *b, int v);
 void buf_u32(Buf *b, unsigned v);
 
-void codegen(Obj *prog, const char *out_path);
+/* ------------------------------------------------------------ объектные файлы и компоновка (link.c)
+ *
+ * Объектный файл в памяти — то же, что ELF ET_REL: секции с байтами, символы и
+ * перемещения. Генератор делает его из дерева, obj_read — из файла .o (своего или gcc),
+ * obj_write пишет его в .o, link_program собирает из нескольких программу ET_EXEC. */
+
+enum { SEC_TEXT, SEC_RODATA, SEC_DATA, SEC_BSS };
+enum { BIND_LOCAL, BIND_GLOBAL, BIND_WEAK };
+enum { STY_NOTYPE, STY_OBJECT, STY_FUNC, STY_SECTION };
+
+/* LinkSym.sec: номер секции в файле или одно из этих */
+#define SYM_UNDEF  (-1)
+#define SYM_COMMON (-2)
+#define SYM_ABS    (-3)
+
+/* типы перемещений i386; слагаемое (addend) лежит в самих байтах, как в ELF REL */
+#define R_386_NONE   0
+#define R_386_32     1
+#define R_386_PC32   2
+#define R_386_GOT32  3              /* смещение ячейки GOT от _GLOBAL_OFFSET_TABLE_ */
+#define R_386_PLT32  4              /* как PC32, но цель — элемент PLT */
+#define R_386_COPY     5            /* в программе: скопировать объект из .so */
+#define R_386_GLOB_DAT 6            /* записать адрес символа в ячейку GOT */
+#define R_386_JMP_SLOT 7            /* то же для ячейки, через которую прыгает PLT */
+#define R_386_RELATIVE 8            /* прибавить к слову смещение загрузки */
+#define R_386_GOTOFF 9              /* адрес символа минус адрес GOT */
+#define R_386_GOTPC  10             /* адрес GOT минус адрес поля перемещения */
+
+typedef struct ObjFile ObjFile;
+typedef struct GSym GSym;
+
+typedef struct LinkReloc {
+    int offset;
+    int type;
+    int sym;                    /* номер символа в том же файле */
+} LinkReloc;
+
+typedef struct Section {
+    char *name;
+    int   kind;                 /* SEC_* */
+    int   align;
+    unsigned char *data;        /* у SEC_BSS — NULL */
+    int   size;
+    LinkReloc *rels;
+    int   n_rels, cap_rels;
+    ObjFile *file;
+    bool  live;                 /* компоновщик: до неё можно дойти от точки входа */
+    unsigned addr;
+    int   shndx;                /* динамический ELF: номер в таблице секций, 0 — ещё не назначен */
+} Section;
+
+typedef struct LinkSym {
+    char *name;
+    int   bind, type;
+    int   sec;                  /* номер секции или SYM_UNDEF / SYM_COMMON / SYM_ABS */
+    unsigned value;             /* смещение в секции; у SYM_COMMON — выравнивание */
+    unsigned size;
+    GSym *global;               /* компоновщик: общая запись для не-локальных */
+} LinkSym;
+
+struct ObjFile {
+    char *name;
+    Section **secs;
+    int n_secs, cap_secs;
+    LinkSym *syms;
+    int n_syms, cap_syms;
+    bool from_lib;          /* часть библиотеки: определения уступают определениям программы */
+};
+
+/* Статическая библиотека (.a, формат ar): из неё в программу попадают только те
+ * члены, которые определяют ещё не найденные символы. Определения из библиотек
+ * уступают определениям из .c и .o программы: так свой malloc заменяет библиотечный. */
+typedef struct Archive Archive;
+
+ObjFile *obj_new(const char *name);
+int  obj_add_section(ObjFile *f, char *name, int kind, int align, unsigned char *data, int size);
+int  obj_add_sym(ObjFile *f, char *name, int bind, int type, int sec, unsigned value, unsigned size);
+void obj_add_reloc(Section *s, int offset, int type, int sym);
+void obj_write(ObjFile *f, const char *path);       /* ELF ET_REL */
+ObjFile *obj_read(const char *path);                /* NULL — нет такого файла */
+Archive *archive_read(const char *path);            /* NULL — нет такого файла */
+void link_program(ObjFile **files, int n_files, Archive **libs, int n_libs,
+                  char **so_paths, int n_so, const char *out_path);
+void write_file(const char *path, Buf *b);
+
+/* roots — имена, которые нужны снаружи (точка входа, ссылки из .o);
+ * export_all — оставить все не-static определения (cc -c) */
+ObjFile *codegen(Obj *prog, const char *name, char **roots, int n_roots, bool export_all);
 
 #endif

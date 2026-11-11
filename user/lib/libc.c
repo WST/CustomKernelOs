@@ -18,9 +18,10 @@ int main(int argc, char **argv);
 
 int __libc_start(int argc, char **argv) __attribute__((noreturn));
 
-#ifndef __MYOS_CC__
+#if !defined(__MYOS_CC__) && !defined(__LIBC_SO__)
 /* Ядро «вызывает» _start(argc, argv): кладёт их на стек как аргументы функции.
- * (Программам, собранным cc внутри MyOS, такую же точку входа делает сам cc.) */
+ * (Программам, собранным cc внутри MyOS, такую же точку входа делает сам cc.
+ *  В libc.so точки входа нет: её даёт crt0 самой программы.) */
 __attribute__((noreturn, used, section(".text.start")))
 void _start(int argc, char **argv) {
     __libc_start(argc, argv);
@@ -57,13 +58,14 @@ static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
             if (name[0] == '.' && (name[1] == 0 || (name[1] == '.' && name[2] == 0))) continue;
             if (seen++ != index) continue;
             memset(o, 0, sizeof *o);
-            for (i = 0; i < 27 && name[i]; i++) o->name[i] = name[i];
+            for (i = 0; i < 255 && name[i]; i++) o->name[i] = name[i];
             if (typ == 4) o->type = 2;
             else if (typ == 2) o->type = 4;
             else if (typ == 6) o->type = 3;
+            else if (typ == 10) o->type = 5;
             else o->type = 1;
             {
-                char full[192];
+                char full[512];
                 unsigned char st[64];
                 unsigned mode;
                 if (snprintf(full, sizeof full, "%s/%s", path, o->name) < (int)sizeof full &&
@@ -73,6 +75,7 @@ static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
                     if ((mode & 0170000) == 0040000) o->type = 2;
                     else if ((mode & 0170000) == 0020000) o->type = 4;
                     else if ((mode & 0170000) == 0060000) o->type = 3;
+                    else if ((mode & 0170000) == 0120000) o->type = 5;
                     else o->type = 1;
                 }
             }
@@ -144,9 +147,29 @@ static int syscall3(int n, int a, int b, int c) {
         if ((mode & 0170000) == 0040000) o->type = 2;
         else if ((mode & 0170000) == 0020000) o->type = 4;
         else if ((mode & 0170000) == 0060000) o->type = 3;
+        else if ((mode & 0170000) == 0120000) o->type = 5;
         else o->type = 1;
         return 0;
     }
+    case SYS_LSTAT: {
+        unsigned char st[64];
+        int r = __syscall(107, a, (int)st, 0);
+        unsigned mode;
+        struct dirent_info *o;
+        if (r < 0) return r;
+        mode = *(unsigned short *)(st + 8);
+        o = (struct dirent_info *)b;
+        memset(o, 0, sizeof *o);
+        o->size = *(unsigned *)(st + 20);
+        if ((mode & 0170000) == 0040000) o->type = 2;
+        else if ((mode & 0170000) == 0020000) o->type = 4;
+        else if ((mode & 0170000) == 0060000) o->type = 3;
+        else if ((mode & 0170000) == 0120000) o->type = 5;
+        else o->type = 1;
+        return 0;
+    }
+    case SYS_SYMLINK: return __syscall(83, a, b);
+    case SYS_READLINK: return __syscall(85, a, b, c);
     case SYS_READDIR: return linux_dir_at((const char *)a, b, (struct dirent_info *)c);
     default: return -38;
     }
@@ -188,6 +211,18 @@ int   open(const char *path, int flags, ...)     { return ioerr(syscall3(SYS_OPE
 int   close(int fd)                              { return ioerr(syscall3(SYS_CLOSE, fd, 0, 0)); }
 int   lseek(int fd, long offset, int whence)     { return ioerr(syscall3(SYS_LSEEK, fd, (int)offset, whence)); }
 void *sbrk(int inc)                              { return (void *)syscall3(SYS_SBRK, inc, 0, 0); }
+
+struct mmap_args { unsigned addr, len, prot, flags, fd, off; };
+
+void *mmap(void *addr, unsigned len, int prot, int flags, int fd, unsigned off) {
+    struct mmap_args a;
+    a.addr = (unsigned)addr; a.len = len; a.prot = prot; a.flags = flags; a.fd = fd; a.off = off;
+    unsigned r = syscall3(SYS_MMAP, (int)&a, 0, 0);
+    if (r >= 0xfffff001u) { errno = -(int)r; return (void *)-1; }
+    return (void *)r;
+}
+int munmap(void *addr, unsigned len)             { return syscall3(SYS_MUNMAP, (int)addr, len, 0); }
+int mprotect(void *addr, unsigned len, int prot) { return syscall3(SYS_MPROTECT, (int)addr, len, prot); }
 void  sleep_ms(unsigned ms)                      { syscall3(SYS_SLEEP, ms, 0, 0); }
 int   getpid(void)                               { return syscall3(SYS_GETPID, 0, 0, 0); }
 unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }
@@ -415,6 +450,7 @@ const char *strerror(int e) {
     case EPIPE:     return "broken pipe";
     case ENAMETOOLONG: return "file name too long";
     case ENOTEMPTY: return "directory not empty";
+    case ELOOP:     return "too many levels of symbolic links";
     case EMSGSIZE:  return "message too long";
     case EADDRINUSE:   return "address already in use";
     case ENETDOWN:     return "network is down";
@@ -1342,9 +1378,33 @@ int stat(const char *path, struct stat *st) {
     if (info.type == 2) st->st_mode = S_IFDIR;
     else if (info.type == 4) st->st_mode = S_IFCHR;
     else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 5) st->st_mode = S_IFLNK;
     else st->st_mode = S_IFREG;
     st->st_size = info.size;
     return 0;
+}
+
+int lstat(const char *path, struct stat *st) {
+    struct dirent_info info;
+    int r = syscall3(SYS_LSTAT, (int)path, (int)&info, 0);
+    if (r < 0) { errno = -r; return -1; }
+    if (info.type == 2) st->st_mode = S_IFDIR;
+    else if (info.type == 4) st->st_mode = S_IFCHR;
+    else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 5) st->st_mode = S_IFLNK;
+    else st->st_mode = S_IFREG;
+    st->st_size = info.size;
+    return 0;
+}
+
+int symlink(const char *target, const char *linkpath) {
+    return ioerr(syscall3(SYS_SYMLINK, (int)target, (int)linkpath, 0));
+}
+
+ssize_t readlink(const char *path, char *buf, size_t bufsiz) {
+    int r = syscall3(SYS_READLINK, (int)path, (int)buf, (int)bufsiz);
+    if (r < 0) { errno = -r; return -1; }
+    return r;
 }
 
 int rename(const char *old, const char *new) {
@@ -1356,7 +1416,7 @@ int remove(const char *path) {
 }
 
 struct DIR {
-    char path[128];
+    char path[1024];
     int index;
     struct dirent ent;
 };
@@ -1369,7 +1429,7 @@ DIR *opendir(const char *name) {
     if (r < 0) { errno = -r; return NULL; }
     if (info.type != 2) { errno = ENOTDIR; return NULL; }
     n = strlen(name);
-    if (n == 0 || n >= 128) { errno = n ? ENAMETOOLONG : ENOENT; return NULL; }
+    if (n == 0 || n >= 1024) { errno = n ? ENAMETOOLONG : ENOENT; return NULL; }
     d = malloc(sizeof *d);
     if (!d) { errno = ENOMEM; return NULL; }
     memcpy(d->path, name, n + 1);
@@ -1389,6 +1449,7 @@ struct dirent *readdir(DIR *dir) {
     if (info.type == 2) dir->ent.d_type = DT_DIR;
     else if (info.type == 4) dir->ent.d_type = DT_CHR;
     else if (info.type == 3) dir->ent.d_type = DT_BLK;
+    else if (info.type == 5) dir->ent.d_type = DT_LNK;
     else dir->ent.d_type = DT_REG;
     for (i = 0; i < 255 && info.name[i]; i++) dir->ent.d_name[i] = info.name[i];
     dir->ent.d_name[i] = 0;

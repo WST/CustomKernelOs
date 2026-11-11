@@ -8,12 +8,14 @@
 #include "pmm.h"
 #include "string.h"
 #include "bootinfo.h"
+#include "idt.h"
 
 #define LOW_RESERVED  0x100000        /* первый 1 МБ не раздаём никогда */
 #define MAX_PHYS      0x40000000u     /* работаем с первым 1 ГБ (выше — память программ, см. paging.h) */
 #define MAX_FRAMES    (MAX_PHYS / PAGE_SIZE)
 
 static u32 bitmap[MAX_FRAMES / 32];   /* 32 КБ на 1 ГБ */
+static u8 *refs;                      /* счётчики владельцев; лежат в расширенной памяти, не в BSS ядра */
 static u32 limit_frame;               /* фреймы >= этого не существуют */
 static u32 total_frames, used_frames;
 static u32 next_hint;                 /* откуда начинать поиск */
@@ -85,6 +87,23 @@ void pmm_init(void) {
     /* 3) первый мегабайт — наш (ядро, стек, карта E820) и BIOS */
     for (u32 f = 0; f < LOW_RESERVED / PAGE_SIZE; f++) set_used(f);
 
+    /* Счётчики владельцев — по байту на кадр. В BSS ядра им нет места: ядро
+     * собрано ниже 640 КБ, а 256 КБ таблицы залезли бы в окно VGA (0xA0000)
+     * и затёрли экран. Кладём таблицу в свободную расширенную память. */
+    u32 need = (limit_frame + PAGE_SIZE - 1) / PAGE_SIZE;
+    u32 run = 0, start = 0;
+    for (u32 f = LOW_RESERVED / PAGE_SIZE; f < limit_frame; f++) {
+        if (is_used(f)) { run = 0; continue; }
+        if (run == 0) start = f;
+        if (++run == need) {
+            refs = (u8 *)(start * PAGE_SIZE);
+            memset(refs, 0, limit_frame);
+            for (u32 i = 0; i < need; i++) set_used(start + i);
+            break;
+        }
+    }
+    if (!refs) kpanic("no memory for page refcounts");
+
 #ifdef MYOS_HARDWARE
     extern u8 __kernel_start[], __bss_end[];
     for (u32 f=(u32)__kernel_start/PAGE_SIZE; f<((u32)__bss_end+PAGE_SIZE-1)/PAGE_SIZE; f++)
@@ -106,6 +125,7 @@ void pmm_init(void) {
 }
 
 u32 pmm_alloc(void) {
+    if (!refs) return 0;
     for (u32 pass = 0; pass < 2; pass++) {
         u32 from = pass ? LOW_RESERVED / PAGE_SIZE : next_hint;
         u32 to   = pass ? next_hint : limit_frame;
@@ -113,6 +133,7 @@ u32 pmm_alloc(void) {
             if (bitmap[f / 32] == 0xFFFFFFFF) { f |= 31; continue; }   /* пропуск 32 занятых */
             if (!is_used(f)) {
                 set_used(f);
+                refs[f] = 1;
                 used_frames++;
                 next_hint = f + 1;
                 return f * PAGE_SIZE;
@@ -123,11 +144,34 @@ u32 pmm_alloc(void) {
 }
 
 void pmm_free(u32 addr) {
+    if (!refs) return;
     u32 f = addr / PAGE_SIZE;
     if (addr % PAGE_SIZE || addr < LOW_RESERVED || f >= limit_frame || !is_used(f)) return;
+    /* Ноль у занятого кадра — зарезервированная память (таблица счётчиков,
+     * ядро), а не последняя ссылка. Отдавать такой кадр нельзя: следующий
+     * pmm_alloc перезапишет его. Повторное освобождение уже свободного кадра
+     * отсекается проверкой is_used выше. */
+    if (refs[f] == 0) kpanic("free of a reserved frame");
+    if (refs[f] > 1) { refs[f]--; return; }          /* кадр ещё отображён в другом процессе */
+    refs[f] = 0;
     set_free(f);
     used_frames--;
     if (f < next_hint) next_hint = f;
+}
+
+bool pmm_share(u32 addr) {
+    if (!refs) return false;
+    u32 f = addr / PAGE_SIZE;
+    if (addr % PAGE_SIZE || f >= limit_frame || !is_used(f) || refs[f] == 0 || refs[f] == 255) return false;
+    refs[f]++;
+    return true;
+}
+
+u32 pmm_refs(u32 addr) {
+    if (!refs) return 0;
+    u32 f = addr / PAGE_SIZE;
+    if (addr % PAGE_SIZE || f >= limit_frame || !is_used(f)) return 0;
+    return refs[f];
 }
 
 void pmm_stats(struct pmm_stats *st) {

@@ -7,6 +7,7 @@
 #define PG_WRITE    0x002
 #define PG_USER     0x004           /* доступно из ring 3 */
 #define PG_HUGE     0x080           /* в PDE: страница 4 МБ (нужен CR4.PSE) */
+#define PG_COW      0x200           /* логически записываемая, сейчас только чтение: копия при записи */
 
 /* Карта виртуальной памяти */
 #define IDENTITY_MAX 0x40000000u    /* 0..1 ГБ: вся RAM 1:1, только для ядра */
@@ -14,6 +15,9 @@
 #define USER_TOP     0xC0000000u
 #define SHM_BASE     0xA0000000u    /* сюда отображается общая память (ipc.c) */
 #define SHM_END      0xB0000000u
+#define INTERP_BASE  0x80000000u    /* динамический загрузчик (PT_INTERP) */
+#define MMAP_BASE    SHM_END        /* mmap: анонимные страницы и MAP_PRIVATE */
+#define MMAP_END     (USER_TOP - 16 * 4096)
 /* 0xD0000000..: куча ядра (heap.h) — общая для всех каталогов */
 
 void paging_init(void);
@@ -30,7 +34,8 @@ int  vmm_map_in(u32 dir, u32 virt, u32 phys, u32 flags);
 bool vmm_lookup(u32 dir, u32 virt, u32 *phys, u32 *flags);
 u32  vmm_unmap_in(u32 dir, u32 virt);         /* -> физ. адрес; кадр не освобождается */
 u32  vmm_destroy_dir(u32 dir);                 /* освободить всё пользовательское -> страниц */
-u32  vmm_clone_user(u32 src, u32 *pages);      /* копия пользовательской памяти (fork) */
+u32  vmm_clone_user(u32 src, u32 *pages);      /* общее отображение памяти (fork); запись копирует страницу */
+bool vmm_cow_fault(u32 virt);                  /* page fault на записи: сделать процессу свою копию */
 void vmm_switch(u32 dir);                      /* загрузить CR3 */
 u32  vmm_current_dir(void);
 

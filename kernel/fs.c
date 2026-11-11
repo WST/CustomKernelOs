@@ -12,6 +12,7 @@
 #define SLOT(i) ((i)>>24)
 #define LOCAL(i) ((i)&0xffffff)
 #define HANDLE(s,i) (((u32)(s)<<24)|(i))
+#define FS_MAX_SYMLINKS 40
 static struct { bool used; int device; u32 covered, parent; } mounts[4];
 static struct mutex lock;
 void fs_namespace_lock(void) { mutex_lock(&lock); }
@@ -67,22 +68,64 @@ static int lookup(u32 dir,const char *name,u32 *out) {
     while((r=readdir_impl(dir,&pos,&de))==1) if(!strcmp(name,de.name)) { *out=de.ino; return 0; }
     return r<0 ? r : FS_ENOENT;
 }
-static int resolve_impl(u32 cwd,const char *path,u32 *out) {
+/* Текст цели в буфер с завершающим нулём. Размер ссылки меньше cap. */
+static int link_text(u32 ino,char *buf,u32 cap) {
+    struct fs_stat st; int r=stat_impl(ino,&st); if(r) return r;
+    if(st.type!=FS_TYPE_LINK || isdev(ino)) return FS_EINVAL;
+    if(!st.size) return FS_EINVAL;
+    if(st.size>=cap) return FS_ENAMETOOLONG;
+    r=select_inode(ino); if(r) return r;
+    int n=myfs_read(LOCAL(ino),0,buf,st.size);
+    if(n<0) return n;
+    if((u32)n!=st.size) return FS_EIO;
+    buf[st.size]=0; return 0;
+}
+/* follow_last: открытие, stat, chdir и exec раскрывают последнюю ссылку.
+ * unlink, rename, readlink и lstat — нет. Промежуточные компоненты всегда
+ * раскрываются. Хвост «/» тоже требует раскрытия: дальше нужен каталог.
+ * Обход итеративный: два буфера пути, не рекурсия по стеку ядра. */
+static int resolve_impl(u32 cwd,const char *path,u32 *out,bool follow_last) {
     if(!ready) return FS_ENODEV;
     if(!path || !*path) return FS_ENOENT;
-    u32 cur=*path=='/' ? FS_ROOT : cwd;
-    while(*path) {
-        while(*path=='/') path++;
-        if(!*path) break;
+    char curpath[FS_PATH_MAX], scratch[FS_PATH_MAX];
+    u32 len=strlen(path);
+    if(len>=FS_PATH_MAX) return FS_ENAMETOOLONG;
+    memcpy(curpath,path,len+1);
+    u32 dir=curpath[0]=='/' ? FS_ROOT : cwd;
+    char *p=curpath;
+    int nlinks=0;
+    for(;;) {
+        while(*p=='/') p++;
+        if(!*p) { *out=dir; return 0; }
         char name[FS_NAME_MAX+1]; u32 n=0;
-        while(path[n] && path[n]!='/') { if(n==FS_NAME_MAX) return FS_ENAMETOOLONG; name[n]=path[n]; n++; }
-        name[n]=0; path+=n; int r=lookup(cur,name,&cur); if(r) return r;
-        if(*path=='/') { struct fs_stat st; r=stat_impl(cur,&st); if(r) return r; if(st.type!=FS_TYPE_DIR) return FS_ENOTDIR; }
+        while(p[n] && p[n]!='/') { if(n==FS_NAME_MAX) return FS_ENAMETOOLONG; name[n]=p[n]; n++; }
+        name[n]=0; p+=n;
+        bool slash=*p=='/';
+        u32 next; int r=lookup(dir,name,&next); if(r) return r;
+        struct fs_stat st; r=stat_impl(next,&st); if(r) return r;
+        bool more=false;
+        if(slash) { more=true; while(*p=='/') p++; }
+        bool last=!*p;
+        if(st.type==FS_TYPE_LINK && (more || follow_last)) {
+            if(++nlinks>FS_MAX_SYMLINKS) return FS_ELOOP;
+            r=link_text(next,scratch,sizeof(scratch)); if(r) return r;
+            u32 tl=strlen(scratch), rl=strlen(p);
+            bool add= (rl || (more && last)) && (tl==0 || scratch[tl-1]!='/');
+            if(tl+(add?1u:0u)+rl>=FS_PATH_MAX) return FS_ENAMETOOLONG;
+            if(add) scratch[tl++]='/';
+            memcpy(scratch+tl,p,rl+1);
+            memcpy(curpath,scratch,tl+rl+1);
+            p=curpath;
+            if(curpath[0]=='/') dir=FS_ROOT;
+            continue;
+        }
+        if(more && st.type!=FS_TYPE_DIR) return FS_ENOTDIR;
+        dir=next;
+        if(last) { *out=dir; return 0; }
     }
-    *out=cur; return 0;
 }
 static int parent_impl(u32 cwd,const char *path,u32 *parent,char *name) {
-    char buf[128]; u32 n=strlen(path); if(!n || n>=sizeof(buf)) return FS_EINVAL;
+    char buf[FS_PATH_MAX]; u32 n=strlen(path); if(!n || n>=sizeof(buf)) return FS_EINVAL;
     memcpy(buf,path,n+1); while(n>1 && buf[n-1]=='/') buf[--n]=0;
     int slash=-1; for(u32 j=0;j<n;j++) if(buf[j]=='/') slash=j;
     const char *base=buf+slash+1;
@@ -90,7 +133,7 @@ static int parent_impl(u32 cwd,const char *path,u32 *parent,char *name) {
     if(strlen(base)>FS_NAME_MAX) return FS_ENAMETOOLONG;
     strcpy(name,base); int r=0;
     if(slash<0) *parent=cwd; else if(slash==0) *parent=FS_ROOT;
-    else { buf[slash]=0; r=resolve_impl(cwd,buf,parent); }
+    else { buf[slash]=0; r=resolve_impl(cwd,buf,parent,true); }
     if(r) return r;
     struct fs_stat st; r=stat_impl(*parent,&st); return r ? r : st.type==FS_TYPE_DIR ? 0 : FS_ENOTDIR;
 }
@@ -104,19 +147,26 @@ static bool protected(u32 ino) {
     return false;
 }
 static int getpath_impl(u32 ino,char *buf,u32 len) {
-    char parts[64][FS_NAME_MAX+1]; int depth=0;
+    /* Номера inode, а не сами имена: 64 имени по 256 байт не помещаются в стек ядра. */
+    u32 chain[64]; int depth=0;
     while(ino!=FS_ROOT) {
         if(depth==64) return FS_ENAMETOOLONG;
+        chain[depth++]=ino;
         u32 parent; int r=lookup(ino,"..",&parent); if(r) return r;
-        u32 pos=0; struct fs_dirent de; bool found=false;
-        while(readdir_impl(parent,&pos,&de)==1) if(de.ino==ino) { strcpy(parts[depth++],de.name); found=true; break; }
-        if(!found) return FS_ENOENT;
+        if(parent==ino) return FS_EIO;
         ino=parent;
     }
-    u32 n=1; for(int j=0;j<depth;j++) n+=strlen(parts[j])+(j!=0);
-    if(n+1>len) return FS_ENAMETOOLONG;
+    if(len<2) return FS_ENAMETOOLONG;
     u32 p=0; buf[p++]='/';
-    for(int j=depth-1;j>=0;j--) { u32 l=strlen(parts[j]); memcpy(buf+p,parts[j],l); p+=l; if(j) buf[p++]='/'; }
+    for(int i=depth-1;i>=0;i--) {
+        u32 want=chain[i], parent=i==depth-1 ? FS_ROOT : chain[i+1];
+        u32 pos=0; struct fs_dirent de; bool found=false;
+        while(readdir_impl(parent,&pos,&de)==1) if(de.ino==want) { found=true; break; }
+        if(!found) return FS_ENOENT;
+        u32 n=strlen(de.name);
+        if(p+n+(i?1u:0u)+1u>len) return FS_ENAMETOOLONG;
+        memcpy(buf+p,de.name,n); p+=n; if(i) buf[p++]='/';
+    }
     buf[p]=0; return 0;
 }
 int fs_init(bool *formatted) {
@@ -139,10 +189,18 @@ int fs_format(void) {
     if(!r) { myfs_select(0,mounts[0].device); r=myfs_format(); }
     mutex_unlock(&lock); return r;
 }
+#ifdef HOST_TEST
+int fs_format_legacy(void) {
+    mutex_lock(&lock); int r=ready ? 0 : FS_ENODEV;
+    for(int s=1;s<4;s++) if(mounts[s].used) r=FS_EBUSY;
+    if(!r) { myfs_select(0,mounts[0].device); r=myfs_format_legacy(); }
+    mutex_unlock(&lock); return r;
+}
+#endif
 int fs_mount(u32 cwd,const char *device,const char *target) {
     mutex_lock(&lock); int d=block_find(device),r=0,slot=0; u32 ino=0,parent=0;
     if(d<0) r=FS_ENODEV;
-    if(!r) r=resolve_impl(cwd,target,&ino);
+    if(!r) r=resolve_impl(cwd,target,&ino,true);
     struct fs_stat st;
     if(!r) { r=stat_impl(ino,&st); if(!r && st.type!=FS_TYPE_DIR) r=FS_ENOTDIR; }
     if(!r && protected(ino)) r=FS_EBUSY;
@@ -227,37 +285,70 @@ int fs_partition(const char *device,u32 op,u32 slot,u32 start,u32 sectors) {
     if(!r && block_rescan(d/5)) r=FS_EIO;
     mutex_unlock(&lock); return r;
 }
-int fs_resolve(u32 cwd,const char *path,u32 *ino) { mutex_lock(&lock); int r=resolve_impl(cwd,path,ino); mutex_unlock(&lock); return r; }
+int fs_resolve(u32 cwd,const char *path,u32 *ino) { mutex_lock(&lock); int r=resolve_impl(cwd,path,ino,true); mutex_unlock(&lock); return r; }
+int fs_resolve_nofollow(u32 cwd,const char *path,u32 *ino) { mutex_lock(&lock); int r=resolve_impl(cwd,path,ino,false); mutex_unlock(&lock); return r; }
+int fs_symlink(u32 cwd,const char *target,const char *linkpath) {
+    if(!target || !*target || !linkpath) return FS_EINVAL;
+    u32 n=strlen(target); if(n>=FS_PATH_MAX) return FS_ENAMETOOLONG;
+    mutex_lock(&lock); u32 parent=0,ino=0; char name[FS_NAME_MAX+1];
+    int r=parent_impl(cwd,linkpath,&parent,name);
+    if(!r && (isdev(parent) || (parent==FS_ROOT && !strcmp(name,"dev")))) r=FS_EROFS;
+    if(!r) {
+        r=select_inode(parent);
+        if(!r) r=myfs_create(LOCAL(parent),name,FS_TYPE_LINK,&ino);
+        if(!r) {
+            int w=myfs_write(ino,0,target,n);
+            if(w<0) r=w; else if((u32)w!=n) r=FS_EIO;
+            if(r) myfs_remove(LOCAL(parent),name);
+        }
+    }
+    mutex_unlock(&lock); return r;
+}
+int fs_readlink(u32 cwd,const char *path,char *buf,u32 len) {
+    mutex_lock(&lock); u32 ino; struct fs_stat st;
+    int r=resolve_impl(cwd,path,&ino,false);
+    if(!r) r=stat_impl(ino,&st);
+    if(!r && st.type!=FS_TYPE_LINK) r=FS_EINVAL;
+    if(!r) {
+        if(len>st.size) len=st.size;
+        if(!len) r=0;
+        else {
+            r=select_inode(ino);
+            if(!r) { int n=myfs_read(LOCAL(ino),0,buf,len); r=n<0 ? n : n; }
+        }
+    }
+    mutex_unlock(&lock); return r;
+}
 int fs_stat(u32 ino,struct fs_stat *st) { mutex_lock(&lock); int r=stat_impl(ino,st); mutex_unlock(&lock); return r; }
 int fs_readdir(u32 dir,u32 *pos,struct fs_dirent *out) { mutex_lock(&lock); int r=readdir_impl(dir,pos,out); mutex_unlock(&lock); return r; }
 int fs_getpath(u32 ino,char *buf,u32 len) { mutex_lock(&lock); int r=getpath_impl(ino,buf,len); mutex_unlock(&lock); return r; }
 int fs_create(u32 cwd,const char *path,int type,u32 *out) {
-    mutex_lock(&lock); u32 parent=0,ino; char name[28]; int r=parent_impl(cwd,path,&parent,name);
+    mutex_lock(&lock); u32 parent=0,ino; char name[FS_NAME_MAX+1]; int r=parent_impl(cwd,path,&parent,name);
     if(!r && (isdev(parent) || (parent==FS_ROOT && !strcmp(name,"dev")))) r=FS_EROFS;
     if(!r && type!=FS_TYPE_DIR && type!=FS_TYPE_FILE) r=FS_EINVAL;
     if(!r) { r=select_inode(parent); if(!r) r=myfs_create(LOCAL(parent),name,type,&ino); if(!r && out) *out=HANDLE(SLOT(parent),ino); }
     mutex_unlock(&lock); return r;
 }
 int fs_remove(u32 cwd,const char *path) {
-    mutex_lock(&lock); u32 ino,parent; char name[28]; int r=resolve_impl(cwd,path,&ino);
+    mutex_lock(&lock); u32 ino,parent; char name[FS_NAME_MAX+1]; int r=resolve_impl(cwd,path,&ino,false);
     if(!r && protected(ino)) r=FS_EBUSY;
     if(!r) r=parent_impl(cwd,path,&parent,name);
     if(!r) { r=select_inode(parent); if(!r) r=myfs_remove(LOCAL(parent),name); }
     mutex_unlock(&lock); return r;
 }
 int fs_rename(u32 cwd,const char *src,const char *dst) {
-    mutex_lock(&lock); u32 ino,sp,dp,dest; char sn[28],dn[28]; int r=resolve_impl(cwd,src,&ino);
+    mutex_lock(&lock); u32 ino,sp,dp,dest; char sn[FS_NAME_MAX+1],dn[FS_NAME_MAX+1]; int r=resolve_impl(cwd,src,&ino,false);
     if(!r && protected(ino)) r=FS_EBUSY;
     if(!r) r=parent_impl(cwd,src,&sp,sn);
     if(!r) {
         struct fs_stat st;
-        if(!resolve_impl(cwd,dst,&dest) && !stat_impl(dest,&st) && st.type==FS_TYPE_DIR) { dp=dest; strcpy(dn,sn); }
+        if(!resolve_impl(cwd,dst,&dest,false) && !stat_impl(dest,&st) && st.type==FS_TYPE_DIR) { dp=dest; strcpy(dn,sn); }
         else r=parent_impl(cwd,dst,&dp,dn);
     }
     if(!r && (isdev(dp) || (dp==FS_ROOT && !strcmp(dn,"dev")))) r=FS_EROFS;
     if(!r && SLOT(sp)!=SLOT(dp)) r=FS_EXDEV;
     if(!r) {
-        char destpath[128]; r=select_inode(dp);
+        char destpath[FS_PATH_MAX]; r=select_inode(dp);
         if(!r) r=myfs_getpath(LOCAL(dp),destpath,sizeof(destpath));
         if(!r) { u32 n=strlen(destpath),l=strlen(dn);
             if(n+l+2>sizeof(destpath)) r=FS_ENAMETOOLONG;

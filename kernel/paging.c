@@ -123,7 +123,7 @@ bool vmm_lookup(u32 dir_phys, u32 virt, u32 *phys, u32 *flags) {
     u32 pte = ((u32 *)FRAME(pde))[PT_INDEX(virt)];
     if (!(pte & PG_PRESENT)) return false;
     if (phys) *phys = FRAME(pte) | (virt & 0xFFF);
-    if (flags) *flags = (pte & pde & PG_USER) | (pte & pde & PG_WRITE) | PG_PRESENT;
+    if (flags) *flags = (pte & pde & PG_USER) | (pte & pde & PG_WRITE) | (pte & PG_COW) | PG_PRESENT;
     return true;
 }
 
@@ -165,33 +165,80 @@ u32 vmm_unmap_in(u32 dir, u32 virt) {
     return phys;
 }
 
-/* Для fork(): новый каталог с КОПИЕЙ всей пользовательской памяти.
- * Каждая страница копируется сразу (без copy-on-write — проще, но медленнее).
- * -> физ. адрес каталога или 0, если не хватило памяти. */
+/* Своя копия страницы, если поделиться кадром нельзя (счётчик уже 255). */
+static bool clone_private(u32 dst, u32 va, u32 frame, u32 flags) {
+    u32 copy = pmm_alloc();
+    if (!copy) return false;
+    memcpy((void *)copy, (void *)frame, PAGE_SIZE);
+    if (flags & PG_COW) flags = (flags & ~PG_COW) | PG_WRITE;
+    if (vmm_map_in(dst, va, copy, flags)) { pmm_free(copy); return false; }
+    return true;
+}
+
+/* Для fork(): потомок видит те же физические страницы. Записываемые становятся
+ * только для чтения у обоих; первая запись делает пишущему свою копию.
+ * Общая память (shm) не наследуется. -> физ. адрес каталога или 0. */
 u32 vmm_clone_user(u32 src_phys, u32 *pages) {
     u32 dst_phys = vmm_create_dir();
     if (!dst_phys) return 0;
     u32 *src = (u32 *)src_phys;
     *pages = 0;
+    bool demoted = false;
     for (u32 i = USER_PDE_FIRST; i < USER_PDE_END; i++) {
         if (!(src[i] & PG_PRESENT)) continue;
-        if (i >= PD_INDEX(SHM_BASE) && i < PD_INDEX(SHM_END)) continue;   /* общая память не наследуется */
+        if (i >= PD_INDEX(SHM_BASE) && i < PD_INDEX(SHM_END)) continue;
         u32 *table = (u32 *)FRAME(src[i]);
         for (u32 j = 0; j < 1024; j++) {
             if (!(table[j] & PG_PRESENT)) continue;
-            u32 frame = pmm_alloc();
-            if (!frame) { vmm_destroy_dir(dst_phys); return 0; }
-            memcpy((void *)frame, (void *)FRAME(table[j]), PAGE_SIZE);
+            u32 frame = FRAME(table[j]);
+            u32 flags = table[j] & 0xFFF;
             u32 va = (i << 22) | (j << 12);
-            if (vmm_map_in(dst_phys, va, frame, table[j] & 0xFFF)) {
+            if (!pmm_share(frame)) {
+                if (!clone_private(dst_phys, va, frame, flags)) goto fail;
+            } else if (flags & (PG_WRITE | PG_COW)) {
+                u32 shared = (flags & ~PG_WRITE) | PG_COW | PG_PRESENT | PG_USER;
+                table[j] = frame | shared;
+                if (src_phys == vmm_current_dir()) invlpg(va);
+                demoted = true;
+                if (vmm_map_in(dst_phys, va, frame, shared)) { pmm_free(frame); goto fail; }
+            } else if (vmm_map_in(dst_phys, va, frame, flags)) {
                 pmm_free(frame);
-                vmm_destroy_dir(dst_phys);
-                return 0;
+                goto fail;
             }
             (*pages)++;
         }
     }
+    /* Другие процессоры могли держать в TLB старую записываемую страницу. */
+    if (demoted) smp_user_tlb_flush(src_phys);
     return dst_phys;
+fail:
+    if (demoted) smp_user_tlb_flush(src_phys);
+    vmm_destroy_dir(dst_phys);
+    return 0;
+}
+
+/* Запись в страницу, которую fork отдал на двоих. false — это не наш случай. */
+bool vmm_cow_fault(u32 virt) {
+    virt &= ~(PAGE_SIZE - 1);
+    if (virt < USER_BASE || virt >= USER_TOP) return false;
+    u32 *pte = get_pte((u32 *)vmm_current_dir(), virt, false, false);
+    if (!pte || !(*pte & PG_PRESENT) || !(*pte & PG_COW)) return false;
+    u32 old = FRAME(*pte);
+    u32 flags = ((*pte & 0xFFF) & ~PG_COW) | PG_WRITE | PG_PRESENT | PG_USER;
+    if (pmm_refs(old) <= 1) {
+        *pte = old | flags;
+        invlpg(virt);
+        smp_user_tlb_flush(vmm_current_dir());
+        return true;
+    }
+    u32 frame = pmm_alloc();
+    if (!frame) return false;
+    memcpy((void *)frame, (void *)old, PAGE_SIZE);
+    *pte = frame | flags;
+    invlpg(virt);
+    smp_user_tlb_flush(vmm_current_dir());
+    pmm_free(old);
+    return true;
 }
 
 /* Освободить всю пользовательскую часть каталога и сам каталог.
