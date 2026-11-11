@@ -153,12 +153,19 @@ struct win {
     int  rx, ry, rw, rh;                /* куда вернуть из развёрнутого */
     bool awaiting;                      /* попросили новый буфер, ждём WM_SETBUF */
     unsigned asked_at;
+    bool motion, closing;
+    struct rect visual, motion_from, motion_to;
+    unsigned motion_started, motion_duration;
+    int opacity, opacity_from, opacity_to;
 };
 
 static struct win wins[MAXWIN];
 static int zorder[MAXWIN], nz;          /* снизу вверх */
 static int focus = -1;
 static int cascade;
+static bool effects_enabled;
+static unsigned motion_deadline;
+static void remove_window_now(int idx);
 
 static int outer_w(struct win *w) { return w->w; }
 static int outer_h(struct win *w) { return w->h + HEAD_H; }
@@ -209,9 +216,66 @@ static void add_dirty(int x, int y, int w, int h) {
 static void add_dirty_r(struct rect r) { add_dirty(r.x, r.y, r.w, r.h); }
 /* окно вместе с тенью */
 static struct rect win_full(struct win *w) {
+    if(w->motion) {
+        int px=(SH_PAD*w->visual.w+w->w-1)/w->w;
+        int py=(SH_PAD*w->visual.h+outer_h(w)-1)/outer_h(w);
+        return mkrect(w->visual.x-px,w->visual.y-py,w->visual.w+2*px,w->visual.h+2*py);
+    }
     return mkrect(w->x - SH_PAD, w->y - SH_PAD, outer_w(w) + 2 * SH_PAD, outer_h(w) + 2 * SH_PAD);
 }
 static void dirty_win(struct win *w) { add_dirty_r(win_full(w)); }
+static struct rect window_rect(struct win *w) { return mkrect(w->x,w->y,w->w,outer_h(w)); }
+static void motion_start(struct win *w,struct rect from,struct rect to,int a0,int a1,unsigned duration) {
+    dirty_win(w);
+    w->motion=true;w->visual=w->motion_from=from;w->motion_to=to;
+    w->opacity=w->opacity_from=a0;w->opacity_to=a1;
+    w->motion_started=ticks();w->motion_duration=duration;
+    motion_deadline=w->motion_started;
+    dirty_win(w);
+}
+static bool motions_active(void) {
+    for(int i=0;i<MAXWIN;i++)if(wins[i].used && wins[i].motion)return true;
+    return false;
+}
+static void motions_finish(void) {
+    for(int i=0;i<MAXWIN;i++) {
+        struct win *w=&wins[i];if(!w->used || !w->motion)continue;
+        dirty_win(w);w->motion=false;
+        if(w->closing)remove_window_now(i);
+        else if(!w->minimized)dirty_win(w);
+    }
+}
+static void motions_tick(void) {
+    if(!gpu_scene) { motions_finish(); return; }
+    unsigned now=ticks();
+    if((int)(now-motion_deadline)<0)return;
+    motion_deadline+=16;
+    if((int)(now-motion_deadline)>32)motion_deadline=now+16;
+    for(int i=0;i<MAXWIN;i++) {
+        struct win *w=&wins[i];if(!w->used || !w->motion)continue;
+        dirty_win(w);
+        unsigned elapsed=now-w->motion_started;
+        if(elapsed>=w->motion_duration) {
+            w->motion=false;
+            if(w->closing)remove_window_now(i);
+            else if(!w->minimized)dirty_win(w);
+            continue;
+        }
+        int t=1024-(int)(elapsed*1024/w->motion_duration);
+        int eased=1024-t*t*t/(1024*1024);
+        w->visual.x=w->motion_from.x+(w->motion_to.x-w->motion_from.x)*eased/1024;
+        w->visual.y=w->motion_from.y+(w->motion_to.y-w->motion_from.y)*eased/1024;
+        w->visual.w=w->motion_from.w+(w->motion_to.w-w->motion_from.w)*eased/1024;
+        w->visual.h=w->motion_from.h+(w->motion_to.h-w->motion_from.h)*eased/1024;
+        w->opacity=w->opacity_from+(w->opacity_to-w->opacity_from)*eased/1024;
+        dirty_win(w);
+    }
+}
+static int motion_wait(void) {
+    if(!motions_active())return 100;
+    int left=(int)(motion_deadline-ticks());
+    return left>0?left:0;
+}
 static void dirty_head(struct win *w) { add_dirty(w->x - 2, w->y - 2, outer_w(w) + 4, HEAD_H + 2); }
 /* с запасом: у стрелки «горячая точка» в углу, у двойных стрелок — в центре */
 static void dirty_cursor(int x, int y) { add_dirty(x - 14, y - 14, CURSOR_W + 16, CURSOR_H + 16); }
@@ -1001,7 +1065,7 @@ static void flush(void) {
         /* During resize the app may still own its previous, smaller buffer. */
         for (int k = 0; k < nz && scene_ok; k++) {
             struct win *w = &wins[zorder[k]];
-            if (!w->minimized && (w->bw < w->w || w->bh < w->h)) scene_ok = false;
+            if (!w->minimized && !w->motion && (w->bw < w->w || w->bh < w->h)) scene_ok = false;
         }
         if (scene_ok && gpu_compose(dirty[i])) continue;
         if (scene_ok) {
@@ -1057,11 +1121,11 @@ static void raise(int idx) {
 
 /* самое верхнее видимое окно (или -1) */
 static int top_visible(void) {
-    for (int k = nz - 1; k >= 0; k--) if (!wins[zorder[k]].minimized) return zorder[k];
+    for (int k = nz - 1; k >= 0; k--) if (!wins[zorder[k]].minimized && !wins[zorder[k]].closing) return zorder[k];
     return -1;
 }
 
-static void remove_window(int idx) {
+static void remove_window_now(int idx) {
     struct win *w = &wins[idx];
     if (!w->used) return;
     if (!w->minimized) dirty_win(w);
@@ -1083,7 +1147,32 @@ static void remove_window(int idx) {
     dock_changed();
 }
 
+static void remove_window(int idx) {
+    struct win *w=&wins[idx];
+    if(!w->used || w->closing)return;
+    if(effects_enabled && gpu_scene && !overview_open && !w->minimized) {
+        struct rect from=w->motion?w->visual:window_rect(w), to=window_rect(w);
+        to.x+=to.w/40;to.y+=to.h/40;to.w-=to.w/20;to.h-=to.h/20;
+        int opacity=w->motion?w->opacity:255;
+        w->closing=true;motion_start(w,from,to,opacity,0,120);
+        if(focus==idx) { focus=-1;set_focus(top_visible()); }
+        return;
+    }
+    remove_window_now(idx);
+}
+
+static struct rect minimize_target(int idx) {
+    int cell=n_dock;
+    for(int i=0;i<n_dock;i++)if(dock[i].win==idx ||
+        (wins[idx].app>=0 && dock[i].app==wins[idx].app)) { cell=i;break; }
+    return dock_cell(cell);
+}
+
 static void minimize(int idx) {
+    struct win *w=&wins[idx];
+    struct rect from=w->motion?w->visual:window_rect(w);
+    if(effects_enabled && gpu_scene && !overview_open)
+        motion_start(w,from,minimize_target(idx),w->motion?w->opacity:255,0,180);
     wins[idx].minimized = true;
     dirty_win(&wins[idx]);
     if (focus == idx) { focus = -1; set_focus(top_visible()); send(wins[idx].owner, WM_FOCUS, idx, 0, 0, 0); }
@@ -1091,7 +1180,14 @@ static void minimize(int idx) {
 }
 
 static void restore(int idx) {
-    if (wins[idx].minimized) { wins[idx].minimized = false; dirty_win(&wins[idx]); }
+    if (wins[idx].minimized) {
+        struct win *w=&wins[idx];
+        struct rect from=w->motion?w->visual:minimize_target(idx);
+        int opacity=w->motion?w->opacity:0;
+        w->minimized = false;
+        if(effects_enabled && gpu_scene && !overview_open)motion_start(w,from,window_rect(w),opacity,255,180);
+        dirty_win(w);
+    }
     raise(idx);
     add_dirty_r(dock_rect());
 }
@@ -1137,6 +1233,7 @@ static void set_geometry(int idx, int x, int y, int cw, int ch) {
 static void maximize(int idx, bool on) {
     struct win *w = &wins[idx];
     if (!w->resizable || on == w->maximized) return;
+    struct rect from=w->motion?w->visual:window_rect(w);
     dirty_win(w);
     if (on) {
         w->rx = w->x; w->ry = w->y; w->rw = w->w; w->rh = w->h;
@@ -1146,6 +1243,7 @@ static void maximize(int idx, bool on) {
         w->maximized = false;
         set_geometry(idx, w->rx, w->ry, w->rw, w->rh);
     }
+    if(effects_enabled && gpu_scene && !overview_open)motion_start(w,from,window_rect(w),255,255,180);
     dirty_win(w);
 }
 
@@ -1195,6 +1293,7 @@ static void set_cursor_shape(int shape) {
 
 /* сменилось разрешение экрана */
 static void screen_resized(void) {
+    motions_finish();
     SW = gfx_w; SH = gfx_h;
     back = gfx_buf;
     gpu_reset();
@@ -1324,6 +1423,11 @@ static void handle_msg(struct msg *m) {
         dirty_win(w);
         set_focus(idx);
         dock_changed();
+        if(effects_enabled && gpu_scene && !overview_open) {
+            struct rect to=window_rect(w),from=to;
+            from.x+=to.w/50;from.y+=to.h/50+6;from.w-=to.w/25;from.h-=to.h/25;
+            motion_start(w,from,to,0,255,150);
+        }
         return;
     }
     case WM_UPDATE: {
@@ -1478,7 +1582,7 @@ static int window_at(int px, int py) {
     if (py < TOPBAR_H || px < DOCK_W) return -1;
     for (int k = nz - 1; k >= 0; k--) {
         struct win *w = &wins[zorder[k]];
-        if (!w->minimized && ui_inside(px, py, w->x, w->y, outer_w(w), outer_h(w))) return zorder[k];
+        if (!w->minimized && !w->closing && ui_inside(px, py, w->x, w->y, outer_w(w), outer_h(w))) return zorder[k];
     }
     return -1;
 }
@@ -1514,6 +1618,7 @@ static void close_sysmenu(void) {
 
 static void set_overview(bool on) {
     if (on == overview_open) return;
+    motions_finish();
     if (on) {
         make_overview_bg();
         if (!overview_bg) return;
@@ -1586,6 +1691,7 @@ static void dock_click(int i) {
 }
 
 static void mouse_down(int x, int y) {
+    motions_finish();
     if (sysmenu_open) {
         int it = sysmenu_at(x, y);
         if (it >= 0) {
@@ -1686,7 +1792,9 @@ static void mouse_move(int ox, int oy, int x, int y) {
         struct win *w = &wins[drag];
         if (iabs(x - drag_px) < 8 && iabs(y - drag_py) < 8) return;
         int ratio = drag_dx * 256 / (w->w > 0 ? w->w : 1);
+        bool animate=effects_enabled;effects_enabled=false;
         maximize(drag, false);
+        effects_enabled=animate;
         int nx = x - ratio * w->w / 256, ny = y - drag_dy;
         drag_dx = x - nx;
         set_geometry(drag, nx, ny < TOPBAR_H ? TOPBAR_H : ny, w->w, w->h);
@@ -1916,14 +2024,16 @@ start_session:
     unsigned last_wheel = ms.wheel;
     gpu_reset();
     dprintf(STDERR, "desktop: %s compositor\n", gpu_scene ? "GPU/VirGL" : "software");
+    effects_enabled=gpu_scene;
     add_dirty(0, 0, SW, SH);
     flush();
 
     unsigned last_check = ticks();
     while (!quit) {
-        gfx_frame_begin();
         struct msg m;
-        if (msg_recv(&m, 100) == 0) {
+        int received=msg_recv(&m,motion_wait());
+        gfx_frame_begin();
+        if (received == 0) {
             handle_msg(&m);
             /* Give input and presentation a turn even under continuous app updates. */
             for (int batch=0; batch<15 && msg_recv(&m,0)==0; batch++) handle_msg(&m);
@@ -1978,6 +2088,7 @@ start_session:
             update_clock();
             check_owners();
         }
+        motions_tick();
         flush();
         gfx_frame_end();
     }

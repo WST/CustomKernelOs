@@ -557,6 +557,15 @@ static int sys_gfx_info2(u32 uout) {
 static int sys_gfx_accel(u32 op, u32 uargs) {
     if (!fb_ready()) return -ENODEV;
     if (!fb_is_owner(task_current()->id)) return -EPERM;
+    if(op==GA_SURFACE_SCALED) {
+        if(!user_buf_ok(uargs,10*4,false))return -EFAULT;
+        i32 a[10];memcpy(a,(const void *)uargs,sizeof(a));
+        u32 f=irq_save();
+        fb_upload_pending();
+        bool ok=vgpu_surface_scaled(a[0],a[1],a[2],a[3],a[4],a[5],a[6],a[7],a[8],a[9]);
+        irq_restore(f);
+        return ok?0:-EINVAL;
+    }
     if (op == GA_SURFACE_UPDATE) {
         if (!user_buf_ok(uargs, 8 * 4, false)) return -EFAULT;
         u32 a[8]; memcpy(a, (const void *)uargs, sizeof(a));

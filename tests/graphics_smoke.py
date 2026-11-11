@@ -14,6 +14,7 @@ import time
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', choices=('gpu', 'std', 'virtio'), default='gpu')
 parser.add_argument('--reuse', action='store_true', help='reuse this test disk/account for a local rerun')
+parser.add_argument('--large-scene', action='store_true', help='exercise transitions and dragging at 2560x1600')
 parser.add_argument('--build', default='build/graphics-test', help='isolated build directory')
 args = parser.parse_args()
 b = pathlib.Path(args.build)
@@ -184,7 +185,8 @@ try:
         assert resized[:2] == (1280, 720)
         close_to(pixel(resized, 1279, 719), (40, 20, 200), 0)
         key('n'); wait('GPUCHECK PASS GPU')
-        time.sleep(.3); key('ctrl-u'); send('gpuscene\n'); wait('GPUSCENE PASS')
+        time.sleep(.3); key('ctrl-u'); send('gpuscene'+(' large' if args.large_scene else '')+'\n'); wait('GPUSCENE PASS')
+        print(re.search(r'SMOOTHBENCH DRAG END[^\n]+',output()).group(0),flush=True)
         print(re.search(r'GPUSCENE BENCH[^\n]+', output()).group(0), flush=True)
         print('GPUSCENE HOST WALL: software %.3f s, GPU %.3f s' % (
             milestones['SOFTWARE END'] - milestones['SOFTWARE BEGIN'],

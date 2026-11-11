@@ -17,10 +17,13 @@ static void frame_barrier(void) {
 
 static bool wait_consumed(window *w) {
     unsigned start = ticks();
+    int yields=0;
     while (w->frame->submitted != w->frame->consumed) {
         frame_barrier();
         if (ticks() - start >= 2000 || service_find("desktop") != desktop) return false;
-        sleep_ms(1);
+        /* Let a ready desktop capture this frame immediately instead of
+         * imposing the PIT's 10 ms sleep quantum on every publication. */
+        if(yields++<16)yield();else sleep_ms(1);
     }
     frame_barrier();
     return true;

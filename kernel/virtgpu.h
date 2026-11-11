@@ -20,6 +20,7 @@ void vgpu_cursor_tick(void);
 bool vgpu_surface_upload(u32 slot, const u32 *pixels, u32 w, u32 h, bool alpha);
 bool vgpu_surface_update(u32 slot, const u32 *pixels, u32 sw, u32 sh, u32 x, u32 y, u32 w, u32 h);
 bool vgpu_surface_blit(u32 slot, int sx, int sy, int dx, int dy, int w, int h);
+bool vgpu_surface_scaled(u32 slot,int x,int y,int w,int h,int cx,int cy,int cw,int ch,u32 opacity);
 void vgpu_surfaces_clear(void);
 bool vgpu_readback(u32 *pixels);
 #endif

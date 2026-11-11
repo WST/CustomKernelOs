@@ -37,6 +37,17 @@ static u32 queue_page, next_mmio, next_id = 1, front, back, upload;
 static u32 width, height, error;
 static u64 fence;
 static bool virgl, live, changed;
+static u32 damage_x0,damage_y0,damage_x1,damage_y1;
+static void damage(u32 x,u32 y,u32 w,u32 h) {
+    if(!changed) { damage_x0=x;damage_y0=y;damage_x1=x+w;damage_y1=y+h; }
+    else {
+        if(x<damage_x0)damage_x0=x;
+        if(y<damage_y0)damage_y0=y;
+        if(x+w>damage_x1)damage_x1=x+w;
+        if(y+h>damage_y1)damage_y1=y+h;
+    }
+    changed=true;
+}
 static struct { u32 id, w, h, format; } surfaces[VGPU_SURFACE_LIMIT];
 static u32 surface_bytes;
 static u8 command[CMD_BYTES] __attribute__((aligned(4096)));
@@ -223,6 +234,7 @@ bool vgpu_mode(u32 w, u32 h) {
     u32 old_upload = upload, old_front = front, old_back = back;
     u32 old_width = width, old_height = height;
     bool old_changed = changed;
+    u32 old_damage[4]={damage_x0,damage_y0,damage_x1,damage_y1};
     /* Preserve the previous mode until every new resource has been verified. */
     u32 old_bytes = width * height * 4;
     void *saved = old_bytes ? kmalloc(old_bytes) : NULL;
@@ -252,7 +264,7 @@ bool vgpu_mode(u32 w, u32 h) {
         px[0] = px[1] = 0;
         if (!transfer(upload, 0, 0, 2, 1, false) || !blit(upload, back, 0, 0, 0, 0, w, h)) goto fail;
     }
-    changed = true;
+    changed = false; damage(0,0,w,h);
     if (!vgpu_commit()) goto fail;
     destroy(old_upload); destroy(old_front); destroy(old_back);
     vgpu_surfaces_clear();
@@ -261,6 +273,7 @@ bool vgpu_mode(u32 w, u32 h) {
 fail:
     width = old_width; height = old_height;
     upload = old_upload; front = old_front; back = old_back; changed = old_changed;
+    damage_x0=old_damage[0];damage_y0=old_damage[1];damage_x1=old_damage[2];damage_y1=old_damage[3];
     if (saved) memcpy((void *)FB_VIRT, saved, old_bytes);
     if (old_upload) { scanout(virgl ? old_front : old_upload); flush(virgl ? old_front : old_upload); }
     destroy(new_upload); destroy(new_front); destroy(new_back);
@@ -344,7 +357,7 @@ bool vgpu_init(struct fb_info *info) {
 bool vgpu_upload(int x, int y, int w, int h) {
     if (!transfer(upload, x, y, w, h, false)) return false;
     if (virgl && !blit(upload, back, x, y, x, y, w, h)) return false;
-    changed = true;
+    damage(x,y,w,h);
     return true;
 }
 
@@ -354,8 +367,10 @@ bool vgpu_commit(void) {
     if (!scanout(virgl ? back : upload) || !flush(virgl ? back : upload)) return false;
     if (virgl) {
         u32 old = front; front = back; back = old;
-        /* Preserve unchanged pixels entirely on the GPU for the next frame. */
-        if (!blit(front, back, 0, 0, 0, 0, width, height)) return false;
+        /* Both targets already agree outside this frame's damage. Copy only
+         * the changed area, rather than a 16 MiB screen on every small move. */
+        if (!blit(front, back, damage_x0,damage_y0,damage_x0,damage_y0,
+                  damage_x1-damage_x0,damage_y1-damage_y0)) return false;
     }
     changed = false;
     return true;
@@ -366,7 +381,7 @@ bool vgpu_copy(int sx, int sy, int dx, int dy, int w, int h) {
     /* The upload texture is scratch here: two distinct resources make even
      * overlapping scroll/drag copies well defined on every OpenGL backend. */
     if (!blit(back, upload, sx, sy, 0, 0, w, h) || !blit(upload, back, 0, 0, dx, dy, w, h)) return false;
-    changed = true;
+    damage(dx,dy,w,h);
     return true;
 }
 
@@ -433,10 +448,25 @@ bool vgpu_surface_blit(u32 slot, int sx, int sy, int dx, int dy, int w, int h) {
         (u32)w > surfaces[slot].w - sx || (u32)h > surfaces[slot].h - sy ||
         (u32)dx > width || (u32)dy > height || (u32)w > width - dx || (u32)h > height - dy) return false;
     bool ok = surfaces[slot].format == 1
-        ? alpha_blit(surfaces[slot].id, surfaces[slot].w, surfaces[slot].h, sx, sy, dx, dy, w, h)
+        ? alpha_blit(surfaces[slot].id, surfaces[slot].w, surfaces[slot].h, sx, sy, dx, dy, w, h, 1,255)
         : blit_format(surfaces[slot].id, back, sx, sy, dx, dy, w, h, FORMAT, surfaces[slot].h);
     if (!ok) return false;
-    changed = true;
+    damage(dx,dy,w,h);
+    return true;
+}
+
+/* Draw a complete retained surface into a destination rectangle, clipped in
+ * destination space. UVs keep their original phase across dirty rectangles. */
+bool vgpu_surface_scaled(u32 slot,int x,int y,int w,int h,int cx,int cy,int cw,int ch,u32 opacity) {
+    if(!vgpu_accelerated() || slot>=VGPU_SURFACE_LIMIT || !surfaces[slot].id ||
+       w<=0 || h<=0 || w>8192 || h>8192 || x < -8192 || y < -8192 ||
+       x>8192 || y>8192 || cx<0 || cy<0 || cw<=0 || ch<=0 ||
+       (u32)cx>width || (u32)cy>height || (u32)cw>width-cx || (u32)ch>height-cy || opacity>255) return false;
+    int left=x>cx?x:cx, top=y>cy?y:cy;
+    int right=x+w<cx+cw?x+w:cx+cw, bottom=y+h<cy+ch?y+h:cy+ch;
+    if(left>=right || top>=bottom || !opacity)return true;
+    if(!alpha_blit(surfaces[slot].id,w,h,left-x,top-y,left,top,right-left,bottom-top,surfaces[slot].format,opacity)) return false;
+    damage(left,top,right-left,bottom-top);
     return true;
 }
 

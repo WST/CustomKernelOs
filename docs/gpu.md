@@ -119,6 +119,33 @@ use a distinct scratch texture. Timer updates cannot expose unfinished frames.
 This prevents partially assembled guest frames; it does not promise physical
 monitor vsync on every host/display configuration.
 
+## Frame cadence and motion
+
+The desktop waits for input outside an unfinished frame. Open/close,
+minimize/restore and maximize transitions reuse retained GPU textures with
+time-based easing, clipped scaling and opacity over 120–180 ms. Active
+transitions request frames on a 16 ms timeline; missed deadlines are skipped
+rather than replayed. Idle desktops still sleep. Pointer dragging remains
+direct, including pulling a maximized window down, and interaction cancels
+outstanding transitions before hit testing. Software composition keeps its
+immediate behavior. Maximized decoration textures contain only the title bar,
+avoiding full-screen transparent rasterization before the first frame.
+
+GPU targets are synchronized only across the union of changed pixels, while
+uploads, draw batches and presentation remain fenced. A ready desktop gets
+bounded scheduler yields before a publisher falls back to timer sleep, avoiding
+a mandatory 10 ms publication delay. Settings repaints on hover-region changes
+instead of every mouse coordinate. Browser wheel and keyboard scrolling uses a
+160 ms curve, accumulates repeated input and reuses exposed scroll strips;
+navigation, selection and resize cancel it. Deferred DOM repaint has a 16 ms
+budget instead of a 100 ms minimum.
+
+These timings target consistent motion, not guaranteed monitor refresh or
+Windows/macOS performance. On this WSLg/D3D12 setup, the 2560x1600 two-window
+drag benchmark remains approximately 1.93–1.97 s for 100 frames (~51–52 guest frames/s).
+The transitions and reduced rasterization remove jumps and pauses without
+claiming a higher measured throughput for that scene.
+
 `gfx_readback` reads the visible GPU scanout for an owning program, including
 while another frame is unfinished. QEMU's `screendump` cannot read SDL GL scanout,
 so the GPU integration test uses this fenced readback to compare actual pixels.
@@ -147,6 +174,13 @@ in separate processes, deliberately delaying capture until the client starts
 an unfinished repaint. GPU readback must contain only completed pixels. The
 graphics test runs it at 1024x768 and 2560x1600 and checks partial damage,
 back-to-back publications, resize, minimized updates and window destruction.
+
+`make smoothtest` exercises actual browser layout and painting while checking
+intermediate scroll positions, endpoints, repeated/reversed input and clamping.
+`python3 tests/graphics_smoke.py --backend gpu --large-scene` also checks scaled
+texture bounds, opacity, split clipping, retained damage and every window
+transition against final software-reference pixels without repairing the frame
+before comparison. `SMOOTHBENCH` records 100 dirty-window moves for comparisons.
 
 ### Recorded hardware run
 

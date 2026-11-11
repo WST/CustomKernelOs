@@ -65,6 +65,8 @@ int  gfx_surface_blit(int slot, int sx, int sy, int dx, int dy, int w, int h);
 int  gfx_readback(color_t *pixels); /* visible GPU scanout; buffer is gfx_w * gfx_h */
 int  gfx_frame_begin(void);
 int  gfx_frame_end(void);
+/* Scale a retained texture; clipping does not alter its sampling coordinates. */
+int gfx_surface_scaled(int slot,int x,int y,int w,int h,int cx,int cy,int cw,int ch,int opacity);
 int  gfx_hw_copy(int sx, int sy, int dx, int dy, int w, int h);
 int  gfx_hw_fill(int x, int y, int w, int h, color_t c);
 int  gfx_hw_cursor(int on);         /* 0 или -ENODEV (нет аппаратного курсора) */
