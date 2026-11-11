@@ -299,7 +299,10 @@ static bool attach(unsigned port) {
     /* PORTSC change bits are RW1C; never echo unrelated writable state. */
     if (!(status&2)) {
         wr(reg,(status&(1u<<9))|(1u<<4));
-        if (!wait_reg(reg,1u<<4,0,1000) || !(rd(reg)&2)) return false;
+        if (!wait_reg(reg,1u<<4,0,1000) || !(rd(reg)&2)) {
+            kprintf("xHCI: port %u reset failed, PORTSC=%x\n",port,rd(reg));
+            return false;
+        }
     }
     sleep_ms(20); /* USB reset recovery before Address Device */
     status=rd(reg);
@@ -357,6 +360,7 @@ bool xhci_init(void) {
         }
     }
     if (!found) return false;
+    kprintf("xHCI: PCI %u:%u.%u\n",controller.bus,controller.dev,controller.func);
     u32 bar=pci_read(controller.bus,controller.dev,controller.func,0x10);
     if ((bar&1) || ! (bar&~15u) || ((bar&6)==4 && pci_read(controller.bus,controller.dev,controller.func,0x14))) {
         kprintf("xHCI: unsupported MMIO BAR (requires physical address below 4 GiB)\n"); return false;
@@ -370,6 +374,7 @@ bool xhci_init(void) {
     pci_write(controller.bus,controller.dev,controller.func,4,(pci_command&0xffff)|6|(1<<10));
     op=rd(0)&255; db=rd(0x14)&~3u; rt=rd(0x18)&~31u;
     maxslots=rd(4)&255; ports=rd(4)>>24; context_bytes=(rd(0x10)&4)?64:32;
+    kprintf("xHCI: MMIO=%x version=%x slots=%u\n",phys,rd(0)>>16,maxslots);
     if (op<0x20 || db+1024>WINDOW || rt+0x40>WINDOW || op+0x400+ports*16>WINDOW || !maxslots) return false;
     /* BIOS ownership handoff before touching operational registers. */
     unsigned ext=rd(0x10)>>16;
@@ -415,7 +420,25 @@ bool xhci_init(void) {
     if (!wait_reg(op+4,1,0,1000)) return false;
     running=true;
     kprintf("xHCI: %u ports, %u-byte contexts, polling\n",ports,context_bytes);
-    for (unsigned port=1;port<=ports && !poisoned;port++) attach(port);
+    kprintf("xHCI: scratchpads=%u, port power control=%u\n",scratch,(rd(0x10)>>3)&1);
+    /* Real controllers may leave switchable port power off after reset.
+     * Preserve only power when writing PORTSC, not its RW1C change bits. */
+    if (rd(0x10)&8) {
+        for (unsigned port=1;port<=ports;port++) {
+            u32 reg=op+0x400+(port-1)*16;
+            if (!(rd(reg)&(1u<<9))) wr(reg,1u<<9);
+        }
+    }
+    sleep_ms(100); /* power-good / connection debounce before enumeration */
+    unsigned connected=0;
+    for (unsigned port=1;port<=ports && !poisoned;port++) {
+        u32 status=rd(op+0x400+(port-1)*16);
+        if (!(status&1)) continue;
+        connected++;
+        kprintf("xHCI: connected port %u, PORTSC=%x\n",port,status);
+        if (!attach(port)) kprintf("xHCI: port %u has no active boot HID interface\n",port);
+    }
+    if (!connected) kprintf("xHCI: no connected root ports on this controller\n");
     unsigned active=0; for (unsigned i=0;i<nhid;i++) if (hids[i].active) active++;
     if (poisoned || task_create("usb-hid",worker,NULL)<0) {
         running=false; wr(op,rd(op)&~1u); return false;

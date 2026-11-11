@@ -81,11 +81,19 @@ int pipe_create(struct file **rd, struct file **wr) {
 /* ---------------------------------------------------------------- консоль */
 
 static int console_write(const char *buf, u32 len, bool err) {
-    u32 f = irq_save();
-    if (err) vga_set_color(LIGHT_RED, BLACK);
-    for (u32 i = 0; i < len; i++) vga_putc(buf[i]);
-    if (err) vga_set_color(LIGHT_GREY, BLACK);
-    irq_restore(f);
+    for (u32 done=0;done<len;) {
+        u32 count=len-done;
+        if (count>256) count=256;
+        u32 f=irq_save();
+        if (err && !done) vga_set_color(LIGHT_RED, BLACK);
+        vga_write(buf+done,count);
+        if (err && done+count==len) vga_set_color(LIGHT_GREY, BLACK);
+        irq_restore(f);
+        done+=count;
+        /* Syscall entry has IF=0. Merely restoring flags cannot let the USB
+         * worker or timer run; yield at a completed console batch instead. */
+        if (done<len) task_yield();
+    }
     return len;
 }
 

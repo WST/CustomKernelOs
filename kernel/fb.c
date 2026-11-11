@@ -244,6 +244,8 @@ bool fb_mode_ok(u32 w, u32 h) {
 static int dx0 = 1 << 30, dy0 = 1 << 30, dx1, dy1;
 
 static void mark(int x, int y, int w, int h) {
+    /* WC stores must reach the device before returning a completed update. */
+    if (drv==DRV_FIRMWARE) { __sync_synchronize(); return; }
     if ((drv != DRV_SVGA && drv != DRV_VIRTIO) || w <= 0 || h <= 0) return;
     u32 f = irq_save();
     if (x < dx0) dx0 = x;
@@ -254,6 +256,7 @@ static void mark(int x, int y, int w, int h) {
 }
 
 static void present(void) {
+    if (drv==DRV_FIRMWARE) { __sync_synchronize(); return; }
     if (drv == DRV_VIRTIO) {
         u32 f = irq_save();
         if (dx1 > dx0 && dy1 > dy0) {
@@ -392,7 +395,8 @@ bool fb_init(void) {
      * каталога попадут и во все каталоги процессов */
     u32 size = info.vram < FB_VIRT_SZ ? info.vram : FB_VIRT_SZ;
     for (u32 off = 0; off < size; off += 4096)
-        if (vmm_map(FB_VIRT + off, info.phys + off, PG_WRITE)) return false;
+        if (vmm_map(FB_VIRT + off, info.phys + off,
+                    PG_WRITE | (drv==DRV_FIRMWARE ? paging_video_flags() : 0))) return false;
 
     if (drv==DRV_FIRMWARE) {
         memcpy(font,(const void *)boot->font_phys,sizeof(font));

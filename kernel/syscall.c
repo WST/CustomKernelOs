@@ -9,6 +9,7 @@
  * указатель проверяется — он должен лежать в памяти программы, а не ядра,
  * и эта память должна быть отображена (и доступна на запись, если пишем). */
 #include "syscall.h"
+#include "klog.h"
 #include "sysinfo.h"
 #include "smp.h"
 #include "tty.h"
@@ -1013,6 +1014,21 @@ void syscall_dispatch(struct regs *r) {
         } else ret=account_ctl(a,name,password);
         volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;
+    }
+    case SYS_KLOG_READ: {
+        if(b>KLOG_CAPACITY) { ret=-EINVAL;break; }
+        if(!user_buf_ok(c,sizeof(struct klog_cursor),true) || !user_buf_ok(a,b,true)) {
+            ret=-EFAULT;break;
+        }
+        struct klog_cursor cursor;memcpy(&cursor,(const void *)c,sizeof(cursor));
+        char *snapshot=b?kmalloc(b):NULL;
+        if(b && !snapshot) { ret=-ENOMEM;break; }
+        ret=klog_read(snapshot,b,&cursor);
+        if(ret>=0) {
+            if(ret)memcpy((void *)a,snapshot,ret);
+            memcpy((void *)c,&cursor,sizeof(cursor));
+        }
+        kfree(snapshot);break;
     }
     case SYS_CPUINFO: {
         u32 count = smp_count();
