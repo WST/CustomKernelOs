@@ -1,0 +1,18 @@
+# Bash 5.3. configure не запускаем: config.h, pathnames.h и version.h уже готовы.
+name bash
+descr Bourne Again Shell 5.3
+workdir /tmp/ext/bash
+fetch https://ftp.gnu.org/gnu/bash/bash-5.3.tar.gz bash-5.3.tar.gz
+tar xvf bash-5.3.tar.gz
+workdir /tmp/ext/bash/bash-5.3
+mkdir obj
+copy config.h config.h
+copy pathnames.h pathnames.h
+copy version.h version.h
+copy pipesize.h builtins/pipesize.h
+copy Makefile Makefile
+copy genbuiltins.c genbuiltins.c
+patch patch-printf-mb
+patch patch-timer-timeval
+patch patch-netopen-stub
+make

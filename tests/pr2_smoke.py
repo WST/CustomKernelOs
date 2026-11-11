@@ -22,7 +22,8 @@ threading.Thread(target=server.serve_forever, daemon=True).start()
 b = pathlib.Path('build')
 b.mkdir(exist_ok=True)
 image = b / 'pr2-smoke.img'
-with image.open('wb') as fresh: fresh.truncate(4 * 1024 * 1024)
+# The full installation includes compiler sources and Bash instructions.
+with image.open('wb') as fresh: fresh.truncate(64 * 1024 * 1024)
 subprocess.run(['make', 'build/os.img', 'build/user/pr2check', 'install', 'DISK=' + str(image)], check=True)
 subprocess.run(['build/myfs', str(image), 'put', 'build/user/pr2check', '/bin/pr2check'], check=True)
 log = b / 'pr2-smoke.log'

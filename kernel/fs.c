@@ -271,7 +271,7 @@ int fs_partition(const char *device,u32 op,u32 slot,u32 start,u32 sectors) {
             } else {
                 u32 total=block_get(d)->sectors;
                 if(p[4]) r=FS_EEXIST;
-                else if(start<2048 || !sectors || sectors>2097152u || start>=total || sectors>total-start) r=FS_EINVAL;
+                else if(start<2048 || !sectors || sectors>FS_MAX_BLOCKS || start>=total || sectors>total-start) r=FS_EINVAL;
                 for(int i=0;!r && i<4;i++) {
                     const u8 *e=buf+446+i*16; if(!e[4]) continue;
                     u32 a=mbr_u32(e+8),n=mbr_u32(e+12);

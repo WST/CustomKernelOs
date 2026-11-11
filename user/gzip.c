@@ -732,7 +732,7 @@ static int normalized_path(const char *path, char out[256]) {
         strcpy(joined, path);
     } else {
         char cwd[128];
-        if (getcwd(cwd, sizeof cwd) < 0 || strlen(cwd) + strlen(path) + 2 > sizeof joined) return -1;
+        if (!getcwd(cwd, sizeof cwd) || strlen(cwd) + strlen(path) + 2 > sizeof joined) return -1;
         snprintf(joined, sizeof joined, "%s/%s", cwd, path);
     }
     int used = 1;

@@ -92,17 +92,20 @@ extern int errno;
 #define ESRCH 3
 #define EINTR 4
 #define EIO 5
+#define E2BIG 7
 #define ENOEXEC 8
 #define EBADF 9
 #define ECHILD 10
 #define EAGAIN 11
 #define ENOMEM 12
+#define EACCES 13
 #define EFAULT 14
 #define EEXIST 17
 #define ESPIPE 29
 #define ENOTDIR 20
 #define EISDIR 21
 #define EINVAL 22
+#define EDOM 33
 #define ERANGE 34
 #define EMFILE 24
 #define EFBIG 27
@@ -197,15 +200,15 @@ int   fork(void);                         /* 0 в потомке, pid потом
 int   exec(const char *path, char **argv);/* при успехе не возвращается */
 int   waitpid(int pid, int *status, int options);   /* pid -1 = любой ребёнок */
 int   getppid(void);
-int   kill(int pid);
+int   kill(int pid, ...);          /* второй аргумент — номер сигнала, его можно не передавать */
 int   setpgid(int pid, int pgid);
 int   setfg(int pgid);                    /* кого убьёт Ctrl+C (0 — никого) */
 int   pipe(int fds[2]);                   /* fds[0] — читать, fds[1] — писать */
 int   dup2(int oldfd, int newfd);
 int   chdir(const char *path);
-int   getcwd(char *buf, size_t len);
+char *getcwd(char *buf, size_t len);   /* буфер или NULL; NULL, 0 — выделить строку */
 int   dirread(const char *path, int index, struct dirent_info *out);  /* 1 есть, 0 конец */
-int   mkdir(const char *path);
+int   mkdir(const char *path, ...);   /* второй аргумент — права, MyFS их не хранит */
 int   unlink(const char *path);
 int   ps(struct proc_info *buf, int max);
 int   dirstat(const char *path, struct dirent_info *out);   /* 0 или -errno */
@@ -305,6 +308,7 @@ int  readln(int fd, char *buf, int max);  /* строка из любого fd (
 void *malloc(size_t n);
 void *calloc(size_t n, size_t size);
 void *realloc(void *p, size_t n);
+void *reallocarray(void *p, size_t n, size_t size);
 void  free(void *p);
 
 /* ---- сеть ----

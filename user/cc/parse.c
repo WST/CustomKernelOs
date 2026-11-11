@@ -292,7 +292,7 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
     };
     Type *ty = ty_int;
     int counter = 0;
-    bool seen = false;
+    bool seen = false, vol = false;
 
     while (is_typename(tok)) {
         if (equal(tok, "typedef") || equal(tok, "static") || equal(tok, "extern") ||
@@ -305,11 +305,12 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
             tok = tok->next;
             continue;
         }
-        if (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "auto") || equal(tok, "register") ||
+        if (equal(tok, "const") || equal(tok, "auto") || equal(tok, "register") ||
             equal(tok, "restrict") || equal(tok, "__restrict")) {
             tok = tok->next;
             continue;
         }
+        if (equal(tok, "volatile")) { vol = true; tok = tok->next; continue; }
         if (equal(tok, "__attribute__")) { tok = skip_attributes(tok); continue; }
 
         VarScope *vs = find_var(tok);
@@ -357,6 +358,10 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
         default: error_tok(tok, "invalid type");
         }
         tok = tok->next;
+    }
+    if (vol) {
+        ty = copy_type(ty);
+        ty->is_volatile = true;
     }
     (void)seen;
     *rest = tok;

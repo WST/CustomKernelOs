@@ -9,6 +9,7 @@
  *   echo $?                      код выхода последней команды
  *   ls /bin/c*  cat /ego/?.txt   шаблоны * и ?
  *   cd, pwd, exit, help, history встроенные команды
+ *   sh -c "echo hi"             выполнить одну команду
  *   sh script.sh                 выполнить команды из файла
  *
  * Строка ввода: ←→ Home End, ↑↓ — история, Tab — дополнение команды или
@@ -18,7 +19,7 @@
 
 #define MAX_LINE 256
 #define MAX_TOK  48
-#define MAX_ARGS 32
+#define MAX_ARGS 48          /* столько же, сколько слов в строке; ядро принимает до 64 */
 #define HISTORY  32
 #define MAX_CMDS 8
 
@@ -579,9 +580,19 @@ static void reap_background(void) {
 
 int main(int argc, char **argv) {
     int in = STDIN;
+    char *dash_c = NULL;
+    bool once = false;
     term_mode = false;                  /* sh -t: строку редактирует окно терминала, мы только печатаем приглашение */
-    if (argc > 1 && !strcmp(argv[1], "-t")) { term_mode = true; argc = 1; }
-    if (argc > 1) {                          /* sh script.sh */
+    if (argc > 1 && !strcmp(argv[1], "-c")) {
+        if (argc < 3 || strlen(argv[2]) >= MAX_LINE) {
+            dprintf(STDERR, "sh: -c: one command, shorter than %d bytes\n", MAX_LINE);
+            return 2;
+        }
+        dash_c = argv[2];
+        once = true;
+        interactive = false;
+    } else if (argc > 1 && !strcmp(argv[1], "-t")) { term_mode = true; argc = 1; }
+    if (!once && argc > 1) {                          /* sh script.sh */
         in = open(argv[1], O_READ);
         if (in < 0) { dprintf(STDERR, "sh: %s: %s\n", argv[1], strerror(errno)); return 1; }
         interactive = false;
@@ -602,7 +613,9 @@ int main(int argc, char **argv) {
                    (desktop.state == UNIT_ACTIVE || desktop.state == UNIT_RESTARTING)) sleep_ms(100);
         }
         reap_background();
-        if (interactive) {
+        if (once) {
+            snprintf(line, sizeof line, "%s", dash_c);
+        } else if (interactive) {
             char prompt[160];
             getcwd(cwd, sizeof(cwd));
             snprintf(prompt, sizeof(prompt), ANSI_GREEN ANSI_BOLD "%s" ANSI_RESET ":"
@@ -618,10 +631,17 @@ int main(int argc, char **argv) {
 
         snprintf(status_str, sizeof(status_str), "%d", last_status);
         int ntok = tokenize(line);
-        if (ntok < 0) { dprintf(STDERR, "sh: line too complex\n"); continue; }
+        if (ntok < 0) {
+            dprintf(STDERR, "sh: line too complex\n");
+            last_status = 1;
+            if (once) break;
+            continue;
+        }
         bool bg;
         int n = parse(ntok, cmds, &bg);
-        if (n > 0) run(cmds, n, bg);
+        if (n < 0) last_status = 1;
+        else if (n > 0) run(cmds, n, bg);
+        if (once) break;
     }
     if (interactive) printf("exit\n");
     return last_status;

@@ -9,4 +9,6 @@ typedef int intptr_t;
 typedef unsigned int uintptr_t;
 typedef long long intmax_t;
 typedef unsigned long long uintmax_t;
+#define INTMAX_MIN (-9223372036854775807LL - 1)
+#define INTMAX_MAX 9223372036854775807LL
 #endif

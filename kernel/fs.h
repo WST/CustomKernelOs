@@ -23,6 +23,8 @@
 #define FS_ROOT       1
 #define FS_NAME_MAX   255
 #define FS_PATH_MAX   1024
+/* 8 GiB at 512-byte sectors. The in-memory bitmap for this size is 2 MiB. */
+#define FS_MAX_BLOCKS (16u * 1024u * 1024u)
 
 enum { FS_TYPE_FREE = 0, FS_TYPE_FILE = 1, FS_TYPE_DIR = 2, FS_TYPE_BLOCK = 3, FS_TYPE_CHAR = 4, FS_TYPE_LINK = 5 };
 

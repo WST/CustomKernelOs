@@ -485,7 +485,9 @@ static Token *preprocess2(Token *tok) {
             char *name = read_include_filename(&tok, tok->next, &quoted);
             char *path = search_include(name, start, quoted);
             if (!path) error_tok(start, "%s: file not found", name);
-            if (++include_depth > 64) error_tok(start, "#include nested too deeply");
+            /* Счётчик — число директив #include в одном файле, а не глубина стека:
+             * заголовки вставляются в общий поток токенов. У Lua их больше 70. */
+            if (++include_depth > 256) error_tok(start, "#include nested too deeply");
             tok = include_file(tok, path, start->next->next);
             continue;
         }
@@ -543,6 +545,16 @@ static Token *preprocess2(Token *tok) {
     return head.next;
 }
 
+#define MAX_USER_DEFS 32
+static char *user_defs[MAX_USER_DEFS];
+static int n_user_defs;
+
+void pp_define(const char *spec) {
+    if (!spec || !spec[0]) error("missing macro name after -D");
+    if (n_user_defs == MAX_USER_DEFS) error("too many -D options");
+    user_defs[n_user_defs++] = strndup2(spec, strlen(spec));
+}
+
 void define_macro(const char *name, const char *body) {
     File *f = xcalloc(sizeof(File));
     f->name = "<built-in>";
@@ -559,6 +571,18 @@ static void init_macros(void) {
     define_macro("__SIZEOF_POINTER__", "4");
     if (opt_linux) define_macro("__LINUX_TEST__", "1");
     if (opt_pic) { define_macro("__PIC__", "2"); define_macro("__pic__", "2"); }
+    for (int i = 0; i < n_user_defs; i++) {
+        char *s = user_defs[i];
+        char *eq = strchr(s, '=');
+        char *name = s;
+        const char *body = "1";
+        if (eq) {
+            name = strndup2(s, (int)(eq - s));
+            body = eq[1] ? eq + 1 : "1";
+        }
+        if (!name[0]) error("empty macro name after -D");
+        define_macro(name, body);
+    }
     add_macro("__FILE__", true, NULL)->builtin = 1;
     add_macro("__LINE__", true, NULL)->builtin = 2;
 }

@@ -9,6 +9,12 @@
 #include "libgen.h"
 #include "wchar.h"
 #include "util.h"
+#include "math.h"
+#include "locale.h"
+#include "signal.h"
+#include "fcntl.h"
+#include "pwd.h"
+#include "sys/ioctl.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
 
@@ -241,17 +247,39 @@ int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int
 int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
 int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
 int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
+int   execve(const char *path, char *const argv[], char *const envp[]) {
+    (void)envp; return exec(path, (char **)argv);
+}
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
 int   getppid(void)                              { return syscall3(SYS_GETPPID, 0, 0, 0); }
-int   kill(int pid)                              { return syscall3(SYS_KILL, pid, 0, 0); }
+int   kill(int pid, ...)                         { return syscall3(SYS_KILL, pid, 0, 0); }
 int   setpgid(int pid, int pgid)                 { return syscall3(SYS_SETPGID, pid, pgid, 0); }
 int   setfg(int pgid)                            { return syscall3(SYS_SETFG, pgid, 0, 0); }
 int   pipe(int fds[2])                           { return syscall3(SYS_PIPE, (int)fds, 0, 0); }
 int   dup2(int oldfd, int newfd)                 { return syscall3(SYS_DUP2, oldfd, newfd, 0); }
 int   chdir(const char *path)                    { return syscall3(SYS_CHDIR, (int)path, 0, 0); }
-int   getcwd(char *buf, size_t len)              { return syscall3(SYS_GETCWD, (int)buf, len, 0); }
+/* POSIX: успех — указатель на путь, не 0. getcwd(NULL, 0) выделяет строку:
+ * bash так узнаёт текущий каталог и считает нулевой результат ошибкой. */
+char *getcwd(char *buf, size_t len) {
+    char tmp[1024];
+    int heap = 0;
+    if (!buf) {
+        if (len == 0 || len > sizeof tmp) len = sizeof tmp;
+        buf = tmp;
+        heap = 1;
+    } else if (len == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int r = syscall3(SYS_GETCWD, (int)buf, len, 0);
+    if (r < 0) { errno = -r; return NULL; }
+    if (!heap) return buf;
+    buf = strdup(tmp);
+    if (!buf) errno = ENOMEM;
+    return buf;
+}
 int   dirread(const char *p, int i, struct dirent_info *o) { return syscall3(SYS_READDIR, (int)p, i, (int)o); }
-int   mkdir(const char *path)                    { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
+int   mkdir(const char *path, ...)             { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
 int   unlink(const char *path)                   { return syscall3(SYS_UNLINK, (int)path, 0, 0); }
 int   ps(struct proc_info *buf, int max)         { return syscall3(SYS_PS, (int)buf, max, 0); }
 int   dirstat(const char *p, struct dirent_info *o) { return syscall3(SYS_STAT, (int)p, (int)o, 0); }
@@ -348,6 +376,8 @@ int strncmp(const char *a, const char *b, size_t n) {
 char *strcpy(char *d, const char *s) { char *r = d; while ((*d++ = *s++)) ; return r; }
 char *strcat(char *d, const char *s) { strcpy(d + strlen(d), s); return d; }
 char *strchr(const char *s, int c) { for (; *s; s++) if (*s == (char)c) return (char *)s; return c ? NULL : (char *)s; }
+void bcopy(const void *src, void *dst, size_t n) { memmove(dst, src, n); }
+
 void *memmove(void *d, const void *s, size_t n) {
     uint8_t *p = d;
     const uint8_t *q = s;
@@ -411,6 +441,14 @@ char *strstr(const char *h, const char *n) {
     return ln ? NULL : (char *)h;
 }
 int isalnum(int c) { return isalpha(c) || isdigit(c); }
+int islower(int c) { return c >= 'a' && c <= 'z'; }
+int isupper(int c) { return c >= 'A' && c <= 'Z'; }
+int isxdigit(int c) { return isdigit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'); }
+int iscntrl(int c) { return (c >= 0 && c < 32) || c == 127; }
+int isprint(int c) { return c >= 32 && c < 127; }
+int isgraph(int c) { return c > 32 && c < 127; }
+int ispunct(int c) { return isgraph(c) && !isalnum(c); }
+int abs(int x) { return x < 0 ? -x : x; }
 char *strrchr(const char *s, int c) {
     const char *r = NULL;
     for (; *s; s++) if (*s == (char)c) r = s;
@@ -422,6 +460,49 @@ char *strncpy(char *d, const char *s, size_t n) {
     for (; i < n; i++) d[i] = 0;
     return d;
 }
+void *memchr(const void *s, int c, size_t n) {
+    const unsigned char *p = s;
+    while (n--) { if (*p == (unsigned char)c) return (void *)p; p++; }
+    return NULL;
+}
+char *strncat(char *d, const char *s, size_t n) {
+    size_t i = strlen(d), k = 0;
+    while (k < n && s[k]) d[i++] = s[k++];
+    d[i] = 0;
+    return d;
+}
+static int in_set(const char *set, int c) {
+    while (*set) if (*set++ == c) return 1;
+    return 0;
+}
+size_t strspn(const char *s, const char *accept) {
+    size_t n = 0;
+    while (s[n] && in_set(accept, (unsigned char)s[n])) n++;
+    return n;
+}
+size_t strcspn(const char *s, const char *reject) {
+    size_t n = 0;
+    while (s[n] && !in_set(reject, (unsigned char)s[n])) n++;
+    return n;
+}
+char *strpbrk(const char *s, const char *accept) {
+    while (*s) { if (in_set(accept, (unsigned char)*s)) return (char *)s; s++; }
+    return NULL;
+}
+int strcoll(const char *a, const char *b) { return strcmp(a, b); }
+char *strtok(char *s, const char *delim) {
+    static char *save;
+    char *start;
+    if (s) save = s;
+    if (!save) return NULL;
+    while (*save && in_set(delim, (unsigned char)*save)) save++;
+    if (!*save) { save = NULL; return NULL; }
+    start = save;
+    while (*save && !in_set(delim, (unsigned char)*save)) save++;
+    if (*save) *save++ = 0;
+    else save = NULL;
+    return start;
+}
 const char *strerror(int e) {
     switch (e) {
     case EBUSY: return "mountpoint or device busy";
@@ -432,11 +513,13 @@ const char *strerror(int e) {
     case ESRCH:     return "no such process";
     case EINTR:     return "interrupted";
     case EIO:       return "I/O error";
+    case E2BIG:     return "argument list too long";
     case ENOEXEC:   return "not an executable";
     case EBADF:     return "bad file descriptor";
     case ECHILD:    return "no child processes";
     case EAGAIN:    return "too many processes";
     case ENOMEM:    return "out of memory";
+    case EACCES:    return "permission denied";
     case EFAULT:    return "bad address";
     case EEXIST:    return "already exists";
     case ENOTDIR:   return "not a directory";
@@ -481,34 +564,416 @@ static void emit(struct out *o, char c) {
 }
 
 static void emit_num(struct out *o, unsigned v, unsigned base, bool upper, bool neg,
-                     int width, char pad, bool left) {
-    char tmp[16];
+                     int width, char pad, bool left, bool plus, bool blank, int prec, bool alt) {
+    char tmp[16], pfx[2];
     const char *dig = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-    int n = 0;
-    do { tmp[n++] = dig[v % base]; v /= base; } while (v);
-    int total = n + (neg ? 1 : 0);
+    char sign = neg ? '-' : plus ? '+' : blank ? ' ' : 0;
+    unsigned orig = v;
+    int n = 0, zeros, pn = 0, total, i;
+    if (!(prec == 0 && v == 0)) {
+        do { tmp[n++] = dig[v % base]; v /= base; } while (v);
+    }
+    if (prec >= 0 && pad == '0') pad = ' ';
+    zeros = prec > n ? prec - n : 0;
+    if (alt && base == 8) {
+        if (zeros == 0 && (n == 0 || tmp[n - 1] != '0')) zeros = 1;
+    } else if (alt && base == 16 && orig != 0) {
+        pfx[pn++] = '0';
+        pfx[pn++] = upper ? 'X' : 'x';
+    }
+    total = n + zeros + pn + (sign ? 1 : 0);
     if (!left && pad == ' ') for (; total < width; width--) emit(o, ' ');
-    if (neg) emit(o, '-');
+    if (sign) emit(o, sign);
+    for (i = 0; i < pn; i++) emit(o, pfx[i]);
     if (!left && pad == '0') for (; total < width; width--) emit(o, '0');
+    while (zeros--) emit(o, '0');
     while (n) emit(o, tmp[--n]);
     if (left) for (; total < width; width--) emit(o, ' ');
 }
 
 static void emit_u64(struct out *o, unsigned long long v, unsigned base, bool upper, bool neg,
-                     int width, char pad, bool left) {
-    char tmp[32];
+                     int width, char pad, bool left, bool plus, bool blank, int prec, bool alt) {
+    char tmp[32], pfx[2];
     const char *dig = upper ? "0123456789ABCDEF" : "0123456789abcdef";
-    int n = 0;
-    do { tmp[n++] = dig[v % base]; v /= base; } while (v);
-    int total = n + (neg ? 1 : 0);
+    char sign = neg ? '-' : plus ? '+' : blank ? ' ' : 0;
+    unsigned long long orig = v;
+    int n = 0, zeros, pn = 0, total, i;
+    if (!(prec == 0 && v == 0)) {
+        do { tmp[n++] = dig[v % base]; v /= base; } while (v);
+    }
+    if (prec >= 0 && pad == '0') pad = ' ';
+    zeros = prec > n ? prec - n : 0;
+    if (alt && base == 8) {
+        if (zeros == 0 && (n == 0 || tmp[n - 1] != '0')) zeros = 1;
+    } else if (alt && base == 16 && orig != 0) {
+        pfx[pn++] = '0';
+        pfx[pn++] = upper ? 'X' : 'x';
+    }
+    total = n + zeros + pn + (sign ? 1 : 0);
     if (!left && pad == ' ') for (; total < width; width--) emit(o, ' ');
-    if (neg) emit(o, '-');
+    if (sign) emit(o, sign);
+    for (i = 0; i < pn; i++) emit(o, pfx[i]);
     if (!left && pad == '0') for (; total < width; width--) emit(o, '0');
+    while (zeros--) emit(o, '0');
     while (n) emit(o, tmp[--n]);
     if (left) for (; total < width; width--) emit(o, ' ');
 }
 
-/* %d %i %u %x %X %c %s %p %lld %%; флаги '-' и '0', ширина, точность для %s */
+/* 10^e для |e| <= 308. Нужен печати и разбору вещественных, без math.c. */
+static double dpow10(int e) {
+    static const double p[] = { 1e1, 1e2, 1e4, 1e8, 1e16, 1e32, 1e64, 1e128, 1e256 };
+    int neg = e < 0, i;
+    double r = 1;
+    if (neg) e = -e;
+    if (e > 308) return neg ? 0 : 1e300 * 1e300;
+    for (i = 0; e && i < 9; i++, e >>= 1)
+        if (e & 1) r *= p[i];
+    return neg ? 1.0 / r : r;
+}
+
+static int fkind(double v, int *sign) {
+    unsigned long long u;
+    memcpy(&u, &v, 8);
+    *sign = (int)(u >> 63);
+    if (((u >> 52) & 0x7ff) == 0x7ff) return (u << 12) ? 2 : 1; /* nan, inf */
+    if ((u << 1) == 0) return 0;
+    return 3;
+}
+
+/* Старшая десятичная степень: 10^e <= v < 10^(e+1), v > 0. */
+static int dec_exp(double v) {
+    int lo = -324, hi = 308, ans = -324;
+    while (lo <= hi) {
+        int mid = lo + (hi - lo) / 2;
+        if (dpow10(mid) <= v) { ans = mid; lo = mid + 1; }
+        else hi = mid - 1;
+    }
+    return ans;
+}
+
+/* prec значащих цифр числа v > 0. Возвращает степень первой цифры. */
+static int sig_digits(double v, int prec, unsigned long long *digs) {
+    int e = dec_exp(v), guard = 0;
+    while (guard++ < 6) {
+        double s = v / dpow10(e - (prec - 1));
+        double hi = dpow10(prec);
+        double lo = prec > 1 ? dpow10(prec - 1) : 1;
+        unsigned long long n;
+        if (!(s < hi)) { e++; continue; }
+        if (s < lo) { e--; continue; }
+        n = (unsigned long long)(s + 0.5);
+        if ((double)n >= hi) { e++; continue; }
+        if (prec > 1 && (double)n < lo) { e--; continue; }
+        *digs = n;
+        return e;
+    }
+    *digs = 0;
+    return e;
+}
+
+static int ull_to_digits(unsigned long long v, char *dst) {
+    char tmp[24];
+    int n = 0, i;
+    if (!v) { dst[0] = '0'; return 1; }
+    while (v) { tmp[n++] = (char)('0' + v % 10); v /= 10; }
+    for (i = 0; i < n; i++) dst[i] = tmp[n - 1 - i];
+    return n;
+}
+
+static void emit_text(struct out *o, const char *s, int width, bool left) {
+    int n = (int)strlen(s), i;
+    if (!left) for (i = n; i < width; i++) emit(o, ' ');
+    for (i = 0; i < n; i++) emit(o, s[i]);
+    if (left) for (i = n; i < width; i++) emit(o, ' ');
+}
+
+#define BIG_N 96
+typedef struct { unsigned v[BIG_N]; int n; } Big;
+
+static void big_set(Big *b, unsigned long long x) {
+    int i;
+    for (i = 0; i < BIG_N; i++) b->v[i] = 0;
+    b->v[0] = (unsigned)x;
+    b->v[1] = (unsigned)(x >> 32);
+    b->n = b->v[1] ? 2 : (b->v[0] ? 1 : 1);
+}
+
+static void big_mul(Big *b, unsigned m) {
+    unsigned c = 0;
+    int i;
+    for (i = 0; i < b->n; i++) {
+        unsigned x = b->v[i];
+        unsigned p0 = (x & 0xffff) * m;
+        unsigned p1 = (x >> 16) * m;
+        unsigned lo = (p0 & 0xffff) + (c & 0xffff);
+        unsigned mid = (p0 >> 16) + (p1 & 0xffff) + (c >> 16) + (lo >> 16);
+        unsigned hi = (p1 >> 16) + (mid >> 16);
+        b->v[i] = (lo & 0xffff) | ((mid & 0xffff) << 16);
+        c = hi;
+    }
+    if (c && b->n < BIG_N) b->v[b->n++] = c;
+}
+
+static void big_shl(Big *b, int sh) {
+    int i;
+    while (sh-- > 0) {
+        unsigned c = 0;
+        for (i = 0; i < b->n; i++) {
+            unsigned n = (b->v[i] << 1) | c;
+            c = b->v[i] >> 31;
+            b->v[i] = n;
+        }
+        if (c && b->n < BIG_N) b->v[b->n++] = c;
+    }
+}
+
+static int big_bit(const Big *b, int k) {
+    int w, bit;
+    if (k < 0) return 0;
+    w = k >> 5;
+    bit = k & 31;
+    if (w >= b->n) return 0;
+    return (int)((b->v[w] >> bit) & 1);
+}
+
+static void big_add1(Big *b) {
+    unsigned c = 1;
+    int i;
+    for (i = 0; c && i < BIG_N; i++) {
+        unsigned long long t = (unsigned long long)b->v[i] + c;
+        if (i >= b->n) b->n = i + 1;
+        b->v[i] = (unsigned)t;
+        c = (unsigned)(t >> 32);
+    }
+}
+
+static void big_shr_round(Big *b, int sh) {
+    int words, bits, i, bit, sticky = 0;
+    unsigned c;
+    if (sh <= 0) return;
+    for (i = 0; i < sh - 1; i++) if (big_bit(b, i)) { sticky = 1; break; }
+    bit = big_bit(b, sh - 1);
+    words = sh >> 5;
+    bits = sh & 31;
+    if (words >= b->n) {
+        for (i = 0; i < BIG_N; i++) b->v[i] = 0;
+        b->n = 1;
+        if (bit && sticky) b->v[0] = 1;
+        return;
+    }
+    if (words) {
+        for (i = 0; i < b->n - words; i++) b->v[i] = b->v[i + words];
+        for (; i < b->n; i++) b->v[i] = 0;
+        b->n -= words;
+    }
+    if (bits) {
+        c = 0;
+        for (i = b->n - 1; i >= 0; i--) {
+            unsigned n = (b->v[i] >> bits) | c;
+            c = b->v[i] << (32 - bits);
+            b->v[i] = n;
+        }
+        while (b->n > 1 && !b->v[b->n - 1]) b->n--;
+    }
+    if (bit && (sticky || (b->v[0] & 1))) big_add1(b);
+}
+
+static unsigned big_div10(Big *b) {
+    unsigned rem = 0;
+    int i;
+    for (i = b->n - 1; i >= 0; i--) {
+        unsigned long long cur = ((unsigned long long)rem << 32) | b->v[i];
+        b->v[i] = (unsigned)(cur / 10);
+        rem = (unsigned)(cur % 10);
+    }
+    while (b->n > 1 && !b->v[b->n - 1]) b->n--;
+    return rem;
+}
+
+/* %.Nf для больших чисел: точное значение * 10^N, чтобы tonumber вернул тот же double. */
+static void emit_fixed_big(struct out *o, double v, int prec, int sch) {
+    unsigned long long u, mant;
+    int be, e, i, nd, pos;
+    char digs[640];
+    Big b;
+    memcpy(&u, &v, 8);
+    be = (int)((u >> 52) & 0x7ff);
+    mant = u & ((1ULL << 52) - 1);
+    if (be == 0) e = -1022 - 52;
+    else { mant |= 1ULL << 52; e = be - 1023 - 52; }
+    big_set(&b, mant);
+    for (i = 0; i < prec; i++) big_mul(&b, 5);
+    if (e + prec >= 0) big_shl(&b, e + prec);
+    else big_shr_round(&b, -(e + prec));
+    nd = 0;
+    do { digs[nd++] = (char)('0' + big_div10(&b)); } while ((b.n > 1 || b.v[0]) && nd < (int)sizeof digs);
+    if (sch) emit(o, (char)sch);
+    if (nd <= prec) {
+        emit(o, '0');
+        if (prec > 0) {
+            emit(o, '.');
+            for (i = nd; i < prec; i++) emit(o, '0');
+            for (i = nd - 1; i >= 0; i--) emit(o, digs[i]);
+        }
+    } else {
+        for (pos = nd - 1; pos >= prec; pos--) emit(o, digs[pos]);
+        if (prec > 0) {
+            emit(o, '.');
+            for (; pos >= 0; pos--) emit(o, digs[pos]);
+        }
+    }
+}
+static void emit_float(struct out *o, double v, int spec, int prec, int width, char pad,
+                       bool left, bool alt, bool plus, bool blank) {
+    int sign = 0, kind = fkind(v, &sign), exp, nd, i;
+    unsigned long long digs = 0;
+    char num[40];
+    char sch = sign ? '-' : plus ? '+' : blank ? ' ' : 0;
+    int upper = spec == 'E' || spec == 'G';
+    if (spec == 'E') spec = 'e';
+    if (spec == 'G') spec = 'g';
+    if (kind == 2 || kind == 1) {
+        char tmp[8];
+        int n = 0;
+        if (sch) tmp[n++] = sch;
+        tmp[n++] = kind == 2 ? 'n' : 'i';
+        tmp[n++] = kind == 2 ? 'a' : 'n';
+        tmp[n++] = kind == 2 ? 'n' : 'f';
+        tmp[n] = 0;
+        emit_text(o, tmp, width, left);
+        return;
+    }
+    if (spec == 'g') {
+        if (prec < 0) prec = 6;
+        if (prec == 0) prec = 1;
+        if (prec > 17) prec = 17;
+    } else {
+        if (prec < 0) prec = 6;
+        if (prec > 500) prec = 500;
+    }
+    if (spec == 'f' && kind == 3 && prec > 15) {
+        emit_fixed_big(o, sign ? -v : v, prec, sch);
+        return;
+    }
+    if (kind == 0) {
+        exp = 0;
+        digs = 0;
+        nd = 1;
+        num[0] = '0';
+    } else {
+        int use = spec == 'e' ? prec + 1 : spec == 'g' ? prec : 17;
+        double av = sign ? -v : v;
+        if (use < 1) use = 1;
+        if (use > 17) use = 17;
+        if (spec == 'f' && prec >= 0 && av < 1e15 && (prec == 0 || av * dpow10(prec) < 1e15)) {
+            double scale = prec ? dpow10(prec) : 1;
+            unsigned long long n = (unsigned long long)(av * scale + 0.5);
+            nd = ull_to_digits(n, num);
+            exp = nd - (prec > 0 ? prec : 0) - 1;
+            if (prec > 0 && nd <= prec) exp = -1 - (prec - nd);
+        } else {
+            exp = sig_digits(av, use, &digs);
+            nd = ull_to_digits(digs, num);
+            while (nd < use) {
+                memmove(num + 1, num, (size_t)nd);
+                num[0] = '0';
+                nd++;
+            }
+        }
+    }
+    {
+        int sci = spec == 'e' || (spec == 'g' && (exp < -4 || exp >= prec));
+        int frac = sci ? (spec == 'g' ? prec - 1 : prec) : prec;
+        int before = exp + 1;
+        int total, padn;
+        if (sci) {
+            int body = 1 + ((frac > 0 || alt) ? 1 + frac : 0);
+            if (spec == 'g' && !alt) {
+                int last = 1 + frac;
+                while (last > 1 && (last - 1 >= nd || num[last - 1] == '0')) {
+                    if (last - 1 < nd && num[last - 1] != '0') break;
+                    if (last - 1 >= nd || num[last - 1] == '0') last--;
+                    else break;
+                }
+                /* last is the count of significant characters before the exponent, without the dot if it would be last */
+                frac = last - 1;
+                if (frac < 0) frac = 0;
+                body = 1 + (frac > 0 ? 1 + frac : 0);
+            }
+            total = (sch ? 1 : 0) + body + 2 + (exp < 0 || exp >= 100 ? 3 : 2);
+            if (exp <= -100 || exp >= 100) total = (sch ? 1 : 0) + body + 2 + 3;
+            else if (exp <= -10 || exp >= 10) total = (sch ? 1 : 0) + body + 2 + 2;
+            else total = (sch ? 1 : 0) + body + 2 + 2; /* exponent is at least two digits */
+        } else {
+            int digits = before > 0 ? before : 1;
+            total = (sch ? 1 : 0) + digits + ((frac > 0 || alt) ? 1 + frac : 0);
+        }
+        padn = width > total ? width - total : 0;
+        if (!left && pad == ' ') for (; padn; padn--) emit(o, ' ');
+        if (sch) emit(o, sch);
+        if (!left && pad == '0') for (; padn; padn--) emit(o, '0');
+        if (sci) {
+            int en = exp, ei = 0, show;
+            char eb[8];
+            emit(o, nd > 0 ? num[0] : '0');
+            show = frac;
+            if (spec == 'g' && !alt) {
+                while (show > 0 && (show >= nd || num[show] == '0')) show--;
+            }
+            if (show > 0 || alt) {
+                emit(o, '.');
+                for (i = 0; i < show; i++) emit(o, i + 1 < nd ? num[i + 1] : '0');
+                if (alt) for (; i < frac; i++) emit(o, '0');
+            }
+            emit(o, upper ? 'E' : 'e');
+            emit(o, en < 0 ? '-' : '+');
+            if (en < 0) en = -en;
+            if (!en) eb[ei++] = '0';
+            while (en) { eb[ei++] = (char)('0' + en % 10); en /= 10; }
+            if (ei < 2) eb[ei++] = '0';
+            while (ei) emit(o, eb[--ei]);
+        } else if (before <= 0) {
+            emit(o, '0');
+            if (frac > 0 || alt) {
+                int z = -before, k;
+                emit(o, '.');
+                if (spec == 'g' && !alt) {
+                    int last = frac;
+                    while (last > 0) {
+                        int idx = last - 1 + before;
+                        char c = (idx >= 0 && idx < nd) ? num[idx] : '0';
+                        if (c != '0') break;
+                        last--;
+                    }
+                    frac = last;
+                }
+                for (k = 0; k < z && k < frac; k++) emit(o, '0');
+                for (; k < frac; k++) {
+                    int idx = k + before;
+                    emit(o, (idx >= 0 && idx < nd) ? num[idx] : '0');
+                }
+            }
+        } else {
+            int cut = before + frac;
+            if (spec == 'g' && !alt) {
+                while (cut > before && (cut - 1 >= nd || num[cut - 1] == '0')) {
+                    if (cut - 1 < nd && num[cut - 1] != '0') break;
+                    cut--;
+                }
+                if (cut == before) frac = 0;
+                else frac = cut - before;
+            }
+            for (i = 0; i < before; i++) emit(o, i < nd ? num[i] : '0');
+            if (frac > 0 || alt) {
+                emit(o, '.');
+                for (i = 0; i < frac; i++) emit(o, before + i < nd ? num[before + i] : '0');
+            }
+        }
+        if (left) for (; padn; padn--) emit(o, ' ');
+    }
+}
+
+/* %d %i %u %x %X %c %s %p %lld %f %e %g %%; флаги '-'+' '#' и '0', ширина, точность */
 int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
     /* «o += snprintf(buf + o, max - o, ...)» после переполнения даёт отрицательный размер,
      * который превращается в огромный size_t: считаем его нулём, а не «писать сколько угодно» */
@@ -517,11 +982,14 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
     for (; *fmt; fmt++) {
         if (*fmt != '%') { emit(&o, *fmt); continue; }
         fmt++;
-        bool left = false;
+        bool left = false, alt = false, plus = false, blank = false;
         char pad = ' ';
         int width = 0, prec = -1;
         for (;; fmt++) {
             if (*fmt == '-') left = true;
+            else if (*fmt == '+') plus = true;
+            else if (*fmt == ' ') blank = true;
+            else if (*fmt == '#') alt = true;
             else if (*fmt == '0') pad = '0';
             else break;
         }
@@ -542,50 +1010,56 @@ int vsnprintf(char *buf, size_t cap, const char *fmt, va_list ap) {
                 long long sv = va_arg(ap, long long);
                 unsigned long long u = (unsigned long long)sv;
                 if (sv < 0) u = -u;
-                emit_u64(&o, u, 10, false, sv < 0, width, pad, left);
+                emit_u64(&o, u, 10, false, sv < 0, width, pad, left, plus, blank, prec, alt);
             } else {
                 int v = va_arg(ap, int);
-                emit_num(&o, v < 0 ? -(unsigned)v : (unsigned)v, 10, false, v < 0, width, pad, left);
+                emit_num(&o, v < 0 ? -(unsigned)v : (unsigned)v, 10, false, v < 0, width, pad, left, plus, blank, prec, alt);
             }
             break;
         }
         case 'u':
-            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 10, false, false, width, pad, left);
-            else emit_num(&o, va_arg(ap, unsigned), 10, false, false, width, pad, left);
+            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 10, false, false, width, pad, left, false, false, prec, alt);
+            else emit_num(&o, va_arg(ap, unsigned), 10, false, false, width, pad, left, false, false, prec, alt);
+            break;
+        case 'o':
+            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 8, false, false, width, pad, left, false, false, prec, alt);
+            else emit_num(&o, va_arg(ap, unsigned), 8, false, false, width, pad, left, false, false, prec, alt);
             break;
         case 'x':
-            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 16, false, false, width, pad, left);
-            else emit_num(&o, va_arg(ap, unsigned), 16, false, false, width, pad, left);
+            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 16, false, false, width, pad, left, false, false, prec, alt);
+            else emit_num(&o, va_arg(ap, unsigned), 16, false, false, width, pad, left, false, false, prec, alt);
             break;
         case 'X':
-            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 16, true, false, width, pad, left);
-            else emit_num(&o, va_arg(ap, unsigned), 16, true, false, width, pad, left);
+            if (lng >= 2) emit_u64(&o, va_arg(ap, unsigned long long), 16, true, false, width, pad, left, false, false, prec, alt);
+            else emit_num(&o, va_arg(ap, unsigned), 16, true, false, width, pad, left, false, false, prec, alt);
             break;
-        case 'p': emit(&o, '0'); emit(&o, 'x');
-                  emit_num(&o, va_arg(ap, unsigned), 16, false, false, 8, '0', false); break;
-        case 'f': {                              /* double: целая часть + prec знаков */
-            double v = va_arg(ap, double);
-            if (prec < 0) prec = 6;
-            if (prec > 9) prec = 9;
-            bool neg = v < 0;
-            if (neg) v = -v;
-            unsigned scale = 1;
-            for (int k = 0; k < prec; k++) scale *= 10;
-            if (v > 4e9) v = 4e9;
-            unsigned ip = (unsigned)v;
-            unsigned fp = (unsigned)((v - ip) * scale + 0.5);
-            if (fp >= scale) { ip++; fp -= scale; }
-            char tmp[32];
-            int n = 0, w = width - (prec ? prec + 1 : 0);
-            emit_num(&o, ip, 10, false, neg, w, pad, false);
-            if (prec) {
-                emit(&o, '.');
-                for (int k = prec - 1; k >= 0; k--) { tmp[k] = '0' + fp % 10; fp /= 10; }
-                for (; n < prec; n++) emit(&o, tmp[n]);
+        case 'p': {
+            unsigned v = va_arg(ap, unsigned);
+            char tmp[16];
+            int n = 0, k;
+            tmp[n++] = '0';
+            tmp[n++] = 'x';
+            for (k = 28; k >= 0; k -= 4) {
+                int d = (v >> k) & 0xf;
+                tmp[n++] = (char)(d < 10 ? '0' + d : 'a' + d);
             }
+            if (width < n) width = n;
+            if (!left) while (width > n) { emit(&o, ' '); width--; }
+            for (k = 0; k < n; k++) emit(&o, tmp[k]);
+            if (left) while (width > n) { emit(&o, ' '); width--; }
             break;
         }
-        case 'c': emit(&o, (char)va_arg(ap, int)); break;
+        case 'f': case 'e': case 'E': case 'g': case 'G':
+            emit_float(&o, va_arg(ap, double), *fmt, prec, width, pad, left, alt, plus, blank);
+            break;
+        case 'c': {
+            char ch = (char)va_arg(ap, int);
+            int k;
+            if (!left) for (k = 1; k < width; k++) emit(&o, ' ');
+            emit(&o, ch);
+            if (left) for (k = 1; k < width; k++) emit(&o, ' ');
+            break;
+        }
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
@@ -775,6 +1249,11 @@ void *calloc(size_t n, size_t size) {
     void *p = malloc(n * size);
     if (p) memset(p, 0, n * size);
     return p;
+}
+
+void *reallocarray(void *p, size_t n, size_t size) {
+    if (n && size > (size_t)-1 / n) { errno = ENOMEM; return NULL; }
+    return realloc(p, n * size);
 }
 
 void *realloc(void *p, size_t n) {
@@ -1102,6 +1581,21 @@ long long __moddi3(long long a, long long b) {
     return (long long)R.u;
 }
 
+/* Новые gcc зовут эту функцию даже для одного деления signed long long. */
+long long __divmoddi4(long long a, long long b, long long *rp) {
+    di_parts A, B, Q, R;
+    int qneg = 0, rneg = 0;
+    A.u = (unsigned long long)a; B.u = (unsigned long long)b;
+    if (A.p.hi & 0x80000000u) { qneg ^= 1; rneg = 1; A.u = di_neg(A.u); }
+    if (B.p.hi & 0x80000000u) { qneg ^= 1; B.u = di_neg(B.u); }
+    Q.u = __udivdi3(A.u, B.u);
+    R.u = A.u - Q.u * B.u;
+    if (qneg) Q.u = di_neg(Q.u);
+    if (rneg) R.u = di_neg(R.u);
+    if (rp) *rp = (long long)R.u;
+    return (long long)Q.u;
+}
+
 /* ================================================================ stdio */
 
 enum { FF_READ = 1, FF_WRITE = 2, FF_EOF = 4, FF_ERR = 8, FF_UNGET = 16 };
@@ -1135,9 +1629,9 @@ int __libc_start(int argc, char **argv) {
         while (*s) { if (*s == '/') b = s + 1; s++; }
         __progname = b;
     }
-    /* main бывает и main(void): зовём через указатель, лишние аргументы просто лежат на стеке */
-    int (*entry)(int, char **) = (int (*)(int, char **))main;
-    exit(entry(argc, argv));
+    /* main бывает и main(void), и main(argc, argv, env). Лишние аргументы просто лежат на стеке. */
+    int (*entry)(int, char **, char **) = (int (*)(int, char **, char **))main;
+    exit(entry(argc, argv, environ));
 }
 
 static FILE *file_new(int fd, int flags) {
@@ -1174,6 +1668,38 @@ FILE *fopen(const char *path, const char *mode) {
     int fd = open(path, flags);
     if (fd < 0) return NULL;
     return file_new(fd, acc);
+}
+
+FILE *freopen(const char *path, const char *mode, FILE *f) {
+    int acc, flags, fd;
+    if (!f) return NULL;
+    if (f->fd >= 0) close(f->fd);
+    f->fd = -1;
+    f->flags = 0;
+    if (!path) { errno = EINVAL; return NULL; }
+    flags = mode_flags(mode, &acc);
+    if (flags < 0) { errno = EINVAL; return NULL; }
+    fd = open(path, flags);
+    if (fd < 0) return NULL;
+    f->fd = fd;
+    f->flags = acc;
+    return f;
+}
+
+FILE *tmpfile(void) {
+    char name[L_tmpnam];
+    FILE *f;
+    if (!tmpnam(name)) return NULL;
+    f = fopen(name, "w+");
+    return f;
+}
+
+char *tmpnam(char *s) {
+    static char buf[L_tmpnam];
+    static unsigned n;
+    char *p = s ? s : buf;
+    snprintf(p, L_tmpnam, "/tmp/myos-%u-%u", (unsigned)getpid(), ++n);
+    return p;
 }
 
 FILE *fdopen(int fd, const char *mode) {
@@ -1372,18 +1898,87 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
     return (ssize_t)i;
 }
 
-int fstat(int fd, struct stat *st) { return ioerr(syscall3(SYS_FSTAT, fd, (int)st, 0)); }
+static mode_t current_umask = 022;
+mode_t umask(mode_t mask) {
+    mode_t old = current_umask;
+    current_umask = mask & 0777;
+    return old;
+}
+int access(const char *path, int mode) {
+    struct stat st;
+    (void)mode;
+    return stat(path, &st);
+}
+int chmod(const char *path, mode_t mode) { (void)path; (void)mode; return 0; }
+int fchmod(int fd, mode_t mode) { (void)fd; (void)mode; return 0; }
+
+int fstat(int fd, struct stat *st) {
+    int r;
+    memset(st, 0, sizeof *st);
+    r = ioerr(syscall3(SYS_FSTAT, fd, (int)st, 0));
+    if (r == 0) {
+        st->st_dev = 1;
+        st->st_blocks = (st->st_size + 511) / 512;
+        st->st_nlink = 1;
+    }
+    return r;
+}
+
+char *ttyname(int fd) { (void)fd; return (char *)"/dev/tty"; }
+
+/* Ядро не хранит флаги дескриптора. F_DUPFD ищет свободный номер и делает dup2.
+ * F_GETFD/F_SETFD пока ничего не запоминают: close-on-exec нет. */
+int fcntl(int fd, int cmd, ...) {
+    struct stat st;
+    if (cmd == F_GETFD || cmd == F_GETFL || cmd == F_SETFD || cmd == F_SETFL) {
+        if (fstat(fd, &st) < 0) return -1;
+        return 0;
+    }
+    if (cmd == F_DUPFD) {
+        va_list ap;
+        int i, min;
+        va_start(ap, cmd);
+        min = va_arg(ap, int);
+        va_end(ap);
+        if (min < 0) { errno = EINVAL; return -1; }
+        if (fstat(fd, &st) < 0) return -1;
+        for (i = min; i < 16; i++) {
+            if (fstat(i, &st) == 0) continue;
+            if (errno != EBADF) return -1;
+            return ioerr(syscall3(SYS_DUP2, fd, i, 0));
+        }
+        errno = EMFILE;
+        return -1;
+    }
+    errno = EINVAL;
+    return -1;
+}
+
+static unsigned path_stamp(const char *path) {
+    unsigned h = 2166136261u;
+    if (!path) return 1;
+    for (const char *p = path; *p; p++) {
+        h ^= (unsigned char)*p;
+        h *= 16777619u;
+    }
+    return h ? h : 1;
+}
 
 int stat(const char *path, struct stat *st) {
     struct dirent_info info;
     int r = syscall3(SYS_STAT, (int)path, (int)&info, 0);
     if (r < 0) { errno = -r; return -1; }
+    memset(st, 0, sizeof *st);
     if (info.type == 2) st->st_mode = S_IFDIR;
     else if (info.type == 4) st->st_mode = S_IFCHR;
-    else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 3) st->st_mode = S_IFBLK;
     else if (info.type == 5) st->st_mode = S_IFLNK;
     else st->st_mode = S_IFREG;
     st->st_size = info.size;
+    st->st_dev = 1;
+    st->st_ino = path_stamp(path);
+    st->st_blocks = (st->st_size + 511) / 512;
+    st->st_nlink = 1;
     return 0;
 }
 
@@ -1391,12 +1986,17 @@ int lstat(const char *path, struct stat *st) {
     struct dirent_info info;
     int r = syscall3(SYS_LSTAT, (int)path, (int)&info, 0);
     if (r < 0) { errno = -r; return -1; }
+    memset(st, 0, sizeof *st);
     if (info.type == 2) st->st_mode = S_IFDIR;
     else if (info.type == 4) st->st_mode = S_IFCHR;
-    else if (info.type == 3) st->st_mode = 0060000;
+    else if (info.type == 3) st->st_mode = S_IFBLK;
     else if (info.type == 5) st->st_mode = S_IFLNK;
     else st->st_mode = S_IFREG;
     st->st_size = info.size;
+    st->st_dev = 1;
+    st->st_ino = path_stamp(path);
+    st->st_blocks = (st->st_size + 511) / 512;
+    st->st_nlink = 1;
     return 0;
 }
 
@@ -1538,7 +2138,73 @@ void err(int status, const char *fmt, ...) { va_list ap; va_start(ap, fmt); vmsg
 void errx(int status, const char *fmt, ...) { va_list ap; va_start(ap, fmt); vmsg(status ? status : 1, fmt, ap, 0); va_end(ap); exit(1); }
 
 int pledge(const char *promises, const char *execpromises) { (void)promises; (void)execpromises; return 0; }
-char *setlocale(int category, const char *locale) { (void)category; (void)locale; return (char *)"C"; }
+char *setlocale(int category, const char *locale) {
+    (void)category;
+    if (locale && locale[0] && strcmp(locale, "C") && strcmp(locale, "POSIX")) return NULL;
+    return (char *)"C";
+}
+
+/* j_strsignal в уже собранном bash индексирует эту таблицу: без HAVE_STRSIGNAL
+ * его strsignal — это макрос sys_siglist[sig]. Ноль значит «Signal N». */
+char *sys_siglist[NSIG] = {
+    "Unknown signal",
+    "Hangup",
+    "Interrupt",
+    "Quit",
+    "Illegal instruction",
+    "Trace/breakpoint trap",
+    "Aborted",
+    "Bus error",
+    "Floating point exception",
+    "Killed",
+    "User signal 1",
+    "Segmentation fault",
+    "User signal 2",
+    "Broken pipe",
+    "Alarm clock",
+    "Terminated",
+    0,
+    "Child exited",
+    "Continued",
+    "Stopped (signal)",
+    "Stopped",
+    "Stopped (tty input)",
+    "Stopped (tty output)",
+    0, 0, 0, 0, 0,
+    "Window changed",
+};
+
+char *strsignal(int sig) {
+    if (sig < 0 || sig >= NSIG) return NULL;
+    return sys_siglist[sig];
+}
+
+/* Уже собранный sig.c зовёт это, когда HAVE_STRSIGNAL ещё не было.
+ * Имена сигналов уже лежат в sys_siglist, затирать их нечем. */
+void initialize_siglist(void) {}
+
+struct lconv *localeconv(void) {
+    static struct lconv lc;
+    static int ready;
+    if (!ready) {
+        memset(&lc, 0, sizeof lc);
+        lc.decimal_point = ".";
+        lc.thousands_sep = "";
+        lc.grouping = "";
+        lc.int_curr_symbol = "";
+        lc.currency_symbol = "";
+        lc.mon_decimal_point = "";
+        lc.mon_thousands_sep = "";
+        lc.mon_grouping = "";
+        lc.positive_sign = "";
+        lc.negative_sign = "";
+        lc.int_frac_digits = lc.frac_digits = 127;
+        lc.p_cs_precedes = lc.p_sep_by_space = lc.n_cs_precedes = lc.n_sep_by_space = 127;
+        lc.p_sign_posn = lc.n_sign_posn = 127;
+        ready = 1;
+    }
+    return &lc;
+}
 int mbtowc(wchar_t *wc, const char *s, size_t n) {
     if (!s) return 0;
     if (!n || !*s) return 0;
@@ -1601,6 +2267,163 @@ long long strtoll(const char *nptr, char **end, int base) {
     return neg ? -(long long)acc : (long long)acc;
 }
 
+static void big_add_small(Big *b, unsigned a) {
+    unsigned c = a;
+    int i;
+    for (i = 0; i < b->n; i++) {
+        unsigned t = b->v[i] + c;
+        c = t < b->v[i];
+        b->v[i] = t;
+        if (!c) return;
+    }
+    if (c && b->n < BIG_N) b->v[b->n++] = c;
+}
+
+/* Ближайший double к целому * 2^extra. extra < 0 — это сдвиг вправо всего числа. */
+static double big_to_double(Big *b, int sign, int extra) {
+    int bits, i, be, roundb, sticky;
+    unsigned long long mant, u;
+    double d;
+    bits = b->n * 32;
+    while (bits > 0 && !big_bit(b, bits - 1)) bits--;
+    if (bits <= 0) return copysign(0.0, sign < 0 ? -1.0 : 1.0);
+    roundb = 0;
+    sticky = 0;
+    if (bits > 53) {
+        roundb = big_bit(b, bits - 54);
+        for (i = 0; i < bits - 54; i++) if (big_bit(b, i)) { sticky = 1; break; }
+        mant = 0;
+        for (i = 0; i < 53; i++) mant = (mant << 1) | (unsigned)big_bit(b, bits - 1 - i);
+        if (roundb && (sticky || (mant & 1))) {
+            mant++;
+            if (mant == (1ULL << 53)) { mant >>= 1; bits++; }
+        }
+    } else {
+        mant = 0;
+        for (i = 0; i < bits; i++) mant = (mant << 1) | (unsigned)big_bit(b, bits - 1 - i);
+    }
+    be = bits - 1 + extra;
+    if (be > 1023) { errno = ERANGE; return copysign(__myos_inf(), sign < 0 ? -1.0 : 1.0); }
+    if (be < -1022) { errno = ERANGE; return copysign(0.0, sign < 0 ? -1.0 : 1.0); }
+    u = ((unsigned long long)(be + 1023) << 52) | (mant & ((1ULL << 52) - 1));
+    if (sign < 0) u |= 1ULL << 63;
+    memcpy(&d, &u, 8);
+    return d;
+}
+
+static double strtod_precise(const char *nptr, char **end) {
+    const char *s = nptr;
+    char digs[400];
+    int sign = 1, nd = 0, exp = 0, sticky = 0, esign, ev, i, k;
+    Big b;
+    while (isspace((unsigned char)*s)) s++;
+    if (*s == '+' || *s == '-') { if (*s == '-') sign = -1; s++; }
+    while (*s == '0') s++;
+    while (isdigit((unsigned char)*s)) {
+        if (nd < (int)sizeof digs) digs[nd++] = (char)(*s - '0');
+        else { exp++; if (*s != '0') sticky = 1; }
+        s++;
+    }
+    if (*s == '.') {
+        s++;
+        if (!nd) while (*s == '0') { exp--; s++; }
+        while (isdigit((unsigned char)*s)) {
+            if (nd < (int)sizeof digs) { digs[nd++] = (char)(*s - '0'); exp--; }
+            else if (*s != '0') sticky = 1;
+            s++;
+        }
+    }
+    if (*s == 'e' || *s == 'E') {
+        const char *e0 = s++;
+        esign = 1;
+        ev = 0;
+        if (*s == '+' || *s == '-') { if (*s == '-') esign = -1; s++; }
+        if (!isdigit((unsigned char)*s)) s = e0;
+        else {
+            while (isdigit((unsigned char)*s)) {
+                if (ev < 100000) ev = ev * 10 + (*s - '0');
+                s++;
+            }
+            exp += esign * ev;
+        }
+    }
+    if (end) *end = (char *)s;
+    while (nd > 0 && digs[nd - 1] == 0) { nd--; exp++; }
+    if (!nd) return copysign(0.0, sign < 0 ? -1.0 : 1.0);
+    big_set(&b, 0);
+    for (i = 0; i < nd; i++) {
+        big_mul(&b, 10);
+        big_add_small(&b, (unsigned)digs[i]);
+    }
+    if (sticky) big_add_small(&b, 1);
+    if (exp >= 0) {
+        for (k = 0; k < exp; k++) big_mul(&b, 5);
+        return big_to_double(&b, sign, exp);
+    }
+    k = -exp;
+    for (i = 0; i < k; i++) big_mul(&b, 5);
+    return big_to_double(&b, sign, -k);
+}
+
+double strtod(const char *nptr, char **end) {
+    const char *s = nptr;
+    int sign = 1, exp = 0, nd = 0, saw = 0, esign, ev, trunc = 0;
+    unsigned long long acc = 0;
+    double x;
+    while (isspace((unsigned char)*s)) s++;
+    if (*s == '+' || *s == '-') { if (*s == '-') sign = -1; s++; }
+    if ((s[0] == 'i' || s[0] == 'I') && (s[1] == 'n' || s[1] == 'N') && (s[2] == 'f' || s[2] == 'F')) {
+        s += 3;
+        if ((s[0] == 'i' || s[0] == 'I') && (s[1] == 'n' || s[1] == 'N') && (s[2] == 'i' || s[2] == 'I') &&
+            (s[3] == 't' || s[3] == 'T') && (s[4] == 'y' || s[4] == 'Y')) s += 5;
+        if (end) *end = (char *)s;
+        return copysign(__myos_inf(), sign < 0 ? -1.0 : 1.0);
+    }
+    if ((s[0] == 'n' || s[0] == 'N') && (s[1] == 'a' || s[1] == 'A') && (s[2] == 'n' || s[2] == 'N')) {
+        s += 3;
+        if (end) *end = (char *)s;
+        return __myos_nan();
+    }
+    while (isdigit((unsigned char)*s)) {
+        saw = 1;
+        if (nd < 15) { acc = acc * 10 + (unsigned)(*s - '0'); nd++; }
+        else { exp++; trunc = 1; }
+        s++;
+    }
+    if (*s == '.') {
+        s++;
+        while (isdigit((unsigned char)*s)) {
+            saw = 1;
+            if (nd < 15) { acc = acc * 10 + (unsigned)(*s - '0'); nd++; exp--; }
+            else trunc = 1;
+            s++;
+        }
+    }
+    if (*s == 'e' || *s == 'E') {
+        const char *e0 = s++;
+        esign = 1;
+        ev = 0;
+        if (*s == '+' || *s == '-') { if (*s == '-') esign = -1; s++; }
+        if (!isdigit((unsigned char)*s)) s = e0;
+        else {
+            while (isdigit((unsigned char)*s)) {
+                if (ev < 100000) ev = ev * 10 + (*s - '0');
+                s++;
+            }
+            exp += esign * ev;
+        }
+    }
+    if (!saw) { if (end) *end = (char *)nptr; return 0; }
+    if (trunc) return strtod_precise(nptr, end);
+    if (end) *end = (char *)s;
+    if (exp > 350) { errno = ERANGE; return copysign(__myos_inf(), sign < 0 ? -1.0 : 1.0); }
+    if (exp < -350) { errno = ERANGE; return copysign(0.0, sign < 0 ? -1.0 : 1.0); }
+    x = (double)acc;
+    if (exp > 0) x *= dpow10(exp);
+    else if (exp < 0) x /= dpow10(-exp);
+    return sign < 0 ? -x : x;
+}
+
 long strtol(const char *nptr, char **end, int base) {
     int saved = errno;
     errno = 0;
@@ -1620,6 +2443,14 @@ unsigned long long strtoull(const char *nptr, char **end, int base) {
     if (ovf) { errno = ERANGE; return ~0ULL; }
     if (neg) acc = -acc;
     return acc;
+}
+
+intmax_t strtoimax(const char *nptr, char **end, int base) {
+    return (intmax_t)strtoll(nptr, end, base);
+}
+
+uintmax_t strtoumax(const char *nptr, char **end, int base) {
+    return (uintmax_t)strtoull(nptr, end, base);
 }
 
 unsigned long strtoul(const char *nptr, char **end, int base) {
@@ -1723,7 +2554,18 @@ void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const voi
     }
 }
 
-char *getenv(const char *name) { (void)name; return NULL; }
+static char *empty_environ[] = { NULL };
+char **environ = empty_environ;
+
+char *getenv(const char *name) {
+    size_t n;
+    char **e;
+    if (!name || !environ) return NULL;
+    n = strlen(name);
+    for (e = environ; *e; e++)
+        if (!strncmp(*e, name, n) && (*e)[n] == '=') return *e + n + 1;
+    return NULL;
+}
 
 int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     (void)f; (void)buf; (void)mode; (void)size;
@@ -1761,6 +2603,15 @@ unsigned sleep(unsigned seconds) {
 uid_t getuid(void) { return 0; }
 uid_t geteuid(void) { return 0; }
 gid_t getgid(void) { return 0; }
+gid_t getegid(void) { return 0; }
+unsigned alarm(unsigned seconds) { (void)seconds; return 0; }
+int setuid(uid_t uid) { (void)uid; return 0; }
+int setgid(gid_t gid) { (void)gid; return 0; }
+
+static struct passwd only_user = { "root", "", 0, 0, "root", "/root", "/bin/sh" };
+struct passwd *getpwuid(uid_t uid) { (void)uid; return &only_user; }
+struct passwd *getpwnam(const char *name) { (void)name; return &only_user; }
+void endpwent(void) {}
 
 static int leap(unsigned y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 
@@ -1787,4 +2638,326 @@ time_t time(time_t *tloc) {
     return t;
 }
 
+int gettimeofday(struct timeval *tv, void *tz) {
+    time_t t;
+    (void)tz;
+    t = time(NULL);
+    if (t == (time_t)-1) return -1;
+    if (tv) { tv->tv_sec = t; tv->tv_usec = 0; }
+    return 0;
+}
+
+int ioctl(int fd, unsigned long request, ...) {
+    if (request == TIOCGWINSZ) {
+        struct winsize *ws;
+        va_list ap;
+        va_start(ap, request);
+        ws = va_arg(ap, struct winsize *);
+        va_end(ap);
+        if (!ws) { errno = EFAULT; return -1; }
+        memset(ws, 0, sizeof *ws);
+        ws->ws_col = (unsigned short)term_cols();
+        ws->ws_row = (unsigned short)term_rows();
+        (void)fd;
+        return 0;
+    }
+    (void)fd;
+    errno = EINVAL;
+    return -1;
+}
+
+char *mktemp(char *template) {
+    char *p;
+    unsigned n;
+    if (!template) { errno = EINVAL; return NULL; }
+    p = template + strlen(template);
+    n = (unsigned)getpid();
+    while (p > template && p[-1] == 'X') {
+        *--p = "0123456789abcdef"[n & 15];
+        n >>= 4;
+        if (!n) n = (unsigned)getpid() + 1;
+    }
+    return template;
+}
+
+double difftime(time_t a, time_t b) { return (double)(a - b); }
+
+clock_t clock(void) {
+#if defined(__LINUX_TEST__)
+    struct { long sec, nsec; } ts;
+    if (__syscall(265, 1, (int)&ts) < 0) return (clock_t)-1;
+    return (clock_t)(ts.sec * 1000 + ts.nsec / 1000000);
+#else
+    return (clock_t)ticks();
+#endif
+}
+
+static long long days_from_civil(int y, unsigned m, unsigned d) {
+    long long era, yoe, doy, doe;
+    y -= m <= 2;
+    era = (y >= 0 ? y : y - 399) / 400;
+    yoe = (unsigned)(y - era * 400);
+    doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
+static void civil_from_days(long long z, int *y, unsigned *m, unsigned *d) {
+    long long era;
+    unsigned doe, yoe, doy, mp;
+    z += 719468;
+    era = (z >= 0 ? z : z - 146096) / 146097;
+    doe = (unsigned)(z - era * 146097);
+    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    mp = (5 * doy + 2) / 153;
+    *d = doy - (153 * mp + 2) / 5 + 1;
+    *m = mp < 10 ? mp + 3 : mp - 9;
+    *y = (int)yoe + (int)era * 400 + (*m <= 2);
+}
+
+static int yday_of(int y, unsigned m, unsigned d) {
+    static const unsigned md[12] = { 0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334 };
+    int n = (int)md[m - 1] + (int)d - 1;
+    if (m > 2 && leap((unsigned)y)) n++;
+    return n;
+}
+
+struct tm *gmtime_r(const time_t *tp, struct tm *out) {
+    long long secs, days;
+    int rem, y;
+    unsigned m, d;
+    if (!tp || !out) return NULL;
+    secs = *tp;
+    days = secs / 86400;
+    rem = (int)(secs % 86400);
+    if (rem < 0) { rem += 86400; days--; }
+    out->tm_hour = rem / 3600;
+    rem %= 3600;
+    out->tm_min = rem / 60;
+    out->tm_sec = rem % 60;
+    civil_from_days(days, &y, &m, &d);
+    out->tm_year = y - 1900;
+    out->tm_mon = (int)m - 1;
+    out->tm_mday = (int)d;
+    out->tm_yday = yday_of(y, m, d);
+    out->tm_wday = (int)((days % 7 + 7 + 4) % 7);
+    out->tm_isdst = 0;
+    return out;
+}
+
+struct tm *localtime_r(const time_t *tp, struct tm *out) { return gmtime_r(tp, out); }
+
+struct tm *gmtime(const time_t *tp) {
+    static struct tm buf;
+    return gmtime_r(tp, &buf);
+}
+
+struct tm *localtime(const time_t *tp) { return gmtime(tp); }
+
+static int norm_field(int *field, int *carry, int base) {
+    int v = *field;
+    if (v >= base || v < 0) {
+        int q = v / base;
+        int r = v % base;
+        if (r < 0) { r += base; q--; }
+        *field = r;
+        *carry += q;
+    }
+    return 0;
+}
+
+time_t mktime(struct tm *tm) {
+    int sec, min, hour, day, mon, year, mdays;
+    long long days, secs;
+    static const int mlen[12] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    if (!tm) { errno = EINVAL; return (time_t)-1; }
+    sec = tm->tm_sec;
+    min = tm->tm_min;
+    hour = tm->tm_hour;
+    day = tm->tm_mday;
+    mon = tm->tm_mon;
+    year = tm->tm_year + 1900;
+    norm_field(&sec, &min, 60);
+    norm_field(&min, &hour, 60);
+    norm_field(&hour, &day, 24);
+    mon += 1;
+    while (mon > 12) { mon -= 12; year++; }
+    while (mon < 1) { mon += 12; year--; }
+    for (;;) {
+        mdays = mlen[mon - 1] + (mon == 2 && leap((unsigned)year));
+        if (day > mdays) { day -= mdays; mon++; if (mon > 12) { mon = 1; year++; } }
+        else if (day < 1) {
+            mon--;
+            if (mon < 1) { mon = 12; year--; }
+            day += mlen[mon - 1] + (mon == 2 && leap((unsigned)year));
+        } else break;
+        if (year < 1 || year > 9999) { errno = ERANGE; return (time_t)-1; }
+    }
+    days = days_from_civil(year, (unsigned)mon, (unsigned)day);
+    secs = days * 86400LL + hour * 3600LL + min * 60LL + sec;
+    if (secs < -2147483647LL - 1 || secs > 2147483647LL) { errno = ERANGE; return (time_t)-1; }
+    tm->tm_sec = sec;
+    tm->tm_min = min;
+    tm->tm_hour = hour;
+    tm->tm_mday = day;
+    tm->tm_mon = mon - 1;
+    tm->tm_year = year - 1900;
+    tm->tm_yday = yday_of(year, (unsigned)mon, (unsigned)day);
+    tm->tm_wday = (int)((days % 7 + 7 + 4) % 7);
+    tm->tm_isdst = 0;
+    return (time_t)secs;
+}
+
+static int fmt_put(char *s, int n, int max, const char *t) {
+    while (*t) {
+        if (n + 1 >= max) return -1;
+        s[n++] = *t++;
+    }
+    return n;
+}
+
+static int fmt_num(char *s, int n, int max, int width, int v) {
+    char tmp[16];
+    int i = 0, neg = v < 0;
+    if (neg) v = -v;
+    if (!v) tmp[i++] = '0';
+    while (v) { tmp[i++] = (char)('0' + v % 10); v /= 10; }
+    if (neg) { if (n + 1 >= max) return -1; s[n++] = '-'; }
+    while (width > i) { if (n + 1 >= max) return -1; s[n++] = '0'; width--; }
+    while (i) { if (n + 1 >= max) return -1; s[n++] = tmp[--i]; }
+    return n;
+}
+
+size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
+    static const char *wshort[] = { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" };
+    static const char *wlong[] = { "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday" };
+    static const char *mshort[] = { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" };
+    static const char *mlong[] = { "January", "February", "March", "April", "May", "June", "July",
+        "August", "September", "October", "November", "December" };
+    int n = 0, w, mon, y;
+    char piece[64];
+    if (!s || !fmt || !tm || max == 0) return 0;
+    w = tm->tm_wday;
+    mon = tm->tm_mon;
+    y = tm->tm_year + 1900;
+    if (w < 0 || w > 6) w = 0;
+    if (mon < 0 || mon > 11) mon = 0;
+    for (; *fmt; fmt++) {
+        const char *txt = NULL;
+        if (*fmt != '%') {
+            if (n + 1 >= (int)max) return 0;
+            s[n++] = *fmt;
+            continue;
+        }
+        fmt++;
+        if (*fmt == 'E' || *fmt == 'O') fmt++;
+        if (!*fmt) break;
+        switch (*fmt) {
+        case 'a': txt = wshort[w]; break;
+        case 'A': txt = wlong[w]; break;
+        case 'b': case 'h': txt = mshort[mon]; break;
+        case 'B': txt = mlong[mon]; break;
+        case 'c':
+            snprintf(piece, sizeof piece, "%s %s %2d %02d:%02d:%02d %04d",
+                     wshort[w], mshort[mon], tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec, y);
+            txt = piece;
+            break;
+        case 'C': n = fmt_num(s, n, (int)max, 2, y / 100); if (n < 0) return 0; continue;
+        case 'd': n = fmt_num(s, n, (int)max, 2, tm->tm_mday); if (n < 0) return 0; continue;
+        case 'D':
+            snprintf(piece, sizeof piece, "%02d/%02d/%02d", mon + 1, tm->tm_mday, y % 100);
+            txt = piece;
+            break;
+        case 'e':
+            snprintf(piece, sizeof piece, "%2d", tm->tm_mday);
+            txt = piece;
+            break;
+        case 'F':
+            snprintf(piece, sizeof piece, "%04d-%02d-%02d", y, mon + 1, tm->tm_mday);
+            txt = piece;
+            break;
+        case 'H': n = fmt_num(s, n, (int)max, 2, tm->tm_hour); if (n < 0) return 0; continue;
+        case 'I': {
+            int h = tm->tm_hour % 12;
+            if (!h) h = 12;
+            n = fmt_num(s, n, (int)max, 2, h);
+            if (n < 0) return 0;
+            continue;
+        }
+        case 'j': n = fmt_num(s, n, (int)max, 3, tm->tm_yday + 1); if (n < 0) return 0; continue;
+        case 'm': n = fmt_num(s, n, (int)max, 2, mon + 1); if (n < 0) return 0; continue;
+        case 'M': n = fmt_num(s, n, (int)max, 2, tm->tm_min); if (n < 0) return 0; continue;
+        case 'n': txt = "\n"; break;
+        case 'p': txt = tm->tm_hour < 12 ? "AM" : "PM"; break;
+        case 'R':
+            snprintf(piece, sizeof piece, "%02d:%02d", tm->tm_hour, tm->tm_min);
+            txt = piece;
+            break;
+        case 'S': n = fmt_num(s, n, (int)max, 2, tm->tm_sec); if (n < 0) return 0; continue;
+        case 't': txt = "\t"; break;
+        case 'T': case 'X':
+            snprintf(piece, sizeof piece, "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
+            txt = piece;
+            break;
+        case 'u': n = fmt_num(s, n, (int)max, 1, w == 0 ? 7 : w); if (n < 0) return 0; continue;
+        case 'U': n = fmt_num(s, n, (int)max, 2, (tm->tm_yday + 7 - w) / 7); if (n < 0) return 0; continue;
+        case 'w': n = fmt_num(s, n, (int)max, 1, w); if (n < 0) return 0; continue;
+        case 'W': n = fmt_num(s, n, (int)max, 2, (tm->tm_yday + 7 - (w == 0 ? 6 : w - 1)) / 7); if (n < 0) return 0; continue;
+        case 'x':
+            snprintf(piece, sizeof piece, "%02d/%02d/%02d", mon + 1, tm->tm_mday, y % 100);
+            txt = piece;
+            break;
+        case 'y': n = fmt_num(s, n, (int)max, 2, y % 100); if (n < 0) return 0; continue;
+        case 'Y': n = fmt_num(s, n, (int)max, 4, y); if (n < 0) return 0; continue;
+        case 'z': txt = "+0000"; break;
+        case 'Z': txt = "UTC"; break;
+        case '%': txt = "%"; break;
+        default: txt = ""; break;
+        }
+        if (txt) {
+            n = fmt_put(s, n, (int)max, txt);
+            if (n < 0) return 0;
+        }
+    }
+    if (n >= (int)max) return 0;
+    s[n] = 0;
+    return (size_t)n;
+}
+
+static void (*sig_handlers[32])(int);
+
+int sigblock(int mask) { (void)mask; return 0; }
+int sigsetmask(int mask) { (void)mask; return 0; }
+int siginterrupt(int sig, int flag) { (void)sig; (void)flag; return 0; }
+
+void (*signal(int sig, void (*handler)(int)))(int) {
+    void (*old)(int);
+    if (sig < 0 || sig >= 32) { errno = EINVAL; return SIG_ERR; }
+    old = sig_handlers[sig];
+    sig_handlers[sig] = handler;
+    return old;
+}
+
+int system(const char *cmd) {
+    int pid, st = 0;
+    char *av[4];
+    if (!cmd) return 1;
+    if (strlen(cmd) >= 256) { errno = EINVAL; return -1; }
+    pid = fork();
+    if (pid < 0) { errno = -pid; return -1; }
+    if (pid == 0) {
+        av[0] = "sh";
+        av[1] = "-c";
+        av[2] = (char *)cmd;
+        av[3] = NULL;
+        exec("/bin/sh", av);
+        exit(127);
+    }
+    if (waitpid(pid, &st, 0) < 0) return -1;
+    errno = 0;
+    return st;
+}
+
+#include "math.c"
 #include "regex.c"

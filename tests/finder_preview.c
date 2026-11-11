@@ -20,7 +20,7 @@ int main(int argc, char **argv) {
     char name[24], path[128]; struct dirent_info st;
     if (account(0,NULL,NULL)>0) CHECK(account(3,"root","review123")==0);
     CHECK(account(1,"root","review123")==0);
-    CHECK(getcwd(path,sizeof(path))==0 && !strcmp(path,"/root"));
+    CHECK(getcwd(path,sizeof(path))==path && !strcmp(path,"/root"));
     CHECK(dirstat("/root",&st)==0 && st.type==2);
     if (account_list(name,1)==-ENOENT) CHECK(account(2,"alice","alice123")==0);
     CHECK(dirstat("/home/alice",&st)==0 && st.type==2);
@@ -47,7 +47,7 @@ int main(int argc, char **argv) {
         CHECK(!ok && account(4,NULL,NULL)==-EPERM);
     } else {
         CHECK(ok);
-        CHECK(getcwd(path,sizeof(path))==0 && !strcmp(path,"/home/alice"));
+        CHECK(getcwd(path,sizeof(path))==path && !strcmp(path,"/home/alice"));
         CHECK(account(4,NULL,NULL)==1);
         CHECK(account(5,name,NULL)==0 && !strcmp(name,"alice"));
         CHECK(account(2,"intruder","test")==-EPERM);

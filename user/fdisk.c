@@ -17,7 +17,7 @@ int main(int argc,char **argv) {
         return found ? 0 : 1;
     }
     if(argc==4 && !strcmp(argv[1],"init") && !strcmp(argv[3],"--yes")) op=0;
-    else if(argc==6 && !strcmp(argv[1],"add") && !number(argv[3],4,&slot) && slot && !number(argv[4],131071,&start) && start && !number(argv[5],1024,&size) && size) { op=1; start*=2048; size*=2048; }
+    else if(argc==6 && !strcmp(argv[1],"add") && !number(argv[3],4,&slot) && slot && !number(argv[4],131071,&start) && start && !number(argv[5],8192,&size) && size) { op=1; start*=2048; size*=2048; }
     else if(argc==5 && !strcmp(argv[1],"del") && !strcmp(argv[4],"--yes") && !number(argv[3],4,&slot) && slot) op=2;
     else {
         dprintf(STDERR,"usage:\n fdisk DEVICE\n fdisk init DEVICE --yes\n fdisk add DEVICE SLOT START_MiB SIZE_MiB\n fdisk del DEVICE SLOT --yes\ninit/del destroy partition metadata. Mounted disks are refused.\n"); return 2;
