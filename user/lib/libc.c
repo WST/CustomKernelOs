@@ -192,6 +192,18 @@ void  sleep_ms(unsigned ms)                      { syscall3(SYS_SLEEP, ms, 0, 0)
 int   getpid(void)                               { return syscall3(SYS_GETPID, 0, 0, 0); }
 unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }
 void  yield(void)                                { syscall3(SYS_YIELD, 0, 0, 0); }
+int   spawn(const char *path, char **argv, int stdin_fd) { return syscall3(SYS_SPAWN, (int)path, (int)argv, stdin_fd); }
+static void thread_entry(void (*fn)(void *), void *arg) {
+    fn(arg); thread_exit(0);
+}
+int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned size) {
+    return syscall5(SYS_THREAD_CREATE,(int)thread_entry,(int)fn,(int)arg,(int)stack,size);
+}
+int thread_join(int tid,int *code) { return syscall3(SYS_THREAD_JOIN,tid,(int)code,0); }
+void thread_exit(int code) { syscall3(SYS_THREAD_EXIT,code,0,0); for (;;) {} }
+int gettid(void) { return syscall3(SYS_GETTID,0,0,0); }
+int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,0,0); }
+int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
 int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
 int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
@@ -233,9 +245,22 @@ void gotoxy(int x, int y) { printf("\x1b[%d;%dH", y + 1, x + 1); }
 int clipboard_set(const char *s, unsigned n) { return syscall3(SYS_CLIPBOARD, 1, (int)s, n); }
 int clipboard_get(char *s, unsigned n) { return syscall3(SYS_CLIPBOARD, 0, (int)s, n); }
 
+static int key_termsize;
 int readkey(void) {
+    int size = syscall3(SYS_TERMSIZE, 0, 0, 0);
+    if (key_termsize && size != key_termsize) { key_termsize = size; return KEY_RESIZE; }
+    key_termsize = size;
     unsigned char c;
-    if (read(STDIN, &c, 1) <= 0) return -1;
+    /* Only readkey opts into resize interruption. Raw read callers (notably
+     * login/password input) must never see resize as EOF or an input error. */
+    syscall3(SYS_TTYMODE, cur_tty | TTY_RESIZE_EVENT, 0, 0);
+    int count = read(STDIN, &c, 1);
+    syscall3(SYS_TTYMODE, cur_tty, 0, 0);
+    if (count <= 0) {
+        size = syscall3(SYS_TERMSIZE, 0, 0, 0);
+        if (size != key_termsize) { key_termsize = size; return KEY_RESIZE; }
+        return -1;
+    }
     if (c >= 0xC0) {                                /* UTF-8: остальные байты буквы уже в буфере */
         int n = c >= 0xE0 ? 2 : 1, cp = c & (c >= 0xE0 ? 0x0F : 0x1F);
         for (int i = 0; i < n; i++) {
@@ -648,7 +673,7 @@ static int size_class(size_t n, size_t *rounded) {
     }
 }
 
-void *malloc(size_t n) {
+static void *malloc_unlocked(size_t n) {
     if (n == 0) n = 1;
     if (n > 0x40000000u) return NULL;
     size_t sz;
@@ -687,7 +712,7 @@ void *malloc(size_t n) {
     return h + 1;
 }
 
-void free(void *p) {
+static void free_unlocked(void *p) {
     if (!p) return;
     struct hdr *h = (struct hdr *)p - 1;
     if (h->magic != HEAP_MAGIC) return;             /* не наш указатель — не трогаем */
@@ -697,6 +722,19 @@ void free(void *p) {
     free_list[k] = h;
 }
 
+static thread_mutex_t heap_lock;
+void *malloc(size_t n) {
+    thread_mutex_lock(&heap_lock);
+    void *p=malloc_unlocked(n);
+    thread_mutex_unlock(&heap_lock);
+    return p;
+}
+void free(void *p) {
+    if (!p) return;
+    thread_mutex_lock(&heap_lock);
+    free_unlocked(p);
+    thread_mutex_unlock(&heap_lock);
+}
 void *calloc(size_t n, size_t size) {
     void *p = malloc(n * size);
     if (p) memset(p, 0, n * size);
@@ -739,6 +777,8 @@ int sendto(int fd, const void *buf, size_t len, unsigned ip, int port) {
 int recvfrom(int fd, void *buf, size_t len, struct sockaddr *from, unsigned timeout_ms) {
     return syscall5(SYS_RECVFROM, fd, (int)buf, (int)len, (int)from, (int)timeout_ms);
 }
+int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
+int cpuinfo(struct cpu_info *out, unsigned capacity) { return syscall3(SYS_CPUINFO, (int)out, capacity, 0); }
 int netinfo(struct net_info *out)          { return syscall3(SYS_NETINFO, (int)out, 0, 0); }
 int ping(unsigned ip, int seq, unsigned t) { return syscall3(SYS_PING, (int)ip, seq, (int)t); }
 int set_dns(unsigned ip)                   { return syscall3(SYS_NETCONFIG, 1, (int)ip, 0); }

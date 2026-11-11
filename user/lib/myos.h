@@ -2,6 +2,10 @@
  * Никаких системных заголовков: программы собираются с -nostdinc. */
 #ifndef MYOS_H
 #define MYOS_H
+#include "sysinfo.h"
+int sysinfo(struct system_info *out, unsigned size);
+/* Returns online CPU count, or negative errno; capacity is in records. */
+int cpuinfo(struct cpu_info *out, unsigned capacity);
 
 typedef unsigned int   size_t;
 typedef int            ssize_t;
@@ -44,7 +48,8 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
+    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX
 };
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
@@ -150,7 +155,18 @@ int   getpid(void);
 unsigned ticks(void);           /* миллисекунды с момента загрузки */
 void  yield(void);
 
+/* Native threads: caller owns the stack until successful join. Not POSIX pthreads.
+ * Zero-initialize mutexes. Lock/unlock return 0 or negative errno. */
+typedef struct { unsigned owner; } thread_mutex_t;
+int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned stack_size);
+int thread_join(int tid, int *code);
+void thread_exit(int code) __attribute__((noreturn));
+int gettid(void);
+int thread_mutex_lock(thread_mutex_t *m);
+int thread_mutex_unlock(thread_mutex_t *m);
+
 /* процессы в стиле Unix */
+int   spawn(const char *path, char **argv, int stdin_fd); /* -1 inherits stdin */
 int   fork(void);                         /* 0 в потомке, pid потомка в родителе */
 int   exec(const char *path, char **argv);/* при успехе не возвращается */
 int   waitpid(int pid, int *status, int options);   /* pid -1 = любой ребёнок */
@@ -175,6 +191,7 @@ int  term_rows(void);
 #define SCREEN_H term_rows()
 #define TTY_RAW      1          /* клавиши сразу, без эха */
 #define TTY_NONBLOCK 2          /* read не ждёт клавишу (вернёт 0) */
+#define TTY_RESIZE_EVENT 8 /* Internal readkey opt-in; ordinary read stays uninterrupted. */
 #define TTY_NOSIG    4          /* Ctrl+C приходит как код 3, а не убивает */
 int  ttymode(int mode);         /* -> прежний режим */
 
@@ -195,6 +212,7 @@ int  utf8_put(char *out, int cp); /* кодовая точка -> UTF-8 (1..3 б
 enum { KEY_UP = 1000, KEY_DOWN, KEY_RIGHT, KEY_LEFT, KEY_HOME, KEY_END,
        KEY_PGUP, KEY_PGDN, KEY_DEL, KEY_INS };
 int  readkey(void);
+#define KEY_RESIZE 0x30000 /* Terminal geometry changed; redraw using term_cols/rows. */
 #define KEY_SHIFT 0x10000
 #define KEY_COPY  0x20000
 #define KEY_PASTE 0x20001

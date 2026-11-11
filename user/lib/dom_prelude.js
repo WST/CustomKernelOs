@@ -441,10 +441,50 @@
   w.cancelAnimationFrame = function (id) { clearTimeout(id); };
   w.requestIdleCallback = function (f) { return setTimeout(function () { f({ didTimeout: false, timeRemaining: function () { return 50; } }); }, 1); };
   w.cancelIdleCallback = function (id) { clearTimeout(id); };
-  w.matchMedia = function (q) {
-    return { get matches() { return my.media(String(q)); }, media: String(q), onchange: null,
-      addListener: function () {}, removeListener: function () {}, addEventListener: function () {}, removeEventListener: function () {} };
+  var mediaLists = [];
+  w.matchMedia = function (query) {
+    var q = String(query), listeners = [], last = my.media(q);
+    var list = {
+      get matches() { return my.media(q); }, media: q, onchange: null,
+      addEventListener: function (type, fn, options) {
+        if (type !== 'change' || !fn) return;
+        for (var i = 0; i < listeners.length; i++) if (listeners[i].fn === fn) return;
+        listeners.push({fn: fn, once: !!(options && options.once)});
+      },
+      removeEventListener: function (type, fn) {
+        if (type !== 'change') return;
+        for (var i = listeners.length - 1; i >= 0; i--) if (listeners[i].fn === fn) listeners.splice(i, 1);
+      },
+      addListener: function (fn) { list.addEventListener('change', fn); },
+      removeListener: function (fn) { list.removeEventListener('change', fn); },
+      dispatchEvent: function (event) {
+        if (event.type !== 'change') return true;
+        var snapshot = listeners.slice();
+        for (var i = 0; i < snapshot.length; i++) {
+          var entry = snapshot[i];
+          if (entry.once) list.removeEventListener('change', entry.fn);
+          if (typeof entry.fn === 'function') entry.fn.call(list, event);
+          else if (entry.fn && typeof entry.fn.handleEvent === 'function') entry.fn.handleEvent(event);
+        }
+        if (typeof list.onchange === 'function') list.onchange.call(list, event);
+        return !event.defaultPrevented;
+      }
+    };
+    mediaLists.push(function () {
+      var matches = my.media(q);
+      if (matches === last) return;
+      last = matches;
+      var event = new Event('change');
+      event.matches = matches; event.media = q;
+      event.target = event.currentTarget = list;
+      list.dispatchEvent(event);
+    });
+    return list;
   };
+  w.addEventListener('resize', function () {
+    var snapshot = mediaLists.slice();
+    for (var i = 0; i < snapshot.length; i++) snapshot[i]();
+  });
   w.getComputedStyle = function (el) {
     var st = el && el.style ? el.style : {};
     return new Proxy_(st, el);

@@ -27,6 +27,29 @@ static window *win;
 static struct cell *grid;                   /* rows * cols */
 static bool *row_dirty;
 static int  cols, rows;
+#define HISTORY_ROWS 1000
+static struct cell *history;
+static int history_count, history_start, view_back;
+static struct cell *view_at(int r, int c) {
+    int line = history_count - view_back + r;
+    if (line < history_count)
+        return &history[((history_start + line) % HISTORY_ROWS) * cols + c];
+    return &grid[(line - history_count) * cols + c];
+}
+static void history_push(int n) {
+    if (!history) return;
+    if (n > rows) n = rows;
+    for (int r = 0; r < n; r++) {
+        int slot = (history_start + history_count) % HISTORY_ROWS;
+        memcpy(history + slot * cols, grid + r * cols, cols * sizeof(struct cell));
+        if (history_count < HISTORY_ROWS) history_count++;
+        else history_start = (history_start + 1) % HISTORY_ROWS;
+    }
+    if (view_back) {
+        view_back = view_back + n > history_count ? history_count : view_back + n;
+        for (int r = 0; r < rows; r++) row_dirty[r] = true;
+    }
+}
 static int  cx, cy;                         /* курсор */
 static int  saved_cx, saved_cy;
 static bool cur_visible = true, focused = true;
@@ -83,6 +106,7 @@ static void clear_row(int r) { clear_cells(r, 0, cols); }
 
 static void scroll_region(int top, int bot, int n) {       /* n > 0 — вверх, n < 0 — вниз */
     if (n > 0) {
+        if (top == 0 && bot == rows - 1) history_push(n);
         for (int r = top; r <= bot; r++) {
             if (r + n <= bot) memcpy(at(r, 0), at(r + n, 0), cols * sizeof(struct cell));
             else clear_row(r);
@@ -261,7 +285,7 @@ static void term_write(const char *s, int n) {
 /* ------------------------------------------------------------ рисование */
 
 static void draw_cell(int r, int c, bool cursor) {
-    struct cell *p = at(r, c);
+    struct cell *p = view_at(r, c);
     int x = PAD + c * CW, y = PAD + r * CH;
     color_t fg = p->fg, bg = p->bg;
     int lo = sel_anchor < sel_end ? sel_anchor : sel_end;
@@ -286,7 +310,7 @@ static void draw_rows(void) {
         row_dirty[r] = false;
         if (first < 0) first = r;
         last = r;
-        for (int c = 0; c < cols; c++) draw_cell(r, c, cur_visible && r == cy && c == cx);
+        for (int c = 0; c < cols; c++) draw_cell(r, c, !view_back && cur_visible && r == cy && c == cx);
     }
     last_cur_row = cur_visible ? cy : -1;
     if (first >= 0) win_update_rect(win, 0, PAD + first * CH, win->w, (last - first + 1) * CH);
@@ -311,6 +335,9 @@ static void set_grid(int nc, int nr) {
             else { p->ch = ' '; p->fg = DEF_FG; p->bg = DEF_BG; }
         }
     }
+    free(history);
+    history = malloc(HISTORY_ROWS * nc * sizeof(struct cell));
+    history_count = history_start = view_back = 0;
     free(grid); free(row_dirty);
     grid = g; row_dirty = d;
     cols = nc; rows = nr;
@@ -347,9 +374,9 @@ static void on_key(int k) {
             int start = r == lo / cols ? lo % cols : 0;
             int end = hi - r * cols;
             if (end > cols) end = cols;
-            while (end > start && at(r, end - 1)->ch == ' ') end--;
+            while (end > start && view_at(r, end - 1)->ch == ' ') end--;
             for (int c = start; c < end; c++) {
-                char u[4]; int cp = at(r, c)->ch;
+                char u[4]; int cp = view_at(r, c)->ch;
                 int count = utf8_put(u, cp & 0x10000 ? cp & 255 : cp);
                 if (n + count > CLIPBOARD_MAX) { free(s); return; }
                 memcpy(s + n, u, count); n += count;
@@ -448,7 +475,17 @@ static void kill_tree(int root) {
 static bool handle(struct event *e) {
     switch (e->type) {
     case EV_CLOSE: return false;
-    case EV_KEY: on_key(e->key); break;
+    case EV_KEY:
+        if (view_back && e->key != KEY_COPY) {
+            view_back = 0;
+            for (int r = 0; r < rows; r++) row_dirty[r] = true;
+        }
+        on_key(e->key); break;
+    case EV_MOUSE_WHEEL:
+        selection_clear();
+        view_back = clampi(view_back + e->wheel * 3, 0, history_count);
+        for (int r = 0; r < rows; r++) row_dirty[r] = true;
+        break;
     case EV_FOCUS: focused = e->key != 0; row_dirty[cy] = true; if (!focused) selecting = false; break;
     case EV_MOUSE_DOWN:
         if (!(e->buttons & MOUSE_LEFT)) break;

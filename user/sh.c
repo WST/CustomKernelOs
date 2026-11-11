@@ -321,6 +321,7 @@ static int edit_line(const char *prompt, char *buf, int max) {
     render(prompt, buf, len, cur);
     for (;;) {
         int k = readkey();
+        if (k == KEY_RESIZE) { render(prompt, buf, len, cur); continue; }
         bool was_tab = last_tab;
         last_tab = false;
         if (k == '\r' || k == '\n') break;

@@ -1,5 +1,6 @@
 /* Главная функция ядра: сюда приходит управление из entry.asm. */
 #include "vga.h"
+#include "sysinfo.h"
 #include "idt.h"
 #include "timer.h"
 #include "keyboard.h"
@@ -11,11 +12,14 @@
 #include "paging.h"
 #include "heap.h"
 #include "task.h"
+#include "smp.h"
 #include "gdt.h"
 #include "fb.h"
 #include "display.h"
 #include "net.h"
 #include "mouse.h"
+#include "xhci.h"
+#include "bootinfo.h"
 
 static void ok(const char *fmt, ...) {
     va_list ap;
@@ -36,6 +40,8 @@ static void fail(const char *what, const char *why) {
 
 void kmain(void) {
     vga_init();
+    smp_early_init();
+    sysinfo_init();
 
     vga_set_color(LIGHT_CYAN, BLACK);
     vga_puts(
@@ -44,8 +50,11 @@ void kmain(void) {
         " | |\\/| | | | | | | \\___ \\ \n"
         " | |  | | |_| | |_| |___) |\n"
         " |_|  |_|\\__, |\\___/|____/ \n"
-        "         |___/   v0.19     \n\n");
+        "         |___/             \n\n");
 
+    struct system_info identity; sysinfo_get(&identity);
+    ok("%s %s %s (%s)", identity.os, identity.version, identity.commit, identity.build_time);
+    ok("CPU: %s", identity.cpu_brand);
     ok("VGA text console 80x25");
     gdt_init();
     idt_init();
@@ -84,6 +93,12 @@ void kmain(void) {
     __asm__ volatile ("sti");
     ok("PIT timer 100 Hz, PS/2 keyboard%s, FPU, interrupts on", have_mouse ? ", PS/2 mouse" : "");
 
+#ifdef MYOS_HARDWARE
+    if (xhci_init()) ok("USB HID input ready");
+    else fail("USB HID", "no supported direct keyboard/mouse; PS/2 or BIOS legacy may still work");
+    if (boot_info_get()) ok("LIVE MODE: filesystem changes stay in RAM; internal ATA disks are hidden");
+#endif
+
     if (net_init())
         ok("Network: Intel e1000, MAC %02x:%02x:%02x:%02x:%02x:%02x, DHCP in background",
            netcfg.mac[0], netcfg.mac[1], netcfg.mac[2], netcfg.mac[3], netcfg.mac[4], netcfg.mac[5]);
@@ -115,6 +130,7 @@ void kmain(void) {
     vga_set_color(WHITE, BLACK);
     kprintf("\nWelcome to MyOS! Type 'help' for a list of commands.\n\n");
 
+    smp_init();
     services_init();
     shell_run();
 }

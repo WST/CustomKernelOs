@@ -178,6 +178,7 @@ struct mouse {
     int x, y;
     unsigned buttons;               /* MOUSE_LEFT | MOUSE_RIGHT | MOUSE_MIDDLE */
     unsigned events;
+    unsigned wheel;                 /* cumulative steps, positive = up */
 };
 #define MOUSE_LEFT   1
 #define MOUSE_RIGHT  2

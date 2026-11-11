@@ -65,8 +65,11 @@ static void push(u16 c) {
 
 static void keyboard_irq(struct regs *r) {
     (void)r;
-    if (inb(0x64) & 0x20) return;       /* это байт от мыши — его заберёт IRQ12 */
-    u8 sc = inb(0x60);
+    if (inb(0x64) & 0x20) return;
+    kb_scancode(inb(0x60));
+}
+
+void kb_scancode(unsigned char sc) {
 
     if (sc == 0xE0) { extended = true; return; }
     if (extended) {
@@ -131,7 +134,7 @@ static void keyboard_irq(struct regs *r) {
 
 void keyboard_init(void) {
     ru_init();
-    while (inb(0x64) & 1) inb(0x60);   /* сбрасываем то, что накопилось */
+    for (unsigned i=0;i<1024 && (inb(0x64)&1);i++) inb(0x60);   /* сбрасываем то, что накопилось */
     irq_install(1, keyboard_irq);
 }
 

@@ -83,6 +83,7 @@ int ps(struct proc_info *pi, int max) {
     return n;
 }
 int fork(void) { return -1; }
+int spawn(const char *p, char **a, int fd) { (void)p; (void)a; (void)fd; return -1; }
 int exec(const char *p, char **a) { (void)p; (void)a; return -1; }
 int pipe(int f[2]) { (void)f; return -1; }
 int dup2(int a, int b) { (void)a; (void)b; return -1; }

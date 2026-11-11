@@ -59,7 +59,7 @@ static void shm_put(struct shm *s) {
 }
 
 int shm_map(int id, u32 *addr) {
-    struct task *t = task_current();
+    struct task *t = task_process(task_current());
     if (id < 1 || id > SHM_MAX || !shms[id - 1].used) return -EINVAL;
     struct shm *s = &shms[id - 1];
     int slot = -1;
@@ -108,7 +108,7 @@ static void unmap_slot(struct task *t, u32 dir, int i) {
 }
 
 int shm_unmap(u32 addr) {
-    struct task *t = task_current();
+    struct task *t = task_process(task_current());
     for (int i = 0; i < SHM_PER_TASK; i++)
         if (t->shm[i].id && t->shm[i].addr == addr) { unmap_slot(t, t->page_dir, i); return 0; }
     return -EINVAL;

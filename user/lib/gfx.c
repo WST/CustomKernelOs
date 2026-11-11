@@ -48,7 +48,7 @@ void gfx_flip_rect(int x, int y, int w, int h) {
 
 void gfx_flip(void) { gfx_flip_rect(0, 0, gfx_w, gfx_h); }
 
-int mouse_get(struct mouse *m) { return sc(SYS_MOUSE, (int)m, 0); }
+int mouse_get(struct mouse *m) { return sc(SYS_MOUSE, (int)m, sizeof(*m)); }
 
 /* ---------------------------------------------------------------- видеокарта */
 

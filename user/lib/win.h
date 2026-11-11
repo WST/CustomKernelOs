@@ -35,6 +35,7 @@ enum {
     EV_MESSAGE,                     /* сообщение от другой программы: e.msg */
     EV_RESIZE,                      /* окно растянули: e.x, e.y — новый размер; буфер уже новый,
                                        старое содержимое скопировано — перерисуй и win_update */
+    EV_MOUSE_WHEEL,                 /* e.wheel: signed steps, positive = up */
 };
 
 struct event {
@@ -42,6 +43,7 @@ struct event {
     window *win;
     int key;                        /* EV_KEY */
     int x, y;                       /* мышь: координаты в окне */
+    int wheel;                      /* EV_MOUSE_WHEEL */
     int buttons;                    /* MOUSE_LEFT | MOUSE_RIGHT ... */
     struct msg msg;                 /* EV_MESSAGE */
 };
@@ -86,6 +88,7 @@ enum {
     WM_RESIZABLE = 111,             /* a = окно, b, c = наименьший размер */
     WM_SETBUF = 112,                /* a = окно, b = shm нового буфера, c = ширина, d = высота */
     WM_KEY = 200, WM_MOUSE, WM_CLOSE, WM_FOCUS, WM_QUIT,
+    WM_MOUSE_WHEEL = 211,           /* a = window, b/c = position, d = signed steps */
     WM_RESIZE = 210,                /* стол -> программа: a = окно, b, c = новый размер */
 };
 

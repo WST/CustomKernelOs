@@ -42,9 +42,57 @@ BUILD   := build
 DISK    := disk.img
 DISK_MB := 16
 C_SRC   := $(wildcard kernel/*.c)
-OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
+OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
 
 all: $(BUILD)/os.img install
+
+$(BUILD)/user/launchbench.o: tests/launchbench.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/launchbench: $(BUILD)/user/launchbench.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/spawncheck.o: tests/spawncheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/spawncheck: $(BUILD)/user/spawncheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/desktop_launchcheck.o: tests/desktop_launchcheck.c user/desktop.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/desktop_launchcheck: $(BUILD)/user/desktop_launchcheck.o $(BUILD)/user/l_img.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
+.PHONY: launchtest
+launchtest:
+	python3 tests/launch_smoke.py
+
+.PHONY: smptest
+smptest:
+	python3 tests/smp_smoke.py
+
+$(BUILD)/user/smpcheck.o: tests/smpcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/smpcheck: $(BUILD)/user/smpcheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/smpbench.o: tests/smpbench.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+
+$(BUILD)/user/smpbench: $(BUILD)/user/smpbench.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+.PHONY: FORCE_BUILD_INFO
+FORCE_BUILD_INFO:
+$(BUILD)/build_info.h: FORCE_BUILD_INFO VERSION tools/build_info.py | $(BUILD)
+	python3 tools/build_info.py $@
+$(BUILD)/sysinfo.o: $(BUILD)/build_info.h
+$(OBJS): user/lib/sysinfo.h
+$(BUILD)/user/libc.o: user/lib/sysinfo.h
+CFLAGS += -I$(BUILD)
+
 
 # Native clipboard/editor checks, installed only onto a disposable test disk.
 $(BUILD)/user/clipboardcheck.o: tests/clipboardcheck.c user/lib/myos.h | $(BUILD)/user
@@ -135,7 +183,7 @@ $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.
 
 $(BUILD)/user/code.o: user/code_features.h user/code_index.h user/code_workspace.h user/code_chrome.h user/code_signature.h
 
-$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
+$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
@@ -182,10 +230,12 @@ $(BUILD)/user/js: $(BUILD)/user/js.o $(ULIB) $(JS_OBJS) user/user.ld
 # картинки (PNG, GIF, JPEG, BMP) — user/lib/img.c, пока только браузеру
 $(BUILD)/user/l_img.o: user/lib/img.c user/lib/img.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/browser.o: user/lib/img.h
+$(BUILD)/user/l_svg.o: user/lib/svg.c user/lib/svg.h user/lib/gfx.h user/lib/js.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
 
-$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
 
 # cc — компилятор Си, который работает внутри MyOS (несколько файлов в user/cc/)
 CC_SRC  := $(wildcard user/cc/*.c)
@@ -234,7 +284,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in myos.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in myos.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
@@ -259,6 +309,7 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive format=raw,file=$(DISK),index=1,media=disk
 QEMU_MEM ?= 256M
+QEMU_CPUS ?= 4
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
@@ -274,10 +325,10 @@ QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80 -rtc base=localt
 
 # всё, что пишет консоль ядра (и browser -v), — ещё и в build/serial.log
 run: all
-	$(QEMU) -m $(QEMU_MEM) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
+	$(QEMU) -smp $(QEMU_CPUS) -m $(QEMU_MEM) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
 
 debug: all
-	$(QEMU) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
+	$(QEMU) -smp $(QEMU_CPUS) -vga $(VGA) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
 
 clean:
 	rm -rf $(BUILD)
@@ -332,7 +383,7 @@ x509test: | $(BUILD)
 browsertest: user/lib/dom_prelude.h | $(BUILD)
 	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
+	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --clipboard-test
@@ -351,7 +402,7 @@ gfxtest: | $(BUILD)
 CCROOT := $(BUILD)/ccroot
 cctest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@mkdir -p $(CCROOT)/include/sys
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
@@ -384,7 +435,7 @@ largetest: | $(BUILD)
 # ext без сети: разбор инструкций, каталоги, отказ на неизвестной команде.
 exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
@@ -393,7 +444,7 @@ exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
 # gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
 gztest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
@@ -401,7 +452,7 @@ gztest: $(BUILD)/cc-host
 
 cptest: $(BUILD)/cc-host
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
@@ -436,3 +487,78 @@ $(BUILD)/user/settings $(BUILD)/user/desktop: $(BUILD)/user/%: $(BUILD)/user/%.o
 .PHONY: settingstest
 settingstest:
 	python3 tests/settings_smoke.py
+
+$(BUILD)/user/sysinfocheck.o: tests/sysinfocheck.c user/lib/myos.h user/lib/sysinfo.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/sysinfocheck: $(BUILD)/user/sysinfocheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: sysinfotest
+sysinfotest:
+	python3 tests/build_info_test.py
+	python3 tests/sysinfo_smoke.py
+
+# Hardware/USB live build is isolated from the original QEMU boot image.
+HWBUILD := $(BUILD)/hardware
+HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
+$(HWBUILD):
+	mkdir -p $@
+$(HWBUILD)/%.o: kernel/%.c kernel/*.h $(BUILD)/build_info.h | $(HWBUILD)
+	$(CC) $(CFLAGS) -DMYOS_HARDWARE -c $< -o $@
+$(HWBUILD)/%.o: kernel/%.asm | $(HWBUILD)
+	$(NASM) -f elf32 $< -o $@
+$(HWBUILD)/kernel.elf: $(HWOBJS) boot/hardware.ld
+	$(LD) -m elf_i386 -T boot/hardware.ld -nostdlib $(HWOBJS) -o $@
+$(HWBUILD)/kernel.bin: $(HWBUILD)/kernel.elf
+	$(OBJCOPY) -O binary $< $@
+.PHONY: usb-image usbtest
+usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
+	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm
+usbtest: usb-image
+	python3 tests/hardware_smoke.py
+
+.PHONY: htoptest
+htoptest:
+	$(MAKE) build/os.img install DISK=build/htop-test.img
+	python3 tests/htop_smoke.py
+
+$(BUILD)/user/cpuinfocheck.o: tests/cpuinfocheck.c user/lib/myos.h user/lib/sysinfo.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/cpuinfocheck: $(BUILD)/user/cpuinfocheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+$(BUILD)/user/terminalresizecheck.o: tests/terminalresizecheck.c user/terminal.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/terminalresizecheck: $(BUILD)/user/terminalresizecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: terminalresizetest
+terminalresizetest:
+	$(MAKE) build/os.img build/user/terminalresizecheck install DISK=build/terminal-resize-test.img
+	python3 tests/terminal_resize_smoke.py
+
+$(BUILD)/user/terminalwindowcheck.o: tests/terminalwindowcheck.c user/lib/myos.h user/lib/win.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/terminalwindowcheck: $(BUILD)/user/terminalwindowcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+
+
+.PHONY: terminalwindowtest
+terminalwindowtest:
+	$(MAKE) build/os.img build/user/terminalwindowcheck install DISK=build/terminal-resize-test.img
+	python3 tests/terminal_window_smoke.py
+
+# Mouse wheel: terminal history on host + PS/2 packets in QEMU.
+.PHONY: wheeltest
+wheeltest: $(BUILD)/os.img
+	$(HOSTCC) -m32 -std=gnu11 -DMYOS_HOST_LIBC -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections -Iuser/lib tests/terminal_history.c -Wl,--gc-sections -o $(BUILD)/terminal-history-test
+	./$(BUILD)/terminal-history-test
+	python3 tests/wheel_smoke.py
+
+# Native user threads and shared-address-space SMP regression tests.
+$(BUILD)/user/threadcheck.o: tests/threadcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/threadcheck: $(BUILD)/user/threadcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: threadtest
+threadtest:
+	python3 tests/thread_smoke.py
