@@ -117,17 +117,26 @@ static int alloc_fd(struct file *f) {
 
 /* Copied into kernel storage: survives the source application's exit.
  * A different account must not read the previous account's clipboard. */
-static char clipboard[65536];
+/* Keep the 64 KiB payload out of the low-memory boot image. */
+#define CLIPBOARD_CAPACITY 65536u
+static char *clipboard;
 static u32 clipboard_length, clipboard_uid;
 static struct mutex clipboard_lock;
 static int sys_clipboard(u32 op, u32 addr, u32 size) {
     if (op > 1) return -EINVAL;
-    if (size > sizeof(clipboard)) return -EFBIG;
+    if (size > CLIPBOARD_CAPACITY) return -EFBIG;
     if (size && !user_buf_ok(addr, size, op == 0)) return -EFAULT;
     mutex_lock(&clipboard_lock);
     u32 uid = task_process(task_current())->uid;
     int result;
     if (op == 1) {
+        if (size && !clipboard) {
+            clipboard = kmalloc(CLIPBOARD_CAPACITY);
+            if (!clipboard) {
+                mutex_unlock(&clipboard_lock);
+                return -ENOMEM;
+            }
+        }
         if (size) memcpy(clipboard, (void *)addr, size);
         clipboard_length = size;
         clipboard_uid = uid;
