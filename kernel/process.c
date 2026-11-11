@@ -228,11 +228,14 @@ static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 in
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
  * argv — строки в памяти ядра. Файл читается кусками по 512 байт: в куче
  * ядра остаются только заголовки программы, не весь образ. */
-static int load_image(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
+static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
     u32 ino;
     struct fs_stat st;
-    if (fs_resolve(cwd, path, &ino) || fs_stat(ino, &st)) return PROC_ENOENT;
+    int resolved=fs_resolve(cwd,path,&ino);
+    if(resolved)return resolved==FS_EACCES?PROC_EACCES:PROC_ENOENT;
+    if(fs_stat(ino,&st))return PROC_ENOENT;
     if (st.type == FS_TYPE_DIR) return PROC_EISDIR;
+    if(fs_access(ino,1,false))return PROC_EACCES;
 
     struct elf_header eh;
     struct elf_phdr *ph = NULL, *lph = NULL;
@@ -281,7 +284,7 @@ static int load_image(const char *path, u32 cwd, int argc, char **argv, struct i
         u32 lino;
         struct fs_stat lst;
         struct elf_header leh;
-        if (fs_resolve(cwd, interp, &lino) || fs_stat(lino, &lst) || lst.type != FS_TYPE_FILE) {
+        if (fs_resolve(cwd, interp, &lino) || fs_stat(lino, &lst) || lst.type != FS_TYPE_FILE || fs_access(lino,1,false)) {
             err = PROC_ENOENT;
             goto fail;
         }
@@ -333,6 +336,12 @@ fail:
     return err;
 }
 
+/* Pin the namespace while ELF headers, segments and interpreter are read.
+ * Otherwise unlink/reuse between reads could substitute another owner's inode. */
+static int load_image(const char *path,u32 cwd,int argc,char **argv,struct image *im) {
+    fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,im);fs_namespace_unlock();return ret;
+}
+
 static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent) {
     struct image im;
     int err = load_image(path, cwd, argc, argv, &im);
@@ -342,6 +351,7 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;
     task_process(t)->cwd = cwd;
+    task_process(t)->creation_mask=022;
     if (parent) {
         task_process(t)->uid = task_process(parent)->uid;
     task_process(t)->real_uid = task_process(parent)->real_uid;
@@ -351,6 +361,7 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
     task_process(t)->gid = task_process(parent)->gid;
     task_process(t)->real_gid = task_process(parent)->real_gid;
     task_process(t)->saved_gid = task_process(parent)->saved_gid;
+    task_process(t)->creation_mask = task_process(parent)->user?task_process(parent)->creation_mask:022;
         task_process(t)->authenticated = task_process(parent)->authenticated;
         t->parent = parent->id;
         t->pgid = parent->pgid;
@@ -410,6 +421,7 @@ int proc_fork(struct regs *r) {
     task_process(t)->gid = task_process(parent)->gid;
     task_process(t)->real_gid = task_process(parent)->real_gid;
     task_process(t)->saved_gid = task_process(parent)->saved_gid;
+    task_process(t)->creation_mask = task_process(parent)->user?task_process(parent)->creation_mask:022;
     task_process(t)->authenticated = task_process(parent)->authenticated;
     task_process(t)->cwd        = task_process(parent)->cwd;
     t->parent     = parent->id;

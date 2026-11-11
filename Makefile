@@ -393,6 +393,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
 	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /usr/share/applications /mnt /media /proc /sys /run /ext /ext/bin /ext/instructions; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
+	@$(MAKE) --no-print-directory install-permissions DISK=$(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
@@ -479,7 +480,7 @@ test: | $(BUILD)
 	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
-	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==2, v'
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==3, v'
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
 	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
@@ -872,3 +873,29 @@ $(BUILD)/fs-lookup-test: tests/fs_lookup_test.c kernel/fs.c kernel/myfs.c kernel
 .PHONY: fslookuptest
 fslookuptest: $(BUILD)/fs-lookup-test
 	python3 -c 'import tempfile,pathlib,subprocess; t=tempfile.TemporaryDirectory(prefix="myos-lookup-"); p=pathlib.Path(t.name)/"disk.img"; f=p.open("wb"); f.truncate(64*1024*1024); f.close(); subprocess.run(["$(BUILD)/fs-lookup-test",str(p)],check=True)'
+
+$(BUILD)/file.o $(HWBUILD)/file.o: kernel/fs.h
+$(BUILD)/fs.o $(HWBUILD)/fs.o: kernel/fs-permissions.inc
+$(BUILD)/myfs.o $(HWBUILD)/myfs.o: kernel/myfs-permissions.inc
+$(BUILD)/syscall.o $(HWBUILD)/syscall.o: kernel/fs-syscall.inc
+$(BUILD)/myfs: kernel/fs-permissions.inc kernel/myfs-permissions.inc
+
+$(BUILD)/fs-permissions-test: tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c kernel/fs-permissions.inc kernel/myfs-permissions.inc $(BUILD)/myfs
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -DFS_PERMISSIONS_TEST -Ikernel tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $@
+.PHONY: permissionstest
+permissionstest: $(BUILD)/fs-permissions-test
+	python3 tests/fs_permissions.py
+
+.PHONY: permissions-smoke
+permissions-smoke:
+	python3 tests/permissions_smoke.py
+
+.PHONY: install-permissions
+install-permissions: $(BUILD)/myfs
+	@$(BUILD)/myfs $(DISK) chmod 0700 /root || exit 1
+	@$(BUILD)/myfs $(DISK) chmod 1777 /tmp || exit 1
+	@for key in /etc/ssh/ssh_host_ed25519_key /root/.ssh/id_ed25519; do \
+	  if $(BUILD)/myfs $(DISK) stat $$key >/dev/null 2>&1; then \
+	    $(BUILD)/myfs $(DISK) chown 0 0 $$key && $(BUILD)/myfs $(DISK) chmod 0600 $$key || exit 1; \
+	  fi; \
+	done

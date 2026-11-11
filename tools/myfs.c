@@ -97,6 +97,9 @@ static int cmd_put(const char *src, const char *dst) {
     if ((r = fs_truncate(ino))) return r;
     r = fs_write(ino, 0, data, len);
     if (r < 0) return r;
+    if(r!=(int)len)return FS_EIO;
+    r=fs_chmod(ino,len>=4 && !memcmp(data,"\177ELF",4)?0755:0644);
+    if(r)return r;
     say("  %-24s -> %s (%u bytes)\n", src, dst, len);
     return FS_OK;
 }
@@ -139,6 +142,7 @@ struct snap {
     bool link;
     unsigned char *data;
     u32 len;
+    u32 mode,uid,gid;
 };
 static struct snap *snaps;
 static int n_snaps, cap_snaps;
@@ -183,7 +187,9 @@ static int snap_dir(u32 ino, const char *path) {
         struct fs_stat st;
         if ((r = myfs_stat(de.ino, &st))) return r;
         if (st.type == FS_TYPE_DIR) {
-            if ((r = snap_add(child, true, false, NULL, 0)) || (r = snap_dir(de.ino, child))) return r;
+            if ((r = snap_add(child, true, false, NULL, 0)))return r;
+            snaps[n_snaps-1].mode=st.mode;snaps[n_snaps-1].uid=st.uid;snaps[n_snaps-1].gid=st.gid;
+            if((r=snap_dir(de.ino,child)))return r;
         } else if (st.type == FS_TYPE_LINK || st.type == FS_TYPE_FILE) {
             unsigned char *data = NULL;
             if (st.size) {
@@ -197,6 +203,7 @@ static int snap_dir(u32 ino, const char *path) {
                 }
             }
             if ((r = snap_add(child, false, st.type == FS_TYPE_LINK, data, st.size))) return r;
+            snaps[n_snaps-1].mode=st.mode;snaps[n_snaps-1].uid=st.uid;snaps[n_snaps-1].gid=st.gid;
         } else {
             err("myfs: cannot copy %s\n", child);
             return FS_EINVAL;
@@ -222,7 +229,8 @@ static int cmd_grow(const char *image, const char *mb_text) {
 
     unsigned old_kb = host_sectors() / 2;
     myfs_select(0, 0);
-    int r = snap_dir(FS_ROOT, "/");
+    struct fs_stat root_attributes;int r=fs_stat(FS_ROOT,&root_attributes);
+    if(!r)r = snap_dir(FS_ROOT, "/");
     if (r) return r;
     host_close_image();
 
@@ -246,6 +254,11 @@ static int cmd_grow(const char *image, const char *mb_text) {
         } else r = put_bytes(snaps[i].path, snaps[i].data, snaps[i].len);
     }
     myfs_select(0, 0);
+    if(!r)r=myfs_setattr(FS_ROOT,root_attributes.mode,root_attributes.uid,root_attributes.gid);
+    for(int i=0;!r && i<n_snaps;i++) {
+        u32 ino;r=fs_resolve_nofollow(FS_ROOT,snaps[i].path,&ino);
+        if(!r)r=myfs_setattr(ino,snaps[i].mode,snaps[i].uid,snaps[i].gid);
+    }
     for (int i = 0; !r && i < n_snaps; i++) {
         u32 ino;
         struct fs_stat st;
@@ -299,6 +312,28 @@ static int cmd_cat(const char *path) {
     return FS_OK;
 }
 
+static int number(const char *s,u32 base,u32 *out) {
+    if(!s || !*s)return FS_EINVAL;u32 n=0;
+    for(;*s;s++){u32 v=*s-'0';if(v>=base || n>(0xffffffffu-v)/base)return FS_EINVAL;n=n*base+v;}
+    *out=n;return 0;
+}
+static int metadata_command(const char *cmd,int argc,char **argv) {
+    u32 ino,mode,uid,gid;int ret;
+    if(!strcmp(cmd,"stat")) {
+        if(argc!=4)return FS_EINVAL;
+        ret=fs_resolve_nofollow(FS_ROOT,argv[3],&ino);struct fs_stat st;
+        if(!ret)ret=fs_stat(ino,&st);
+        if(!ret)say("mode=%04o uid=%u gid=%u size=%u inode=%u\n",st.mode,st.uid,st.gid,st.size,ino);
+        return ret;
+    }
+    if(!strcmp(cmd,"chmod")) {
+        if(argc!=5 || number(argv[3],8,&mode))return FS_EINVAL;
+        ret=fs_resolve(FS_ROOT,argv[4],&ino);return ret?ret:fs_chmod(ino,mode);
+    }
+    if(argc!=6 || number(argv[3],10,&uid) || number(argv[4],10,&gid))return FS_EINVAL;
+    ret=fs_resolve_nofollow(FS_ROOT,argv[5],&ino);return ret?ret:fs_chown(ino,uid,gid);
+}
+
 int main(int argc, char **argv) {
     if (argc < 3) {
         err("usage: myfs <disk.img> ls [path] | mkdir <path> | put <file> <path> | cat <path> | rm <path> | grow <MB>\n");
@@ -316,6 +351,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "put") && argc > 4)     r = cmd_put(argv[3], argv[4]);
     else if (!strcmp(cmd, "cat") && argc > 3)     r = cmd_cat(argv[3]);
     else if (!strcmp(cmd, "rm") && argc > 3)      r = cmd_rm(argv[3]);
+    else if(!strcmp(cmd,"stat") || !strcmp(cmd,"chmod") || !strcmp(cmd,"chown"))r=metadata_command(cmd,argc,argv);
     else if (!strcmp(cmd, "grow") && argc > 3)    r = cmd_grow(argv[1], argv[3]);
     else { err("myfs: bad command\n"); r = FS_EINVAL; }
 

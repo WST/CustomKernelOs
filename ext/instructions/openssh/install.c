@@ -1,6 +1,8 @@
 /* Install defaults only on first use; retain keys/configuration on reinstall. */
 #include <myos.h>
 #include <stdio.h>
+#include <sys/stat.h>
+#include <unistd.h>
 static int create(const char *path,const char *text) {
     int fd=open(path,O_WRONLY|O_CREAT|O_EXCL);
     if(fd<0){if(errno==EEXIST)return 0;perror(path);return 1;}
@@ -25,6 +27,7 @@ int main(void) {
     if(pid<0){perror("openssh-setup: fork");return 1;}
     if(!pid){char *av[]={"ssh-keygen","-A",NULL};exec("/ext/bin/ssh-keygen",av);exit(127);}
     if(waitpid(pid,&status,0)<0||status){fprintf(stderr,"openssh-setup: host key generation failed (RDRAND required)\n");return 1;}
+    if(chown("/etc/ssh/ssh_host_ed25519_key",0,0)<0 || chmod("/etc/ssh/ssh_host_ed25519_key",0600)<0){perror("host key permissions");return 1;}
     puts("OpenSSH installed. Configure /etc/ssh/sshd_config, start as root: /ext/bin/sshd -D -e");
     return 0;
 }

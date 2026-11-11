@@ -42,6 +42,7 @@ if not resume:
  identity=Path(testdir.name)/'identity'
  if not identity.exists():run('ssh-keygen','-q','-t','ed25519','-N','','-f',identity)
  put(identity,'/root/.ssh/id_ed25519')
+ run(b/'myfs',image,'chmod','0600','/root/.ssh/id_ed25519')
  put(str(identity)+'.pub','/root/.ssh/authorized_keys')
 else:
  run('make','build/os.img')
@@ -113,12 +114,13 @@ try:
   if allowed:assert 'SSH_PASSWORD_PASS' in result.stdout
  print('Valid and invalid password authentication: PASS',flush=True)
  payload=b/'openssh-upload.bin';download=b/'openssh-download.bin';payload.write_bytes(bytes(range(256))*12)
- batch=b/'openssh-sftp.batch';batch.write_text(f'put {payload} /tmp/openssh-upload.bin\nget /tmp/openssh-upload.bin {download}\n')
+ batch=b/'openssh-sftp.batch';batch.write_text(f'put {payload} /tmp/openssh-upload.bin\nchmod 600 /tmp/openssh-upload.bin\nget /tmp/openssh-upload.bin {download}\n')
  # sftp uses uppercase -P for the port.
  result=subprocess.run(['sftp','-F','/dev/null','-P',port,'-i',str(identity),'-o','BatchMode=yes','-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-b',str(batch),'root@127.0.0.1'],capture_output=True,text=True,timeout=45)
  assert result.returncode==0,result.stderr+'\n'+text()[-7000:]
  assert download.read_bytes()==payload.read_bytes()
- print('SFTP upload/download: PASS',flush=True)
+ result=ssh('stat /tmp/openssh-upload.bin');assert result.returncode==0 and 'mode=0600 uid=0 gid=0' in result.stdout,(result.stdout,result.stderr)
+ print('SFTP upload/download and persistent chmod metadata: PASS',flush=True)
 finally:
  q.terminate()
  try:q.wait(timeout=3)

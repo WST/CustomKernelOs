@@ -50,7 +50,7 @@ static int sys_sshctl(u32 op,u32 arg,u32 ptr) {
     if(op==12) {
         if(!user_buf_ok(ptr,12,true)) return -EFAULT;
         int *v=(void*)ptr;
-        if(!arg) {v[0]=p->real_gid;v[1]=p->gid;v[2]=p->saved_gid;return 0;}
+        if(!arg) {v[0]=p->authenticated?p->real_gid:65534;v[1]=p->authenticated?p->gid:65534;v[2]=p->authenticated?p->saved_gid:65534;return 0;}
         if(!p->authenticated) return -EPERM;
         if(p->uid) for(int i=0;i<3;i++)
             if(v[i]!=-1 && (u32)v[i]!=p->gid && (u32)v[i]!=p->real_gid && (u32)v[i]!=p->saved_gid) return -EPERM;
@@ -62,7 +62,7 @@ static int sys_sshctl(u32 op,u32 arg,u32 ptr) {
     if(op==8) {
         if(!user_buf_ok(ptr,12,true)) return -EFAULT;
         int *v=(void*)ptr;
-        if(!arg) {v[0]=p->real_uid;v[1]=p->uid;v[2]=p->saved_uid;return 0;}
+        if(!arg) {v[0]=p->authenticated?p->real_uid:65534;v[1]=p->authenticated?p->uid:65534;v[2]=p->authenticated?p->saved_uid:65534;return 0;}
         if(!p->authenticated) return -EPERM;
         if(p->uid) for(int i=0;i<3;i++)
             if(v[i]!=-1 && (u32)v[i]!=p->uid && (u32)v[i]!=p->real_uid && (u32)v[i]!=p->saved_uid) return -EPERM;

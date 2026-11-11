@@ -68,6 +68,8 @@ static bool user_str(u32 addr, char *out, u32 max) {
 /* ошибки файловой системы и загрузчика -> errno */
 static int fs_errno(int e) {
     switch (e) {
+    case FS_EACCES: return -EACCES;
+    case FS_EPERM: return -EPERM;
     case FS_ENOENT:       return -ENOENT;
     case FS_EEXIST:       return -EEXIST;
     case FS_ENOTDIR:      return -ENOTDIR;
@@ -95,6 +97,7 @@ static int proc_errno(int e) {
     case PROC_EAGAIN:  return -EAGAIN;
     case PROC_EISDIR:  return -EISDIR;
     case PROC_EBUSY:   return -EBUSY;
+    case PROC_EACCES: return -EACCES;
     default:           return e;
     }
 }
@@ -172,7 +175,7 @@ static int sys_read(u32 fd, u32 buf, u32 len) {
 }
 
 /* flags — как O_* в Linux i386: младшие 2 бита это доступ, дальше O_CREAT/EXCL/TRUNC/APPEND. */
-static int sys_open_impl(u32 upath, u32 flags) {
+static int sys_open_impl(u32 upath, u32 flags,u32 create_mode) {
     struct task *t = task_current();
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
@@ -189,7 +192,7 @@ static int sys_open_impl(u32 upath, u32 flags) {
     struct fs_stat st;
     int r = fs_resolve(task_process(t)->cwd, path, &ino);
     bool existed = r == 0;
-    if (r == FS_ENOENT && creat && want_write) r = fs_create(task_process(t)->cwd, path, FS_TYPE_FILE, &ino);
+    if (r == FS_ENOENT && creat) r = fs_create_mode(task_process(t)->cwd, path, FS_TYPE_FILE,create_mode, &ino);
     if (r) return fs_errno(r);
     if (account_private(ino)) return -EPERM;
     if ((r = fs_stat(ino, &st))) return fs_errno(r);
@@ -197,6 +200,7 @@ static int sys_open_impl(u32 upath, u32 flags) {
     if (st.type == FS_TYPE_DIR) return -EISDIR;
     if (st.type == FS_TYPE_BLOCK && want_write) return -EROFS;
     if (excl && creat && existed) return -EEXIST;
+    r=existed?fs_access(ino,(want_read?4:0)|(want_write?2:0),false):0;if(r)return fs_errno(r);
     if (trunc && want_write && (r = fs_truncate(ino))) return fs_errno(r);
 
     u8 mode = (want_read ? FMODE_READ : 0) | (want_write ? FMODE_WRITE : 0) | (append ? FMODE_APPEND : 0);
@@ -209,7 +213,7 @@ static int sys_open_impl(u32 upath, u32 flags) {
 
 static int sys_open(u32 upath,u32 mode) {
     fs_namespace_lock();
-    int r=sys_open_impl(upath,mode);
+    int r=sys_open_impl(upath,mode,0666);
     fs_namespace_unlock();
     return r;
 }
@@ -309,7 +313,7 @@ static int sys_dup2(u32 oldfd, u32 newfd) {
 
 /* ---------------------------------------------------------------- каталоги */
 
-static int sys_chdir(u32 upath) {
+static int sys_chdir_impl(u32 upath) {
     struct task *t = task_current();
     char path[PATH_MAX];
     u32 ino;
@@ -319,8 +323,13 @@ static int sys_chdir(u32 upath) {
     if (!r) r = fs_stat(ino, &st);
     if (r) return fs_errno(r);
     if (st.type != FS_TYPE_DIR) return -ENOTDIR;
+    if((r=fs_access(ino,1,false)))return fs_errno(r);
     task_process(t)->cwd = ino;
     return 0;
+}
+
+static int sys_chdir(u32 upath) {
+    fs_namespace_lock();int ret=sys_chdir_impl(upath);fs_namespace_unlock();return ret;
 }
 
 static int sys_getcwd(u32 buf, u32 len) {
@@ -335,7 +344,7 @@ static int sys_getcwd(u32 buf, u32 len) {
 }
 
 /* index-я запись каталога (без . и ..) */
-static int sys_readdir(u32 upath, u32 index, u32 uout) {
+static int sys_readdir_impl(u32 upath, u32 index, u32 uout) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
     if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
@@ -349,7 +358,10 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
         if (i == index) break;
     }
     struct fs_stat st;
-    if ((r = fs_stat(de.ino, &st))) return fs_errno(r);
+    /* Read permits listing names; search is required for child metadata. */
+    r=fs_access(dir,1,false);
+    if(r==FS_EACCES)memset(&st,0,sizeof(st));
+    else if(r || (r=fs_stat(de.ino,&st)))return fs_errno(r);
     struct dirent_info *out = (struct dirent_info *)uout;
     memcpy(out->name, de.name, sizeof(out->name));
     out->type = st.type;
@@ -357,7 +369,11 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
     return 1;
 }
 
-static int stat_path(const char *path, struct dirent_info *out, bool follow) {
+static int sys_readdir(u32 upath,u32 index,u32 out) {
+    fs_namespace_lock();int ret=sys_readdir_impl(upath,index,out);fs_namespace_unlock();return ret;
+}
+
+static int stat_path_impl(const char *path, struct dirent_info *out, bool follow) {
     u32 ino;
     struct fs_stat st;
     int r = follow ? fs_resolve(task_process(task_current())->cwd, path, &ino)
@@ -371,6 +387,10 @@ static int stat_path(const char *path, struct dirent_info *out, bool follow) {
     out->type = st.type;
     out->size = st.size;
     return 0;
+}
+
+static int stat_path(const char *path,struct dirent_info *out,bool follow) {
+    fs_namespace_lock();int ret=stat_path_impl(path,out,follow);fs_namespace_unlock();return ret;
 }
 
 static int sys_stat(u32 upath, u32 uout) {
@@ -932,6 +952,8 @@ static int sys_time(u32 uout) {
     return 0;
 }
 
+#include "fs-syscall.inc"
+
 void syscall_dispatch(struct regs *r) {
     struct task *t = task_current();
     /* A remote kill may precede this syscall (including a long sleep).
@@ -1030,6 +1052,7 @@ void syscall_dispatch(struct regs *r) {
         break;
     }
     case SYS_SSHCTL: ret = sys_sshctl(a,b,c); break;
+    case SYS_FSCTL: ret=sys_fsctl(a,b,c);break;
     case SYS_KLOG_READ: {
         if(b>KLOG_CAPACITY) { ret=-EINVAL;break; }
         if(!user_buf_ok(c,sizeof(struct klog_cursor),true) || !user_buf_ok(a,b,true)) {

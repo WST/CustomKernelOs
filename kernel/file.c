@@ -12,6 +12,8 @@
 static int console_readable(void);
 #include "ssh-local.inc"
 
+static struct file *disk_files;
+
 struct file console_file = { .type = FILE_CONSOLE, .refs = 1, .mode = 2 };   /* не освобождается */
 
 struct file *file_dup(struct file *f) {
@@ -30,6 +32,7 @@ void file_close(struct file *f) {
     u32 fl = irq_save();
     struct sock *to_close = NULL;
     if (--f->refs == 0) {
+        if(f->type==FILE_DISK){struct file **p=&disk_files;while(*p && *p!=f)p=&(*p)->disk_next;if(*p)*p=f->disk_next;}
         if (f->type == FILE_SOCKET) to_close = f->sock;
         if (f->type == FILE_LOCAL) local_close(f);
         if (f->type == FILE_PIPE) {
@@ -63,7 +66,17 @@ struct file *file_open_disk(u32 ino, u8 mode, u32 off) {
     f->mode = mode;
     f->ino  = ino;
     f->off  = off;
+    u32 flags=irq_save();f->disk_next=disk_files;disk_files=f;irq_restore(flags);
     return f;
+}
+
+bool file_disk_busy(u32 ino) {
+    u32 flags=irq_save();bool busy=false;for(struct file *f=disk_files;f;f=f->disk_next)if(f->ino==ino){busy=true;break;}
+    irq_restore(flags);return busy;
+}
+bool file_disk_volume_busy(u32 slot) {
+    u32 flags=irq_save();bool busy=false;for(struct file *f=disk_files;f;f=f->disk_next)if((f->ino>>24)==slot){busy=true;break;}
+    irq_restore(flags);return busy;
 }
 
 int pipe_create(struct file **rd, struct file **wr) {

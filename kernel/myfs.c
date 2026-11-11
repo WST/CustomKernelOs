@@ -15,7 +15,7 @@ void *malloc(unsigned long); void free(void *);
 
 #define BS            512                       /* размер блока */
 #define MAGIC         0x5346594D                /* "MYFS" в little-endian */
-#define VERSION       2                       /* format() пишет её; монтирование принимает и 1 */
+#define VERSION       3                       /* format() пишет её; монтирование принимает и 1 */
 #define VERSION_MIN   1
 #define NDIRECT       12                        /* версия 1; у версии 2 последний слот — тройной косвенный */
 #define NDIRECT_V2    11
@@ -36,7 +36,8 @@ struct superblock {
     u32 bitmap_start, bitmap_blocks;
     u32 inode_start, inode_blocks, inode_count;
     u32 data_start;
-    u8  pad[BS - 9 * 4];
+    u32 layout_version, permissions_root; /* version 3; inode/data layout stays v1/v2 */
+    u8  pad[BS - 11 * 4];
 } __attribute__((packed));
 
 struct inode {
@@ -149,9 +150,11 @@ static struct {
     bool valid;
 } blkcache;
 
+static void permissions_cache_clear(void);
 static void cache_drop_all(void) {
     inocache.valid = false;
     blkcache.valid = false;
+    permissions_cache_clear();
 }
 
 static void cache_drop_ino(u32 ino) {
@@ -159,6 +162,7 @@ static void cache_drop_ino(u32 ino) {
         inocache.valid = false;
     if (blkcache.valid && blkcache.slot == selected && blkcache.ino == ino)
         blkcache.valid = false;
+    permissions_cache_clear();
 }
 
 static int iwrite(u32 ino, const struct inode *in) {
@@ -171,6 +175,8 @@ static int iwrite(u32 ino, const struct inode *in) {
     return bwrite(b, blk);
 }
 
+#include "myfs-permissions.inc"
+
 static u32 ialloc(int type) {
     struct inode in;
     for (u32 i = FS_ROOT; i < sb.inode_count; i++) {
@@ -180,6 +186,9 @@ static u32 ialloc(int type) {
             in.type = type;
             in.links = 1;
             if (iwrite(i, &in)) return 0;
+            if (permissions_store(i,type==FS_TYPE_DIR?0755:0644,0,0)) {
+                memset(&in,0,sizeof(in));iwrite(i,&in);return 0;
+            }
             available_inodes--;
             return i;
         }
@@ -405,7 +414,9 @@ static int myfs_stat_impl(u32 ino, struct fs_stat *st) {
     if (r) return r;
     if (in.type == FS_TYPE_FREE) return FS_ENOENT;
     st->type = in.type;
+    st->links=in.links;
     st->size = in.size;
+    r=permissions_load(ino,&in,&st->mode,&st->uid,&st->gid);if(r)return r;
     u32 data = (in.size + BS - 1) / BS;
     u32 nd = n_direct();
     st->blocks = data + (in.indirect ? 1 : 0);
@@ -433,7 +444,7 @@ static int dir_check(u32 dir) {
     return in.type == FS_TYPE_DIR ? FS_OK : FS_ENOTDIR;
 }
 
-static int legacy(void) { return sb.version < 2; }
+static int legacy(void) { return sb.version==1 || (sb.version==3 && sb.layout_version==1); }
 static u32 name_max(void) { return legacy() ? NAME_V1 : (u32)FS_NAME_MAX; }
 
 /* Длина записи версии 2: заголовок, имя и нуль, округление вверх до 4. */
@@ -696,7 +707,7 @@ static int myfs_create_impl(u32 cwd, const char *path, int type, u32 *out) {
     return FS_OK;
 }
 
-static int myfs_remove_impl(u32 cwd, const char *path) {
+static int myfs_remove_impl(u32 cwd, const char *path,bool keep) {
     if (!mounted) return FS_ENODEV;
     u32 parent, off;
     char name[FS_NAME_MAX + 1];
@@ -715,12 +726,13 @@ static int myfs_remove_impl(u32 cwd, const char *path) {
         if (!empty) return FS_ENOTEMPTY;
     }
 
-    free_all_blocks(&in);
-    in.type = FS_TYPE_FREE;
-    in.links = 0;
-    if ((r = iwrite(ino, &in))) return r;
-    available_inodes++;
-    return dir_set(parent, off, 0, NULL);
+    /* Publish unlink before reclamation. Open descriptors retain the inode. */
+    if((r=dir_set(parent,off,0,NULL)))return r;
+    in.links=0;
+    if(!keep){free_all_blocks(&in);in.type=FS_TYPE_FREE;}
+    if((r=iwrite(ino,&in)))return r;
+    if(!keep)available_inodes++;
+    return 0;
 }
 
 static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
@@ -813,6 +825,7 @@ static int myfs_format_impl(u32 version) {
     memset(&sb, 0, sizeof(sb));
     sb.magic         = MAGIC;
     sb.version       = version;
+    sb.layout_version = version==1 ? 1 : 2;
     sb.total_blocks  = total;
     sb.bitmap_start  = 1;
     sb.bitmap_blocks = (total + BITS_PER_BLK - 1) / BITS_PER_BLK;
@@ -845,6 +858,7 @@ static int myfs_format_impl(u32 version) {
     root.type = FS_TYPE_DIR;
     root.links = 1;
     if (iwrite(FS_ROOT, &root)) return FS_EIO;
+    if(version==3 && permissions_store(FS_ROOT,0755,0,0)) return FS_EIO;
     available_inodes--;
     int r;
     if ((r = dir_add(FS_ROOT, ".", FS_ROOT)) || (r = dir_add(FS_ROOT, "..", FS_ROOT))) return r;
@@ -876,14 +890,19 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
     states[selected].hint=sb.data_start;
     for (u32 i = 0; i < sb.bitmap_blocks; i++)
         if (bread(sb.bitmap_start + i, bitmap + i * BS)) return FS_EIO;
+    if(sb.version==3 && ((sb.layout_version!=1 && sb.layout_version!=2) ||
+       (sb.permissions_root && !permissions_block_valid(sb.permissions_root)))) return FS_EINVAL;
     mounted = true;
 
     available_blocks = 0;
     for (u32 b = sb.data_start; b < sb.total_blocks; b++) if (!bit_get(b)) available_blocks++;
     available_inodes = 0;
     struct inode in;
-    for (u32 i = FS_ROOT; i < sb.inode_count; i++)
-        if (!iread(i, &in) && in.type == FS_TYPE_FREE) available_inodes++;
+    for (u32 i = FS_ROOT; i < sb.inode_count; i++) {
+        if(iread(i,&in))return FS_EIO;
+        if(in.type==FS_TYPE_FREE)available_inodes++;
+        else if(i!=FS_ROOT && !in.links){free_all_blocks(&in);in.type=FS_TYPE_FREE;if(iwrite(i,&in))return FS_EIO;available_inodes++;}
+    }
     return FS_OK;
 }
 
@@ -911,6 +930,8 @@ const char *myfs_strerror(int err) {
     case FS_EFBIG:        return "file or filesystem too large";
     case FS_ENAMETOOLONG: return "name too long";
     case FS_ELOOP:        return "too many levels of symbolic links";
+    case FS_EACCES: return "permission denied";
+    case FS_EPERM: return "operation not permitted";
     default:              return "unknown error";
     }
 }
@@ -927,7 +948,13 @@ int myfs_format_legacy(void) { int r = myfs_format_impl(1); return r; }
 #endif
 int myfs_resolve(u32 cwd, const char *path, u32 *ino) { int r = myfs_resolve_impl(cwd, path, ino); return r; }
 int myfs_create(u32 cwd, const char *path, int type, u32 *out) { int r = myfs_create_impl(cwd, path, type, out); return r; }
-int myfs_remove(u32 cwd, const char *path) { int r = myfs_remove_impl(cwd, path); return r; }
+int myfs_remove(u32 cwd, const char *path) { int r = myfs_remove_impl(cwd, path,false); return r; }
+int myfs_remove_keep(u32 cwd,const char *path,bool keep){return myfs_remove_impl(cwd,path,keep);}
+int myfs_reap_orphan(u32 ino) {
+    struct inode in;int ret=iread(ino,&in);if(ret)return ret;
+    if(ino==FS_ROOT || in.type==FS_TYPE_FREE || in.links)return FS_EINVAL;
+    free_all_blocks(&in);in.type=FS_TYPE_FREE;ret=iwrite(ino,&in);if(!ret)available_inodes++;return ret;
+}
 int myfs_rename(u32 cwd, const char *src, const char *dst) { int r = myfs_rename_impl(cwd, src, dst); return r; }
 int myfs_read(u32 ino, u32 off, void *buf, u32 n) { int r = myfs_read_impl(ino, off, buf, n); return r; }
 int myfs_write(u32 ino, u32 off, const void *buf, u32 n) { int r = myfs_write_impl(ino, off, buf, n); return r; }

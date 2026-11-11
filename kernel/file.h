@@ -27,6 +27,7 @@ struct file {
     u32 status_flags;
     struct local_pair *local;
     u8   mode;                      /* диск: биты FMODE_*; канал: 0 чтение, иначе запись */
+    struct file *disk_next;
     u32  ino, off;                  /* FILE_DISK */
     struct pipe *pipe;              /* FILE_PIPE */
     struct sock *sock;              /* FILE_SOCKET */
@@ -53,6 +54,8 @@ void console_release(u32 pid);         /* процесс умер — верну
 struct file *file_dup(struct file *f);
 void  file_close(struct file *f);
 struct file *file_open_disk(u32 ino, u8 mode, u32 off);
+bool file_disk_busy(u32 ino);
+bool file_disk_volume_busy(u32 slot);
 struct file *file_open_socket(struct sock *s);
 int   pipe_create(struct file **rd, struct file **wr);
 

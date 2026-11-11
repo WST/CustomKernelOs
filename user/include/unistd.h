@@ -10,6 +10,8 @@
 #define W_OK 2
 #define R_OK 4
 int access(const char *path, int mode);
+int chown(const char *path,uid_t uid,gid_t gid);
+int fchown(int fd,uid_t uid,gid_t gid);
 extern char *optarg;
 extern int optind, opterr, optopt;
 int getopt(int argc, char *const argv[], const char *optstring);

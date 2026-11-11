@@ -164,8 +164,6 @@ struct passwd *getpwnam(const char *name) {
 struct passwd *getpwuid(uid_t uid){char n[24];if(uid==65534)return getpwnam("sshd");for(unsigned i=0;account_list(n,i)==0;i++){int id=account(8,n,NULL);if(id==(int)uid)return getpwnam(n);}errno=ENOENT;return NULL;}
 void endpwent(void){}
 int chroot(const char *p){return ctl(10,0,(void*)p);}
-int chown(const char *p,uid_t u,gid_t g){(void)p;(void)u;(void)g;errno=ENOSYS;return -1;}
-int fchown(int fd,uid_t u,gid_t g){(void)fd;(void)u;(void)g;errno=ENOSYS;return -1;}
 int ftruncate(int fd,off_t n){struct stat st;if(fstat(fd,&st)<0)return -1;if(st.st_size==(unsigned)n)return 0;errno=ENOSYS;return -1;}
 int truncate(const char *p,off_t n){int fd=open(p,O_WRONLY);if(fd<0)return -1;int ret=ftruncate(fd,n);close(fd);return ret;}
 int fsync(int fd){struct stat st;return fstat(fd,&st);}
@@ -292,5 +290,3 @@ int sscanf(const char *input,const char *fmt,...) {
 
 int sigprocmask(int how,const sigset_t *set,sigset_t *old){static sigset_t mask;if(old)*old=mask;if(!set)return 0;if(how==SIG_SETMASK)mask=*set;else if(how==SIG_BLOCK)mask|=*set;else if(how==SIG_UNBLOCK)mask&=~*set;else{errno=EINVAL;return -1;}return 0;}
 void *memmem(const void *hay,size_t hn,const void *needle,size_t nn){if(!nn)return (void*)hay;if(nn>hn)return NULL;const unsigned char *h=hay;for(size_t i=0;i<=hn-nn;i++)if(!memcmp(h+i,needle,nn))return (void*)(h+i);return NULL;}
-
-int access(const char *path,int mode){struct stat st;if(stat(path,&st)<0)return -1;if(mode&X_OK){unsigned char magic[4];int fd=open(path,O_RDONLY);if(fd<0)return -1;int n=read(fd,magic,4);close(fd);if(n!=4||memcmp(magic,"\177ELF",4)){errno=EACCES;return -1;}}return 0;}

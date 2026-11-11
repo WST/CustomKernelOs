@@ -91,9 +91,11 @@ static int load(void) {
 static int save(void) {
     u32 ino;int r=fs_resolve(FS_ROOT,"/etc/accounts",&ino);
     if(r==FS_ENOENT) { u32 dir;fs_create(FS_ROOT,"/etc",FS_TYPE_DIR,&dir);r=fs_create(FS_ROOT,"/etc/accounts",FS_TYPE_FILE,&ino); }
+    if(!r)r=fs_chmod(ino,0600);
+    if(!r)r=fs_chown(ino,0,0);
     return r || fs_write(ino,0,&db,sizeof(db))!=(int)sizeof(db) ? -EIO:0;
 }
-bool account_private(u32 ino) { u32 a;return !fs_resolve(FS_ROOT,"/etc/accounts",&a) && a==ino; }
+bool account_private(u32 ino) { fs_account_enter();u32 a;bool match=!fs_resolve(FS_ROOT,"/etc/accounts",&a) && a==ino;fs_account_leave();return match; }
 static bool bootstrap(void) { for(int i=0;i<32;i++) if(db.users[0].hash[i]) return false;return true; }
 static void digest(struct entry *e,const char *pw,u8 out[32]) {
     sha256_ctx c;sha256_init(&c);sha256_update(&c,e->salt,16);sha256_update(&c,pw,strlen(pw));sha256_final(&c,out);
@@ -101,20 +103,20 @@ static void digest(struct entry *e,const char *pw,u8 out[32]) {
     wipe(&c,sizeof(c));
 }
 int account_name(char *out) {
-    mutex_lock(&lock);int r=load();struct task *t=task_current();
+    mutex_lock(&lock);fs_account_enter();int r=load();struct task *t=task_current();
     if(!r) { if(!task_process(t)->authenticated || task_process(t)->uid>=USERS) r=-EPERM;else memcpy(out,db.users[task_process(t)->uid].name,24); }
-    mutex_unlock(&lock);return r;
+    fs_account_leave();mutex_unlock(&lock);return r;
 }
 /* Public names only: salts and password hashes stay in the kernel. */
 int account_list(char *out, unsigned index) {
-    mutex_lock(&lock); int r=load();
+    mutex_lock(&lock);fs_account_enter(); int r=load();
     if(!r) {
         r=-ENOENT;
         for(int i=0;i<USERS;i++) if(db.users[i].name[0]) {
             if(!index--) { memcpy(out,db.users[i].name,24); r=0; break; }
         }
     }
-    mutex_unlock(&lock); return r;
+    fs_account_leave();mutex_unlock(&lock); return r;
 }
 static int home_dir(const char *path,u32 *ino) {
     struct fs_stat st; int r=fs_resolve(FS_ROOT,path,ino);
@@ -122,16 +124,19 @@ static int home_dir(const char *path,u32 *ino) {
     if(r || fs_stat(*ino,&st) || st.type!=FS_TYPE_DIR) return -EIO;
     return 0;
 }
-static int prepare_home(const char *name,u32 *ino) {
-    char path[40]; u32 parent;
-    if(home_dir("/home",&parent)) return -EIO;
-    if(!strcmp(name,"root")) return home_dir("/root",ino);
-    strcpy(path,"/home/"); strcpy(path+6,name);
-    return home_dir(path,ino);
+static int prepare_home(const char *name,int id,u32 *ino) {
+    char path[40];u32 parent;
+    if(home_dir("/home",&parent))return -EIO;
+    strcpy(path,!strcmp(name,"root")?"/root":"/home/");
+    if(strcmp(name,"root"))strcpy(path+6,name);
+    int r=home_dir(path,ino);
+    if(!r)r=fs_chown(*ino,id,id);
+    if(!r)r=fs_chmod(*ino,0700);
+    return r?-EIO:0;
 }
 /* 0 first setup, 1 login, 2 useradd, 3 passwd, 4 uid, 5 name, 6 logout */
 int account_ctl(unsigned op,const char *name,const char *pw) {
-    struct task *t=task_current();int r;mutex_lock(&lock);
+    struct task *t=task_current();int r;mutex_lock(&lock);fs_account_enter();
     r=load();if(r) goto done;
     if(op==0) {r=bootstrap();goto done;}
     if(op==4) {r=task_process(t)->authenticated?(int)task_process(t)->uid:-EPERM;goto done;}
@@ -142,7 +147,7 @@ int account_ctl(unsigned op,const char *name,const char *pw) {
         for(int i=0;i<32;i++) diff|=h[i]^e->hash[i];
         wipe(h,32);r=-EPERM;
         if(op==10) {r=id>=0 && !diff && !bootstrap()?0:-EPERM;goto done;}
-        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,&home); if(!r) {task_process(t)->cwd=home;task_process(t)->uid=id;task_process(t)->real_uid=id;task_process(t)->saved_uid=id;task_process(t)->gid=id;task_process(t)->real_gid=id;task_process(t)->saved_gid=id;task_process(t)->authenticated=true;} }
+        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,id,&home); if(!r) {task_process(t)->cwd=home;task_process(t)->uid=id;task_process(t)->real_uid=id;task_process(t)->saved_uid=id;task_process(t)->gid=id;task_process(t)->real_gid=id;task_process(t)->saved_gid=id;task_process(t)->authenticated=true;} }
         goto done;
     }
     if(op==8) {r=id>=0?id:-ENOENT;goto done;}
@@ -157,10 +162,10 @@ int account_ctl(unsigned op,const char *name,const char *pw) {
         if(id<0) {r=-ENOSPC;goto done;}
     }
     if(id<0) {r=-ENOENT;goto done;}
-    u32 home; r=prepare_home(name,&home); if(r) goto done;
+    u32 home; r=prepare_home(name,id,&home); if(r) goto done;
     struct entry old=db.users[id],*e=&db.users[id];strcpy(e->name,name);
     u32 seed,high;__asm__ volatile("rdtsc":"=a"(seed),"=d"(high));seed^=high^timer_ticks();
     for(int i=0;i<16;i++) {seed=seed*1664525+1013904223;e->salt[i]=seed>>24;}
     digest(e,pw,e->hash);r=save();if(r) *e=old;wipe(&old,sizeof(old));
-done: mutex_unlock(&lock);return r;
+done: fs_account_leave();mutex_unlock(&lock);return r;
 }

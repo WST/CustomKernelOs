@@ -37,6 +37,15 @@ void _start(int argc, char **argv) {
 /* ================================================================ системные вызовы */
 
 #if defined(__LINUX_TEST__)
+/* i386 stat64 avoids EOVERFLOW for DrvFS inode/device numbers. */
+static int linux_metadata(int op,int arg,struct stat *st) {
+    unsigned char raw[96];int ret=__syscall(op==1?195:op==2?196:197,arg,(int)raw,0);
+    if(ret<0)return ret;memset(st,0,sizeof(*st));
+    st->st_mode=*(unsigned*)(raw+16);st->st_size=*(unsigned*)(raw+44);
+    st->st_uid=*(unsigned*)(raw+24);st->st_gid=*(unsigned*)(raw+28);
+    st->st_ino=*(unsigned*)(raw+88);st->st_dev=*(unsigned*)raw;
+    st->st_blocks=*(unsigned*)(raw+56);st->st_nlink=*(unsigned*)(raw+20);return 0;
+}
 /* Только для проверки cc на Linux: те же вызовы, но в номерах Linux */
 static int linux_brk;
 
@@ -72,12 +81,12 @@ static int linux_dir_at(const char *path, int index, struct dirent_info *o) {
             else o->type = 1;
             {
                 char full[512];
-                unsigned char st[64];
+                struct stat st;
                 unsigned mode;
                 if (snprintf(full, sizeof full, "%s/%s", path, o->name) < (int)sizeof full &&
-                    __syscall(106, (int)full, (int)st, 0) == 0) {
-                    mode = *(unsigned short *)(st + 8);
-                    o->size = *(unsigned *)(st + 20);
+                    linux_metadata(1,(int)full,&st)==0) {
+                    mode=st.st_mode;
+                    o->size=st.st_size;
                     if ((mode & 0170000) == 0040000) o->type = 2;
                     else if ((mode & 0170000) == 0020000) o->type = 4;
                     else if ((mode & 0170000) == 0060000) o->type = 3;
@@ -99,16 +108,10 @@ static int syscall3(int n, int a, int b, int c) {
     case SYS_OPEN:  return __syscall(5, a, b, c);
     case SYS_CLOSE: return __syscall(6, a);
     case SYS_LSEEK: return __syscall(19, a, b, c);
-    case SYS_FSTAT: {                           /* i386 struct stat -> {mode, size} */
-        unsigned char st[64];
-        int r = __syscall(108, a, (int)st, 0);
-        if (r < 0) return r;
-        unsigned *out = (unsigned *)b;
-        out[0] = *(unsigned short *)(st + 8);
-        out[1] = *(unsigned *)(st + 20);
-        return 0;
+    case SYS_FSTAT: {
+        struct stat st;int ret=linux_metadata(3,a,&st);if(ret<0)return ret;
+        ((unsigned*)b)[0]=st.st_mode;((unsigned*)b)[1]=st.st_size;return 0;
     }
-    case SYS_GETPID: return __syscall(20);
     case SYS_UNLINK: {
         int r = __syscall(10, a);
         if (r == -EISDIR) r = __syscall(40, a);   /* пустой каталог, как unlink в MyOS */
@@ -140,38 +143,11 @@ static int syscall3(int n, int a, int b, int c) {
         return old;
     }
     case SYS_TERMSIZE: return (80 << 16) | 25;
-    case SYS_STAT: {
-        unsigned char st[64];
-        int r = __syscall(106, a, (int)st, 0);
-        unsigned mode;
-        struct dirent_info *o;
-        if (r < 0) return r;
-        mode = *(unsigned short *)(st + 8);
-        o = (struct dirent_info *)b;
-        memset(o, 0, sizeof *o);
-        o->size = *(unsigned *)(st + 20);
-        if ((mode & 0170000) == 0040000) o->type = 2;
-        else if ((mode & 0170000) == 0020000) o->type = 4;
-        else if ((mode & 0170000) == 0060000) o->type = 3;
-        else if ((mode & 0170000) == 0120000) o->type = 5;
-        else o->type = 1;
-        return 0;
-    }
+    case SYS_STAT:
     case SYS_LSTAT: {
-        unsigned char st[64];
-        int r = __syscall(107, a, (int)st, 0);
-        unsigned mode;
-        struct dirent_info *o;
-        if (r < 0) return r;
-        mode = *(unsigned short *)(st + 8);
-        o = (struct dirent_info *)b;
-        memset(o, 0, sizeof *o);
-        o->size = *(unsigned *)(st + 20);
-        if ((mode & 0170000) == 0040000) o->type = 2;
-        else if ((mode & 0170000) == 0020000) o->type = 4;
-        else if ((mode & 0170000) == 0060000) o->type = 3;
-        else if ((mode & 0170000) == 0120000) o->type = 5;
-        else o->type = 1;
+        struct stat st;int ret=linux_metadata(n==SYS_STAT?1:2,a,&st);if(ret<0)return ret;
+        struct dirent_info *out=(void*)b;memset(out,0,sizeof(*out));out->size=st.st_size;
+        out->type=S_ISDIR(st.st_mode)?2:S_ISCHR(st.st_mode)?4:S_ISBLK(st.st_mode)?3:S_ISLNK(st.st_mode)?5:1;
         return 0;
     }
     case SYS_SYMLINK: return __syscall(83, a, b);
@@ -211,9 +187,32 @@ static int ioerr(int r) {
     return r;
 }
 
+/* Public metadata/permissions ABI, with a real Linux adapter for cc -linux tests. */
+static int fs_call(int op,int arg,int ptr) {
+#if defined(__LINUX_TEST__)
+    if(op==1 || op==2 || op==3) {
+        return linux_metadata(op,arg,(struct stat*)ptr);
+    }
+    if(op==4 || op==5)return __syscall(op==4?15:94,arg,ptr,0);
+    if(op==6 || op==7){unsigned *ids=(void*)ptr;return __syscall(op==6?212:207,arg,ids[0],ids[1]);}
+    if(op==8)return __syscall(33,arg,ptr,0);
+    if(op==9)return __syscall(60,arg,0,0);
+    if(op==10){unsigned *a=(void*)ptr;return __syscall(5,a[0],a[1],a[2]);}
+    if(op==11)return __syscall(39,arg,ptr,0);
+    return -EINVAL;
+#else
+    return syscall3(SYS_FSCTL,op,arg,ptr);
+#endif
+}
+
 int   write(int fd, const void *buf, size_t len) { return ioerr(syscall3(SYS_WRITE, fd, (int)buf, len)); }
 int   read(int fd, void *buf, size_t len)        { return ioerr(syscall3(SYS_READ, fd, (int)buf, len)); }
-int   open(const char *path, int flags, ...)     { return ioerr(syscall3(SYS_OPEN, (int)path, flags, 0755)); }
+int open(const char *path,int flags,...) {
+    unsigned mode=0666;
+    if(flags&O_CREAT){va_list ap;va_start(ap,flags);mode=va_arg(ap,unsigned);va_end(ap);}
+    unsigned a[3]={(unsigned)path,flags,mode};return ioerr(fs_call(10,0,(int)a));
+}
+int myos_open_default(const char *path,int flags){return open(path,flags,0666);}
 int   close(int fd)                              { return ioerr(syscall3(SYS_CLOSE, fd, 0, 0)); }
 int   lseek(int fd, long offset, int whence)     { return ioerr(syscall3(SYS_LSEEK, fd, (int)offset, whence)); }
 void *sbrk(int inc)                              { return (void *)syscall3(SYS_SBRK, inc, 0, 0); }
@@ -279,7 +278,11 @@ char *getcwd(char *buf, size_t len) {
     return buf;
 }
 int   dirread(const char *p, int i, struct dirent_info *o) { return syscall3(SYS_READDIR, (int)p, i, (int)o); }
-int   mkdir(const char *path, ...)             { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
+int mkdir(const char *path,...) {
+    va_list ap;va_start(ap,path);unsigned mode=va_arg(ap,unsigned);va_end(ap);
+    return ioerr(fs_call(11,(int)path,mode));
+}
+int myos_mkdir_default(const char *path){return fs_call(11,(int)path,0777);}
 int   unlink(const char *path)                   { return syscall3(SYS_UNLINK, (int)path, 0, 0); }
 int   ps(struct proc_info *buf, int max)         { return syscall3(SYS_PS, (int)buf, max, 0); }
 int   dirstat(const char *p, struct dirent_info *o) { return syscall3(SYS_STAT, (int)p, (int)o, 0); }
@@ -1898,31 +1901,13 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
     return (ssize_t)i;
 }
 
-static mode_t current_umask = 022;
-mode_t umask(mode_t mask) {
-    mode_t old = current_umask;
-    current_umask = mask & 0777;
-    return old;
-}
-int access(const char *path, int mode) {
-    struct stat st;
-    (void)mode;
-    return stat(path, &st);
-}
-int chmod(const char *path, mode_t mode) { (void)path; (void)mode; return 0; }
-int fchmod(int fd, mode_t mode) { (void)fd; (void)mode; return 0; }
-
-int fstat(int fd, struct stat *st) {
-    int r;
-    memset(st, 0, sizeof *st);
-    r = ioerr(syscall3(SYS_FSTAT, fd, (int)st, 0));
-    if (r == 0) {
-        st->st_dev = 1;
-        st->st_blocks = (st->st_size + 511) / 512;
-        st->st_nlink = 1;
-    }
-    return r;
-}
+mode_t umask(mode_t mask){return fs_call(9,mask,0);}
+int access(const char *path,int mode){return ioerr(fs_call(8,(int)path,mode));}
+int chmod(const char *path,mode_t mode){return ioerr(fs_call(4,(int)path,mode));}
+int fchmod(int fd,mode_t mode){return ioerr(fs_call(5,fd,mode));}
+int chown(const char *path,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(6,(int)path,(int)ids));}
+int fchown(int fd,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(7,fd,(int)ids));}
+int fstat(int fd,struct stat *st){return ioerr(fs_call(3,fd,(int)st));}
 
 char *ttyname(int fd) { (void)fd; return (char *)"/dev/tty"; }
 
@@ -1954,51 +1939,8 @@ int fcntl(int fd, int cmd, ...) {
     return -1;
 }
 
-static unsigned path_stamp(const char *path) {
-    unsigned h = 2166136261u;
-    if (!path) return 1;
-    for (const char *p = path; *p; p++) {
-        h ^= (unsigned char)*p;
-        h *= 16777619u;
-    }
-    return h ? h : 1;
-}
-
-int stat(const char *path, struct stat *st) {
-    struct dirent_info info;
-    int r = syscall3(SYS_STAT, (int)path, (int)&info, 0);
-    if (r < 0) { errno = -r; return -1; }
-    memset(st, 0, sizeof *st);
-    if (info.type == 2) st->st_mode = S_IFDIR;
-    else if (info.type == 4) st->st_mode = S_IFCHR;
-    else if (info.type == 3) st->st_mode = S_IFBLK;
-    else if (info.type == 5) st->st_mode = S_IFLNK;
-    else st->st_mode = S_IFREG;
-    st->st_size = info.size;
-    st->st_dev = 1;
-    st->st_ino = path_stamp(path);
-    st->st_blocks = (st->st_size + 511) / 512;
-    st->st_nlink = 1;
-    return 0;
-}
-
-int lstat(const char *path, struct stat *st) {
-    struct dirent_info info;
-    int r = syscall3(SYS_LSTAT, (int)path, (int)&info, 0);
-    if (r < 0) { errno = -r; return -1; }
-    memset(st, 0, sizeof *st);
-    if (info.type == 2) st->st_mode = S_IFDIR;
-    else if (info.type == 4) st->st_mode = S_IFCHR;
-    else if (info.type == 3) st->st_mode = S_IFBLK;
-    else if (info.type == 5) st->st_mode = S_IFLNK;
-    else st->st_mode = S_IFREG;
-    st->st_size = info.size;
-    st->st_dev = 1;
-    st->st_ino = path_stamp(path);
-    st->st_blocks = (st->st_size + 511) / 512;
-    st->st_nlink = 1;
-    return 0;
-}
+int stat(const char *path,struct stat *st){return ioerr(fs_call(1,(int)path,(int)st));}
+int lstat(const char *path,struct stat *st){return ioerr(fs_call(2,(int)path,(int)st));}
 
 int symlink(const char *target, const char *linkpath) {
     return ioerr(syscall3(SYS_SYMLINK, (int)target, (int)linkpath, 0));
@@ -2578,9 +2520,8 @@ int isatty(int fd) {
     struct { unsigned short row, col, xpixel, ypixel; } ws;
     return __syscall(54, fd, 0x5413, (int)&ws) == 0;
 #else
-    struct stat st;
-    if (fstat(fd, &st) < 0) return 0;
-    return S_ISCHR(st.st_mode);
+    int mode[2]={0,0};int ret=syscall3(SYS_SSHCTL,11,fd,(int)mode);
+    if(ret<0){errno=-ret;return 0;}return 1;
 #endif
 }
 
@@ -2600,18 +2541,45 @@ unsigned sleep(unsigned seconds) {
 #endif
 }
 
-uid_t getuid(void) { return 0; }
-uid_t geteuid(void) { return 0; }
-gid_t getgid(void) { return 0; }
-gid_t getegid(void) { return 0; }
-unsigned alarm(unsigned seconds) { (void)seconds; return 0; }
-int setuid(uid_t uid) { (void)uid; return 0; }
-int setgid(gid_t gid) { (void)gid; return 0; }
-
-static struct passwd only_user = { "root", "", 0, 0, "root", "/root", "/bin/sh" };
-struct passwd *getpwuid(uid_t uid) { (void)uid; return &only_user; }
-struct passwd *getpwnam(const char *name) { (void)name; return &only_user; }
-void endpwent(void) {}
+static unsigned identity_get(int group,int effective) {
+#if defined(__LINUX_TEST__)
+    return __syscall(group?(effective?202:200):(effective?201:199),0,0,0);
+#else
+    int ids[3];if(syscall3(SYS_SSHCTL,group?12:8,0,(int)ids)<0)return (unsigned)-1;return ids[effective];
+#endif
+}
+uid_t getuid(void){return identity_get(0,0);}
+uid_t geteuid(void){return identity_get(0,1);}
+gid_t getgid(void){return identity_get(1,0);}
+gid_t getegid(void){return identity_get(1,1);}
+unsigned alarm(unsigned seconds){(void)seconds;return 0;}
+int setuid(uid_t uid) {
+    if(uid==(uid_t)-1){errno=EINVAL;return -1;}
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(213,uid,0,0));
+#else
+    int ids[3]={uid,uid,uid};return ioerr(syscall3(SYS_SSHCTL,8,1,(int)ids));
+#endif
+}
+int setgid(gid_t gid) {
+    if(gid==(gid_t)-1){errno=EINVAL;return -1;}
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(214,gid,0,0));
+#else
+    int ids[3]={gid,gid,gid};return ioerr(syscall3(SYS_SSHCTL,12,1,(int)ids));
+#endif
+}
+struct passwd *getpwnam(const char *name) {
+    static struct passwd p;static char user[24],home[40];int id=account(8,name,NULL);
+    if(id<0){errno=ENOENT;return NULL;}strcpy(user,name);
+    snprintf(home,sizeof(home),id?"/home/%s":"/root",name);
+    p.pw_name=user;p.pw_passwd="*";p.pw_uid=p.pw_gid=id;p.pw_gecos=user;p.pw_dir=home;p.pw_shell="/bin/sh";return &p;
+}
+struct passwd *getpwuid(uid_t uid) {
+    char name[24];for(unsigned i=0;account_list(name,i)==0;i++)if(account(8,name,NULL)==(int)uid)return getpwnam(name);
+    errno=ENOENT;return NULL;
+}
+void endpwent(void){}
 
 static int leap(unsigned y) { return (y % 4 == 0 && y % 100 != 0) || y % 400 == 0; }
 

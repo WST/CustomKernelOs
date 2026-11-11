@@ -53,7 +53,8 @@ def main():
     make=(PACKAGE/'Makefile').read_text()
     objects=[(o,o[:-2]+'.c') for o in dict.fromkeys(re.findall(r'[A-Za-z0-9_][A-Za-z0-9_./-]*\.o\b',make))]
     # Every object rebuilds when a port header or patch changes.
-    port_time=max(f.stat().st_mtime for f in PACKAGE.glob('*.h'))
+    port_headers=list(PACKAGE.glob('*.h'))+list((ROOT/'user/include').rglob('*.h'))+[ROOT/'user/lib/myos.h']
+    port_time=max(f.stat().st_mtime for f in port_headers)
     def compile_one(pair):
         obj,c=pair;dest=src/obj;log=BUILD/(obj.replace('/','_')+'.log')
         if dest.exists() and dest.stat().st_mtime>max(port_time,(src/c).stat().st_mtime):return None

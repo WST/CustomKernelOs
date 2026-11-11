@@ -31,14 +31,15 @@ Connect from the host: ssh -p 2222 user@127.0.0.1. There is no predictable entro
 The kernel enforces UID/GID drops, close-on-exec and the pre-auth chroot.
 Local socketpairs support the descriptor transfer used by privilege separation.
 
-MyOS is an educational OS with no Unix file ownership/permission enforcement.
-This port does not create that protection. Local users can read files that
-Unix would protect, including SSH private keys. Keep this server on an
+MyFS enforces ownership and rwx permissions. Keep private keys at mode 0600
+and home directories at 0700. Rebuild installed ports after a libc update.
+Older files without attributes default to root ownership; assign their owners
+and protect existing private keys explicitly. Keep this experimental server on an
 isolated test network. LoginGraceTime is zero because MyOS does not deliver
 POSIX timer signals; unauthenticated sessions can occupy the two startup slots
 until the connection closes or the server is restarted. SIGHUP reload and
 signal-based graceful termination are unavailable. Metadata-changing SFTP
-operations (ownership, timestamps, arbitrary truncation, statvfs, hard links)
+operations (timestamps, arbitrary truncation, statvfs, hard links)
 return unsupported errors. A bind to a specific IPv4 address is rejected by
 this adapter because native MyOS bind currently listens on all interfaces.
 

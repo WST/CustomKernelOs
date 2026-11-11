@@ -575,9 +575,26 @@ static int is_dir(const char *path) {
     return S_ISDIR(st.st_mode);
 }
 
+/* New directories stay private during extraction; apply modes inside-out. */
+struct directory_mode {char *path;unsigned mode;struct directory_mode *next;};
+static struct directory_mode *directory_modes;
+static unsigned extraction_mask;
+static void directory_header_mode(const char *path,unsigned mode) {
+    for(struct directory_mode *d=directory_modes;d;d=d->next)
+        if(!strcmp(d->path,path)){d->mode=mode&0777&~extraction_mask;return;}
+}
+static int finish_directory_modes(int success) {
+    int rc=0;while(directory_modes){struct directory_mode *d=directory_modes;directory_modes=d->next;
+        if(success && chmod(d->path,d->mode)<0){warn_sys(d->path,-1);rc=1;}
+        free(d->path);free(d);
+    }return rc;
+}
 static int mkdir_one(const char *path) {
-    int r = mkdir(path);
-    if (r >= 0) return 0;
+    int r=mkdir(path,0700);
+    if(r>=0){struct directory_mode *d=malloc(sizeof(*d));if(!d)return -1;
+        d->path=malloc(strlen(path)+1);if(!d->path){free(d);return -1;}strcpy(d->path,path);
+        d->mode=0777&~extraction_mask;d->next=directory_modes;directory_modes=d;return 0;
+    }
     if (r == -1) r = -errno;
     if (r == -EEXIST && is_dir(path)) return 0;
     warn_sys(path, r);
@@ -656,12 +673,12 @@ static int write_full(int fd, const void *buf, unsigned n) {
 
 /* Данные члена всегда дочитываются до конца блока, чтобы следующий заголовок не съехал.
  * -2 — обрыв архива, -1 — файл не записан. */
-static int write_member(struct src *s, const char *path, unsigned size) {
+static int write_member(struct src *s, const char *path, unsigned size,unsigned mode) {
     int fd = -1, err = 0;
     unsigned rest, filled = 0;
     if (ensure_parent(path) < 0) err = -1;
     else {
-        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+        fd = open(path, O_WRONLY | O_CREAT | O_TRUNC,mode&0777);
         if (fd < 0) err = -1;
     }
     rest = (size + 511u) & ~511u;
@@ -852,6 +869,7 @@ static int run_archive(struct src *s) {
         if (kind == '5') {
             if (!opt_list) {
                 if (mkdir_p(dest) < 0) rc = 1;
+                else directory_header_mode(dest,mode);
             }
             show('d', mode, size, dest, NULL);
             if (skip_bytes(s, size) < 0) return 1;
@@ -912,7 +930,7 @@ static int run_archive(struct src *s) {
             if (exists_keep(dest)) unlink(dest);
             show('-', mode, size, dest, NULL);
             {
-                int wr = write_member(s, dest, size);
+                int wr = write_member(s,dest,size,mode);
                 if (wr == -2) { fprintf(stderr, "tar: unexpected end of file\n"); return 1; }
                 if (wr < 0) { warn_sys(dest, -1); rc = 1; }
             }
@@ -1138,7 +1156,9 @@ int main(int argc, char **argv) {
             return 2;
         }
     }
+    extraction_mask=umask(0);umask(extraction_mask);
     rc = run_archive(&src);
+    rc|=finish_directory_modes(!rc);
     if (tmpname[0]) unlink(tmpname);
     if (fd > 0) close(fd);
     return rc ? 1 : 0;

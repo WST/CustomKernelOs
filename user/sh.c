@@ -16,6 +16,7 @@
  * имени файла, Ctrl+U/K/W — стереть, Ctrl+L — очистить экран, Ctrl+D — выход.
  */
 #include "myos.h"
+#include "sys/stat.h"
 
 #define MAX_LINE 256
 #define MAX_TOK  48
@@ -434,7 +435,7 @@ static int login_prompt(void) {
 }
 
 static void help(void) {
-    printf("MyOS sh. Built-ins: cd [dir], pwd, exit [code], history, help, whoami, useradd NAME, passwd [NAME], logout\n");
+    printf("MyOS sh. Built-ins: cd [dir], pwd, exit [code], history, help, whoami, umask [OCTAL], useradd NAME, passwd [NAME], logout\n");
     printf("Syntax: cmd args | cmd > file >> file < file &   \"quotes\"  * ?  $?  # comment\n");
     printf("Keys: arrows, Home/End, Up/Down = history, Tab = complete, Ctrl+L/U/K/W, Ctrl+D = exit\n");
     printf("Programs in /bin:");
@@ -450,6 +451,13 @@ static void help(void) {
 /* -> true, если команда встроенная (и уже выполнена) */
 static bool builtin(struct cmd *c) {
     char *n = c->argv[0];
+    if(!strcmp(n,"umask")) {
+        if(c->argc==1){unsigned old=umask(0);umask(old);printf("%04o\n",old);last_status=0;}
+        else if(c->argc==2){unsigned mask=0;char *p=c->argv[1];int valid=!!*p;
+            for(;*p;p++){if(*p<'0'||*p>'7'||mask>0777/8){valid=0;break;}mask=mask*8+*p-'0';}
+            if(valid && mask<=0777){umask(mask);last_status=0;}else{printf("umask: invalid mask\n");last_status=1;}}
+        else{printf("Usage: umask [OCTAL]\n");last_status=1;}return true;
+    }
     if (!strcmp(n,"whoami")) { char name[24]={0};last_status=account(5,name,0)<0;if(!last_status) printf("%s\n",name);return true; }
     if (!strcmp(n,"useradd") || !strcmp(n,"passwd")) {
         bool add=!strcmp(n,"useradd");char name[24]={0};

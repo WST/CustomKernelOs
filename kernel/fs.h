@@ -14,7 +14,8 @@
  * Каталог версии 1 — записи по 32 байта, имя до 27 символов.
  * Каталог версии 2 — запись переменной длины, кратная 4 байтам:
  * inode, длина записи, длина имени и само имя до 255 символов.
- * format() и mkfs пишут версию 2; уже записанный том версии 1 читается как был.
+ * format() и mkfs пишут версию 3 с отдельной таблицей прав; данные v1/v2 читаются
+ * без перемещения inode и блоков. V3 сохраняет исходную раскладку в суперблоке.
  * Карта блоков версии 1 — 12 прямых, один одинарный и один двойной косвенный
  * (файл до ~8 МиБ). У версии 2 последний прямой слот занят тройным косвенным
  * блоком, поэтому файл может вырасти до свободного места на томе.
@@ -45,6 +46,8 @@ enum {
     FS_EBUSY = -13,
     FS_EXDEV = -14,
     FS_ELOOP = -15,
+    FS_EACCES = -16,
+    FS_EPERM = -17,
 };
 
 /* VFS: up to four MyFS volumes; /dev is a virtual filesystem. */
@@ -60,6 +63,7 @@ struct fs_stat {
     u32 type;
     u32 size;
     u32 blocks;
+    u32 mode, uid, gid, links;
 };
 
 struct fs_dirent {
@@ -84,6 +88,15 @@ int  fs_resolve_nofollow(u32 cwd, const char *path, u32 *ino);
 int  fs_symlink(u32 cwd, const char *target, const char *linkpath);
 int  fs_readlink(u32 cwd, const char *path, char *buf, u32 len); /* -> байт или ошибка */
 int  fs_create(u32 cwd, const char *path, int type, u32 *ino);
+int  fs_create_mode(u32 cwd, const char *path, int type, u32 mode, u32 *ino);
+int  fs_access(u32 ino, u32 mask, bool real_ids);
+int fs_access_path(u32 cwd,const char *path,u32 mask);
+int  fs_chmod(u32 ino, u32 mode);
+int  fs_chown(u32 ino, u32 uid, u32 gid);
+u32 fs_umask(u32 mask);
+/* Kernel-only, scoped account database/home maintenance; never inherited. */
+void fs_account_enter(void);
+void fs_account_leave(void);
 int  fs_remove(u32 cwd, const char *path);
 int  fs_rename(u32 cwd, const char *src, const char *dst);
 

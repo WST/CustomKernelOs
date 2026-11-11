@@ -49,6 +49,7 @@ struct task {
     u32 uid;
     u32 real_uid, saved_uid, cloexec, fs_root;
     u32 gid, real_gid, saved_gid;
+    u32 creation_mask, fs_account_scope;
     bool authenticated;
     u32   parent;                   /* id родителя (0 — ядро/сирота) */
     u32   pgid;                     /* группа процессов: Ctrl+C убивает всю группу */

@@ -1,5 +1,8 @@
 # MyOS
 
+**Права файлов** — владельцы, основные группы, rwx, sticky-bit и umask в ядре;
+`chmod`, `chown`, `stat` и `ls -l`. [Настройка и миграция MyFS](docs/permissions.md).
+
 **OpenSSH через ext** — клиент и сервер, установка `ext install openssh`.
 [Профиль порта, настройка и ограничения](docs/openssh.md).
 

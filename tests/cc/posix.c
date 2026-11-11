@@ -52,7 +52,11 @@ int main(void) {
 
     CHECK(getenv("HOME") == NULL);
     CHECK(getenv("POSIXLY_CORRECT") == NULL);
-    CHECK(getuid() == 0 && geteuid() == 0 && getgid() == 0);
+#ifdef __LINUX_TEST__
+    CHECK(getuid() == (uid_t)__syscall(199) && geteuid() == (uid_t)__syscall(201) && getgid() == (gid_t)__syscall(200));
+#else
+    CHECK(geteuid() == (uid_t)account(4,NULL,NULL));
+#endif
     CHECK(setvbuf(stdout, NULL, _IONBF, 0) == 0);
     CHECK(sleep(0) == 0);
 
