@@ -51,6 +51,8 @@ struct elf_phdr {
 #define AT_ENTRY  9
 
 #define STACK_BOTTOM (USER_TOP - USER_STACK_PAGES * PAGE_SIZE)
+#define EXEC_MAX      (8u * 1024 * 1024)   /* больше в кучу ядра не читаем */
+#define EXEC_MAX_PHDR 64
 
 static volatile u32 foreground;
 
@@ -124,21 +126,49 @@ static u32 elf_bias(struct elf_phdr *ph, u32 nph, u32 preferred) {
     return top <= preferred ? preferred : 0;
 }
 
-static int map_elf(u8 *file, u32 size, u32 dir, u32 bias, bool reuse, u32 *pages, struct elfmap *out) {
-    struct elf_header *eh = (struct elf_header *)file;
-    struct elf_phdr *ph = (struct elf_phdr *)(file + eh->phoff);
+static int read_exact(u32 ino, u32 off, void *buf, u32 n) {
+    return fs_read(ino, off, buf, n) == (int)n ? 0 : PROC_ENOEXEC;
+}
+
+/* Заголовки программы. Сам файл в кучу ядра не копируется. */
+static int load_phdrs(u32 ino, u32 size, struct elf_header *eh, struct elf_phdr **out) {
+    if (size < sizeof(*eh)) return PROC_ENOEXEC;
+    if (size > EXEC_MAX) return PROC_ENOMEM;
+    if (read_exact(ino, 0, eh, sizeof(*eh))) return PROC_ENOEXEC;
+    if (eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' || eh->ident[3] != 'F' ||
+        eh->ident[4] != 1 || eh->ident[5] != 1 || eh->machine != EM_386 ||
+        eh->phentsize != sizeof(struct elf_phdr) || !eh->phnum || eh->phnum > EXEC_MAX_PHDR)
+        return PROC_ENOEXEC;
+    u32 bytes = eh->phnum * (u32)sizeof(struct elf_phdr);
+    if (eh->phoff > size || bytes > size - eh->phoff) return PROC_ENOEXEC;
+    struct elf_phdr *ph = kmalloc(bytes);
+    if (!ph) return PROC_ENOMEM;
+    if (read_exact(ino, eh->phoff, ph, bytes)) { kfree(ph); return PROC_ENOEXEC; }
+    *out = ph;
+    return 0;
+}
+
+static int map_elf(u32 ino, u32 size, const struct elf_header *eh, const struct elf_phdr *ph,
+                   u32 dir, u32 bias, bool reuse, u32 *pages, struct elfmap *out) {
     u32 end_max = 0;
+    u8 chunk[512];
     for (u32 i = 0; i < eh->phnum; i++) {
         if (ph[i].type != PT_LOAD || ph[i].memsz == 0) continue;
         u32 start = bias + ph[i].vaddr, end = start + ph[i].memsz;
         bool interp = start >= INTERP_BASE;
         if (end < start || start < USER_BASE || ph[i].filesz > ph[i].memsz ||
-            ph[i].offset + ph[i].filesz > size ||
+            ph[i].filesz > size || ph[i].offset > size - ph[i].filesz ||
             (interp ? end > SHM_BASE : end > INTERP_BASE))
             return PROC_ENOEXEC;
         u32 flags = PG_USER | ((ph[i].flags & PF_W) ? PG_WRITE : 0);
         if (!map_zero_pages(dir, start, end, flags, pages, reuse)) return PROC_ENOMEM;
-        if (!copy_to_dir(dir, start, file + ph[i].offset, ph[i].filesz)) return PROC_ENOMEM;
+        u32 left = ph[i].filesz, off = ph[i].offset, va = start;
+        while (left) {
+            u32 n = left > sizeof(chunk) ? (u32)sizeof(chunk) : left;
+            if (read_exact(ino, off, chunk, n)) return PROC_ENOEXEC;
+            if (!copy_to_dir(dir, va, chunk, n)) return PROC_ENOMEM;
+            off += n; va += n; left -= n;
+        }
         if (end > end_max) end_max = end;
     }
     if (!end_max) return PROC_ENOEXEC;
@@ -151,7 +181,8 @@ static int map_elf(u8 *file, u32 size, u32 dir, u32 bias, bool reuse, u32 *pages
     u32 phdr = bias + eh->phoff;
     for (u32 i = 0; i < eh->phnum; i++) {
         if (ph[i].type != PT_LOAD || !ph[i].filesz) continue;
-        if (eh->phoff < ph[i].offset || eh->phoff >= ph[i].offset + ph[i].filesz) continue;
+        if (eh->phoff < ph[i].offset || ph[i].filesz > size || ph[i].offset > size - ph[i].filesz ||
+            eh->phoff >= ph[i].offset + ph[i].filesz) continue;
         phdr = bias + ph[i].vaddr + (eh->phoff - ph[i].offset);
         break;
     }
@@ -195,37 +226,28 @@ static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 in
 }
 
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
- * argv — строки в памяти ядра. */
+ * argv — строки в памяти ядра. Файл читается кусками по 512 байт: в куче
+ * ядра остаются только заголовки программы, не весь образ. */
 static int load_image(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
     u32 ino;
     struct fs_stat st;
     if (fs_resolve(cwd, path, &ino) || fs_stat(ino, &st)) return PROC_ENOENT;
     if (st.type == FS_TYPE_DIR) return PROC_EISDIR;
-    if (st.size < sizeof(struct elf_header)) return PROC_ENOEXEC;
 
-    u8 *file = kmalloc(st.size);
-    if (!file) return PROC_ENOMEM;
-    int err = PROC_ENOEXEC;
+    struct elf_header eh;
+    struct elf_phdr *ph = NULL, *lph = NULL;
     u32 dir = 0, pages = 0;
-    if (fs_read(ino, 0, file, st.size) != (int)st.size) goto fail;
-
-    /* --- проверяем заголовок --- */
-    struct elf_header *eh = (struct elf_header *)file;
-    if (eh->ident[0] != 0x7F || eh->ident[1] != 'E' || eh->ident[2] != 'L' || eh->ident[3] != 'F' ||
-        eh->ident[4] != 1 /* 32 бит */ || eh->ident[5] != 1 /* little endian */ ||
-        (eh->type != ET_EXEC && eh->type != ET_DYN) || eh->machine != EM_386 ||
-        eh->phentsize != sizeof(struct elf_phdr) || !eh->phnum ||
-        eh->phoff + eh->phnum * sizeof(struct elf_phdr) > st.size)
-        goto fail;
+    int err = load_phdrs(ino, st.size, &eh, &ph);
+    if (err) return err;
+    if (eh.type != ET_EXEC && eh.type != ET_DYN) { err = PROC_ENOEXEC; goto fail; }
 
     err = PROC_ENOMEM;
     dir = vmm_create_dir();
     if (!dir) goto fail;
 
-    struct elf_phdr *ph = (struct elf_phdr *)(file + eh->phoff);
-    u32 bias = eh->type == ET_DYN ? elf_bias(ph, eh->phnum, USER_BASE) : 0;
+    u32 bias = eh.type == ET_DYN ? elf_bias(ph, eh.phnum, USER_BASE) : 0;
     struct elfmap prog;
-    err = map_elf(file, st.size, dir, bias, true, &pages, &prog);
+    err = map_elf(ino, st.size, &eh, ph, dir, bias, true, &pages, &prog);
     if (err) goto fail;
     u32 brk = (prog.end + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
     if (brk > INTERP_BASE) brk = INTERP_BASE;
@@ -233,16 +255,17 @@ static int load_image(const char *path, u32 cwd, int argc, char **argv, struct i
     /* PT_INTERP: путь к загрузчику внутри файла, сам загрузчик — ET_DYN от INTERP_BASE */
     char interp[128];
     interp[0] = 0;
-    for (u32 i = 0; i < eh->phnum; i++) {
+    for (u32 i = 0; i < eh.phnum; i++) {
         if (ph[i].type != PT_INTERP) continue;
-        if (!ph[i].filesz || ph[i].filesz >= sizeof(interp) || ph[i].offset + ph[i].filesz > st.size) {
+        if (!ph[i].filesz || ph[i].filesz >= sizeof(interp) ||
+            ph[i].filesz > st.size || ph[i].offset > st.size - ph[i].filesz) {
             err = PROC_ENOEXEC;
             goto fail;
         }
+        if (read_exact(ino, ph[i].offset, interp, ph[i].filesz)) { err = PROC_ENOEXEC; goto fail; }
         bool nul = false;
-        for (u32 k = 0; k < ph[i].filesz; k++) if (file[ph[i].offset + k] == 0) nul = true;
+        for (u32 k = 0; k < ph[i].filesz; k++) if (interp[k] == 0) nul = true;
         if (!nul) { err = PROC_ENOEXEC; goto fail; }
-        memcpy(interp, file + ph[i].offset, ph[i].filesz);
         break;
     }
 
@@ -257,27 +280,21 @@ static int load_image(const char *path, u32 cwd, int argc, char **argv, struct i
     if (interp[0]) {
         u32 lino;
         struct fs_stat lst;
+        struct elf_header leh;
         if (fs_resolve(cwd, interp, &lino) || fs_stat(lino, &lst) || lst.type != FS_TYPE_FILE) {
             err = PROC_ENOENT;
             goto fail;
         }
-        u8 *ld = kmalloc(lst.size);
-        if (!ld) { err = PROC_ENOMEM; goto fail; }
-        bool got = fs_read(lino, 0, ld, lst.size) == (int)lst.size && lst.size >= sizeof(struct elf_header);
-        struct elf_header *leh = (struct elf_header *)ld;
-        int lerr = PROC_ENOEXEC;
+        err = load_phdrs(lino, lst.size, &leh, &lph);
+        if (err) goto fail;
+        if (leh.type != ET_DYN) { err = PROC_ENOEXEC; goto fail; }
         struct elfmap lm;
-        if (got && leh->ident[0] == 0x7F && leh->type == ET_DYN && leh->machine == EM_386 &&
-            leh->phentsize == sizeof(struct elf_phdr) && leh->phnum &&
-            leh->phoff + leh->phnum * sizeof(struct elf_phdr) <= lst.size) {
-            u32 lbias = elf_bias((struct elf_phdr *)(ld + leh->phoff), leh->phnum, INTERP_BASE);
-            lerr = map_elf(ld, lst.size, dir, lbias, false, &pages, &lm);
-        }
-        kfree(ld);
-        if (lerr) { err = lerr; goto fail; }
+        u32 lbias = elf_bias(lph, leh.phnum, INTERP_BASE);
+        err = map_elf(lino, lst.size, &leh, lph, dir, lbias, false, &pages, &lm);
+        if (err) goto fail;
         entry = lm.entry;
-        u32 ph;
-        if (!vmm_lookup(dir, prog.phdr, &ph, NULL)) { err = PROC_ENOEXEC; goto fail; }
+        u32 phys;
+        if (!vmm_lookup(dir, prog.phdr, &phys, NULL)) { err = PROC_ENOEXEC; goto fail; }
         err = aux_stack(dir, argc, argv, &prog, lm.base, &sp);
         if (err) goto fail;
     } else {
@@ -305,12 +322,14 @@ static int load_image(const char *path, u32 cwd, int argc, char **argv, struct i
     im->sp = sp;
     im->brk = brk;
     im->pages = pages;
-    kfree(file);
+    kfree(ph);
+    kfree(lph);
     return 0;
 
 fail:
     if (dir) vmm_destroy_dir(dir);
-    kfree(file);
+    kfree(ph);
+    kfree(lph);
     return err;
 }
 
