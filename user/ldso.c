@@ -11,6 +11,7 @@
 #define SYS_OPEN 3
 #define SYS_CLOSE 4
 #define SYS_STAT 26
+/* Эти номера сверяются с kernel/syscall.h и user/lib/myos.h при сборке. */
 #define SYS_MMAP 69
 #define SYS_MUNMAP 70
 

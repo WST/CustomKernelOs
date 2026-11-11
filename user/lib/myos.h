@@ -54,6 +54,9 @@ enum {
     SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX
 };
+/* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
+_Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 
 #define PROT_READ  1
 #define PROT_WRITE 2
