@@ -21,6 +21,8 @@
 /* 0xD0000000..: куча ядра (heap.h) — общая для всех каталогов */
 
 void paging_init(void);
+void paging_init_ap_cache(void); /* same PAT layout before an AP uses mappings */
+u32 paging_video_flags(void);    /* WC when PAT is available, otherwise UC */
 
 /* операции над каталогом ядра */
 int  vmm_map(u32 virt, u32 phys, u32 flags);   /* 0 = ок, <0 = ошибка */

@@ -21,6 +21,8 @@
 #include "heap.h"
 #include "string.h"
 #include "smp.h"
+#include "vga.h"
+#include "idt.h"
 
 #define PD_INDEX(v) ((v) >> 22)
 #define PT_INDEX(v) (((v) >> 12) & 0x3FF)
@@ -33,6 +35,34 @@ static u32 page_dir[1024]    __attribute__((aligned(4096)));   /* каталог
 static u32 first_table[1024] __attribute__((aligned(4096)));   /* первые 4 МБ */
 static u32 identity_limit;
 static u32 tables;
+static bool video_wc;
+
+#ifdef MYOS_HARDWARE
+/* Entry 4 is unused by our page tables until framebuffer setup. Preserve all
+ * other firmware PAT entries, especially entry 3 used by device registers.
+ * Run on BSP before enabling paging, and on APs before accessing video. */
+static bool init_video_pat(void) {
+    u32 a,b,c,d;
+    __asm__ volatile("cpuid":"=a"(a),"=b"(b),"=c"(c),"=d"(d):"a"(1));
+    if ((d&((1u<<16)|(1u<<5)))!=((1u<<16)|(1u<<5))) return false;
+    u32 lo,hi,cr0,cr3,cr4,flags=irq_save();
+    __asm__ volatile("rdmsr":"=a"(lo),"=d"(hi):"c"(0x277));
+    __asm__ volatile("mov %%cr0,%0;mov %%cr3,%1;mov %%cr4,%2":"=r"(cr0),"=r"(cr3),"=r"(cr4));
+    u32 disabled=(cr0|(1u<<30))&~(1u<<29),noglobal=cr4&~(1u<<7);
+    __asm__ volatile("mov %0,%%cr0;wbinvd;mov %1,%%cr4;mov %2,%%cr3"::"r"(disabled),"r"(noglobal),"r"(cr3):"memory");
+    hi=(hi&~255u)|1u; /* PAT[4] = write-combining */
+    __asm__ volatile("wrmsr"::"a"(lo),"d"(hi),"c"(0x277):"memory");
+    __asm__ volatile("wbinvd;mov %0,%%cr3;mov %1,%%cr0;mov %2,%%cr4"::"r"(cr3),"r"(cr0),"r"(cr4):"memory");
+    irq_restore(flags);
+    return true;
+}
+#endif
+u32 paging_video_flags(void) { return video_wc?0x80u:0x18u; }
+void paging_init_ap_cache(void) {
+#ifdef MYOS_HARDWARE
+    if (video_wc && !init_video_pat()) kpanic("AP does not support framebuffer PAT");
+#endif
+}
 
 
 static inline void invlpg(u32 addr) { __asm__ volatile ("invlpg (%0)" : : "r"(addr) : "memory"); }
@@ -56,6 +86,10 @@ static u32 *get_pte(u32 *dir, u32 virt, bool create, bool user) {
 }
 
 void paging_init(void) {
+#ifdef MYOS_HARDWARE
+    video_wc=init_video_pat();
+    kprintf("[BOOT] Framebuffer cache: %s\n",video_wc?"PAT write-combining":"uncached (PAT unavailable)");
+#endif
     struct pmm_stats st;
     pmm_stats(&st);
 

@@ -87,6 +87,18 @@ void pmm_init(void) {
     /* 3) первый мегабайт — наш (ядро, стек, карта E820) и BIOS */
     for (u32 f = 0; f < LOW_RESERVED / PAGE_SIZE; f++) set_used(f);
 
+#ifdef MYOS_HARDWARE
+    /* The live kernel is above 1 MiB. Reserve it and the RAM root before
+     * allocating refcounts, otherwise clearing that table overwrites code. */
+    extern u8 __kernel_start[], __bss_end[];
+    for (u32 f=(u32)__kernel_start/PAGE_SIZE; f<((u32)__bss_end+PAGE_SIZE-1)/PAGE_SIZE; f++)
+        set_used(f);
+    const struct boot_info *boot=boot_info_get();
+    if (boot && boot->root_phys==0x1000000 && boot->root_bytes && boot->root_bytes<=0x4000000)
+        for (u32 f=boot->root_phys/PAGE_SIZE; f<(boot->root_phys+boot->root_bytes+PAGE_SIZE-1)/PAGE_SIZE; f++)
+            set_used(f);
+#endif
+
     /* Счётчики владельцев — по байту на кадр. В BSS ядра им нет места: ядро
      * собрано ниже 640 КБ, а 256 КБ таблицы залезли бы в окно VGA (0xA0000)
      * и затёрли экран. Кладём таблицу в свободную расширенную память. */
@@ -104,15 +116,6 @@ void pmm_init(void) {
     }
     if (!refs) kpanic("no memory for page refcounts");
 
-#ifdef MYOS_HARDWARE
-    extern u8 __kernel_start[], __bss_end[];
-    for (u32 f=(u32)__kernel_start/PAGE_SIZE; f<((u32)__bss_end+PAGE_SIZE-1)/PAGE_SIZE; f++)
-        set_used(f);
-    const struct boot_info *boot=boot_info_get();
-    if (boot && boot->root_phys==0x1000000 && boot->root_bytes && boot->root_bytes<=0x4000000)
-        for (u32 f=boot->root_phys/PAGE_SIZE; f<(boot->root_phys+boot->root_bytes+PAGE_SIZE-1)/PAGE_SIZE; f++)
-            set_used(f);
-#endif
     total_frames = used_frames = 0;
     for (u32 f = LOW_RESERVED / PAGE_SIZE; f < limit_frame; f++) {
         total_frames++;

@@ -8,6 +8,7 @@
 #include "vga.h"
 #include "string.h"
 #include "fb.h"
+#include "bootinfo.h"
 
 #define MAX_W   (FB_MAX_W / FONT_W)     /* 320 */
 #define MAX_H   (FB_MAX_H / FONT_H)     /* 100 */
@@ -19,6 +20,9 @@ static u16  saved_text[80 * 25];        /* текстовый экран до в
 static int  PW, PH;                     /* размер экрана в пикселях (графика) */
 static int  W = 80, H = 25;
 static bool fbmode;                     /* рисуем пикселями */
+static bool firmware_console;           /* avoid slow reads of physical VBE VRAM */
+static unsigned cursor_defer;           /* draw the final cursor once per output */
+static u32 dirty_cells[(MAX_W*MAX_H+31)/32];
 static bool suspended;                  /* экран захватила программа — только запоминаем */
 static bool cur_on = true;              /* видим ли курсор */
 static int  cur_x = -1, cur_y = -1;     /* где нарисован курсор (графика) */
@@ -43,21 +47,37 @@ static void draw_cell(int i) {
     fb_glyph(i % W, i / W, v & 0xFF, palette[a & 15], palette[a >> 4]);
 }
 
+static void paint_cell(int i) {
+    if (firmware_console && cursor_defer) dirty_cells[i/32]|=1u<<(i%32);
+    else draw_cell(i);
+}
+
+static void flush_cells(void) {
+    if (!firmware_console || !fbmode || suspended) return;
+    for (int i=0;i<W*H;i++) if (dirty_cells[i/32]&(1u<<(i%32))) {
+        dirty_cells[i/32]&=~(1u<<(i%32));
+        draw_cell(i);
+    }
+}
+
 static inline void set_cell(int i, u16 v) {
+    if (cells[i]==v) return;
     cells[i] = v;
     if (fbmode && !suspended) {
-        draw_cell(i);
+        paint_cell(i);
         if (i == cur_y * W + cur_x) cur_x = cur_y = -1;   /* затёрли курсор — нарисуем заново */
     }
 }
 
 /* курсор в графике: подчёркивание цветом символа под ним */
 static void erase_cursor(void) {
-    if (cur_x >= 0 && !suspended) draw_cell(cur_y * W + cur_x);
+    if (cur_x >= 0 && !suspended) paint_cell(cur_y * W + cur_x);
     cur_x = cur_y = -1;
 }
 
 static void update_cursor(void) {
+    if (cursor_defer) return;
+    flush_cells();
     if (!fbmode) {
         u16 pos = row * W + col;
         outb(0x3D4, 0x0F); outb(0x3D5, pos & 0xFF);
@@ -76,9 +96,17 @@ static void update_cursor(void) {
 static void scroll(void) {
     if (row < H) return;
     if (fbmode) erase_cursor();
-    for (int i = 0; i < (H - 1) * W; i++) cells[i] = cells[i + W];
-    for (int i = (H - 1) * W; i < H * W; i++) cells[i] = cell(' ');
-    if (fbmode && !suspended) fb_scroll(FONT_H, palette[attr >> 4]);   /* пиксели сдвигаем разом */
+    /* VBE video memory is uncached MMIO. Scrolling pixels reads almost the
+     * whole screen over the display bus for every newline. Compare the RAM
+     * text cells instead and only write glyphs whose character/color changed. */
+    bool redraw=firmware_console && fbmode && !suspended;
+    for (int i = 0; i < H * W; i++) {
+        u16 next=i<(H-1)*W ? cells[i+W] : cell(' ');
+        if (cells[i]==next) continue;
+        cells[i]=next;
+        if (redraw) paint_cell(i);
+    }
+    if (fbmode && !suspended && !redraw) fb_scroll(FONT_H, palette[attr >> 4]);
     row = H - 1;
 }
 
@@ -94,6 +122,11 @@ static void clear_nolock(void) {
 }
 
 void vga_init(void) {
+    /* The hardware loader may already be in VBE graphics mode. Its VGA
+     * aperture is not reliable text storage; preserve early output in RAM. */
+    const struct boot_info *boot=boot_info_get();
+    firmware_console=boot && boot->fb_phys;
+    if (firmware_console) cells=saved_text;
     /* включаем «толстый» курсор: строки 13..15 */
     outb(0x3D4, 0x0A); outb(0x3D5, (inb(0x3D5) & 0xC0) | 13);
     outb(0x3D4, 0x0B); outb(0x3D5, (inb(0x3D5) & 0xE0) | 15);
@@ -112,7 +145,7 @@ static void repaint(void) {
  * видеокарта перестаёт показывать память 0xB8000, и прочитать её уже нельзя. */
 void vga_save_text(void) {
     u32 f = irq_save();
-    for (int i = 0; i < 80 * 25; i++) saved_text[i] = VGA_MEM[i];
+    for (int i = 0; i < 80 * 25; i++) saved_text[i] = cells[i];
     irq_restore(f);
 }
 
@@ -237,7 +270,13 @@ static bool ansi(char c) {
     if (c == '?') { esc_private = true; return true; }
     if (c >= '0' && c <= '9') {
         if (esc_n == 0) esc_n = 1;
-        esc_args[esc_n - 1] = esc_args[esc_n - 1] * 10 + (c - '0');
+        /* Saturate before arithmetic: an oversized CSI must never wrap into
+         * a negative cursor position or an out-of-bounds cell index. */
+        int *value=&esc_args[esc_n-1];
+        if (*value<=6553) {
+            int next=*value*10+(c-'0');
+            *value=next>65535?65535:next;
+        } else *value=65535;
         return true;
     }
     if (c == ';') { if (esc_n == 0) esc_n = 1; if (esc_n < 4) esc_n++; return true; }
@@ -298,7 +337,16 @@ static void putc_nolock(char c) {
 /* Экран общий для всех задач: каждую операцию делаем целиком, без переключений,
  * чтобы строки разных задач не перемешивались посреди kprintf. */
 void vga_putc(char c)        { u32 f = irq_save(); putc_nolock(c); irq_restore(f); }
-void vga_puts(const char *s) { u32 f = irq_save(); while (*s) putc_nolock(*s++); irq_restore(f); }
+void vga_write(const char *s,u32 length) {
+    u32 f=irq_save(); cursor_defer++;
+    for (u32 i=0;i<length;i++) putc_nolock(s[i]);
+    cursor_defer--; update_cursor(); irq_restore(f);
+}
+void vga_puts(const char *s) {
+    u32 f=irq_save(); cursor_defer++;
+    while (*s) putc_nolock(*s++);
+    cursor_defer--; update_cursor(); irq_restore(f);
+}
 void vga_clear(void)         { u32 f = irq_save(); clear_nolock(); irq_restore(f); }
 
 /* написать строку в фиксированное место экрана, не трогая курсор */
@@ -330,6 +378,7 @@ void kprintf(const char *fmt, ...) {
 }
 
 void vkprintf(const char *fmt, va_list ap) {
+    u32 flags=irq_save(); cursor_defer++;
     for (; *fmt; fmt++) {
         if (*fmt != '%') { vga_putc(*fmt); continue; }
         fmt++;
@@ -349,4 +398,5 @@ void vkprintf(const char *fmt, va_list ap) {
         default:  vga_putc('%'); vga_putc(*fmt);
         }
     }
+    cursor_defer--; update_cursor(); irq_restore(flags);
 }

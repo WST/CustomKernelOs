@@ -202,6 +202,7 @@ static void delay(u32 ticks) {
     while(timer_ticks()-start<ticks) __asm__ volatile("pause" ::: "memory");
 }
 static void ap_main(void) {
+    paging_init_ap_cache();
     gdt_init(); idt_reload();
     /* fpu_init also writes a shared clean template; use the same BKL as BSP. */
     local_init(false);

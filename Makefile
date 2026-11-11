@@ -687,7 +687,16 @@ $(HWBUILD)/kernel.elf: $(HWOBJS) boot/hardware.ld
 	$(LD) -m elf_i386 -T boot/hardware.ld -nostdlib $(HWOBJS) -o $@
 $(HWBUILD)/kernel.bin: $(HWBUILD)/kernel.elf
 	$(OBJCOPY) -O binary $< $@
-.PHONY: usb-image usbtest
+$(BUILD)/user/consoleload.o: tests/console_load.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/consoleload: $(BUILD)/user/consoleload.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/libmyos.a -o $@
+.PHONY: usb-image usbtest consoletest consoleloadtest
+consoleloadtest: usb-image $(BUILD)/user/consoleload
+	python3 tests/console_load_smoke.py
+consoletest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/console_output.c -o $(BUILD)/console-output-test
+	./$(BUILD)/console-output-test
 usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
 	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm
 usbtest: usb-image

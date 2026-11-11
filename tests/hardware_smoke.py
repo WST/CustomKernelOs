@@ -27,14 +27,14 @@ def save_png(ppm,png):
                     chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
 
 class VM:
-    def __init__(self,name,usb=True,vga='std',memory='256M',machine='pc',usb_version=2,legacy=False):
+    def __init__(self,name,usb=True,vga='std',memory='256M',machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1):
         self.temp=tempfile.TemporaryDirectory(prefix='myos-usb-')
         # Poll a native filesystem log: DrvFS can return ENODATA while a Windows
         # file is concurrently extended by QEMU.
         self.log=pathlib.Path(self.temp.name)/(name+'.log'); self.log.write_text('')
         self.log_artifact=B/(name+'.log')
         self.sockpath=self.temp.name+'/qmp'
-        args=['qemu-system-i386','-m',memory,'-display','none','-vga',vga,
+        args=['qemu-system-i386','-m',memory,'-cpu',cpu,'-smp',str(cpus),'-display','none','-vga',vga,
               '-serial','file:'+str(self.log),'-qmp','unix:'+self.sockpath+',server=on,wait=off',
               '-no-reboot','-nic','none']
         if usb:
@@ -98,15 +98,72 @@ class VM:
         result=self.qmp('human-monitor-command',{'command-line':f'xp /4uw 0x{address:x}'})
         return [int(n) for n in result.split(':',1)[1].split()]
 
+    def check_console_pixels(self):
+        symbols=subprocess.check_output(['nm','-n','build/hardware/kernel.elf'],text=True)
+        addresses={line.split()[2]:int(line.split()[0],16) for line in symbols.splitlines() if len(line.split())==3}
+        self.qmp('stop')
+        try:
+            ppm=B/'hardware-scroll.ppm'
+            self.qmp('screendump',{'filename':str(ppm.resolve())})
+            magic,dimensions,maximum,pixels=ppm.read_bytes().split(b'\n',3)
+            width,height=map(int,dimensions.split()); columns=width//8; rows=height//16
+            assert magic==b'P6' and maximum==b'255'
+            def memory(name,size):
+                path=pathlib.Path(self.temp.name)/(name+'.bin')
+                self.qmp('pmemsave',{'val':addresses[name],'size':size,'filename':str(path)})
+                return path.read_bytes()
+            cells=struct.unpack('<'+'H'*(columns*rows),memory('shadow',columns*rows*2))
+            font=memory('font',4096)
+            palette=(0x000000,0x0000aa,0x00aa00,0x00aaaa,0xaa0000,0xaa00aa,0xaa5500,0xaaaaaa,
+                     0x555555,0x5555ff,0x55ff55,0x55ffff,0xff5555,0xff55ff,0xffff55,0xffffff)
+            colors=[bytes((v>>16,(v>>8)&255,v&255)) for v in palette]
+            # Skip the three bottom scanlines where the underline cursor lives.
+            for row in range(rows):
+                for col in range(columns):
+                    cell=cells[row*columns+col]; char=cell&255; attr=cell>>8
+                    fg=colors[attr&15]; bg=colors[attr>>4]
+                    for y in range(13):
+                        bits=font[char*16+y]
+                        expected=b''.join(fg if bits&(0x80>>x) else bg for x in range(8))
+                        offset=((row*16+y)*width+col*8)*3
+                        assert pixels[offset:offset+24]==expected, ('console pixels differ',row,col,y,hex(cell))
+            save_png(ppm,B/'hardware-scroll.png')
+        finally: self.qmp('cont')
+
 def main():
     before=digest(IMAGE); original=digest(pathlib.Path('disk.img'))
-    vm=VM('hardware-usb')
+    vm=VM('hardware-usb',cpus=2)
     try:
         vm.wait('BIOS VBE framebuffer')
         vm.wait('USB HID keyboard:')
         vm.wait('USB HID mouse:')
         vm.wait('LIVE MODE:')
         vm.wait('New password:')
+        # Early boot text must survive the loader's graphics-mode handoff.
+        boot_console=clean(vm.log)
+        assert 'Framebuffer cache: PAT write-combining' in boot_console
+        assert 'SMP initialization complete: 2 CPU(s)' in boot_console
+        assert 'GDT+TSS' in boot_console and 'Physical memory:' in boot_console
+        stages=('physical memory allocator','paging and kernel mappings',
+                'kernel heap','framebuffer and graphical console',
+                'xHCI and USB HID input','storage probe','MyFS mount',
+                'SMP processor startup','services','kernel ready; entering login/shell')
+        previous=-1
+        for stage in stages:
+            position=boot_console.index('[BOOT] '+stage)
+            assert position>previous, 'boot stages out of order: '+stage
+            previous=position
+        assert 'VBE boot: base=' in boot_console and 'Framebuffer: base=' in boot_console
+        console_ppm=B/'hardware-console.ppm'
+        vm.qmp('screendump',{'filename':str(console_ppm.resolve())})
+        magic,dimensions,maximum,pixels=console_ppm.read_bytes().split(b'\n',3)
+        width,height=map(int,dimensions.split())
+        assert magic==b'P6' and maximum==b'255' and len(pixels)==width*height*3
+        # The password prompt's unused right margin must stay black.
+        assert width>=800 and height>=480
+        for y in range(height-16,height):
+            assert not any(pixels[(y*width+80*8)*3:((y+1)*width)*3]), 'corrupt boot console background'
+        save_png(console_ppm,B/'hardware-console.png')
         vm.send('usbtest123','Confirm password:')
         vm.send('usbtest123','Login [root]:')
         vm.send('','Password:')
@@ -114,6 +171,12 @@ def main():
         vm.send('whoami','\nroot\n')
         vm.send('mkdir /ramcheck','root:/')
         vm.send('ls /','ramcheck')
+        # More than one screen of colored output, including blank margins:
+        # every scrolled glyph must still match the logical RAM text cells.
+        for _ in range(12): vm.send('help','Same name: /bin wins.')
+        vm.send('whoami','\nroot\n')
+        time.sleep(.2)  # let the final prompt/cursor finish before freezing CPUs
+        vm.check_console_pixels()
         # Exercise extended keys and repeat, causing both transfer and event rings to wrap.
         for _ in range(140): vm.key('a'); vm.key('backspace')
         vm.send('whoami','\nroot\n')
@@ -155,6 +218,12 @@ def main():
     try:
         vm.wait('New password:')
         assert 'staying in VGA text mode' in clean(vm.log)
+    finally: vm.stop()
+    vm=VM('hardware-no-pat',usb=False,cpu='max,-pat')
+    try:
+        vm.wait('New password:')
+        assert 'Framebuffer cache: uncached (PAT unavailable)' in clean(vm.log)
+        assert 'BIOS VBE framebuffer' in clean(vm.log)
     finally: vm.stop()
     assert digest(IMAGE)==before and digest(pathlib.Path('disk.img'))==original
     print('USB boot + VBE + USB HID keyboard/mouse + ring wrap + RAM filesystem + 16 GiB reboot + text fallback + full-speed/Q35 + original boot: OK')
