@@ -11,6 +11,7 @@
 #   build/myfs disk.img ls /bin            — посмотреть диск с компьютера
 #   build/myfs disk.img put file.txt /f    — положить свой файл на диск
 #   build/myfs disk.img cat /etc/display   — вывести файл с диска
+#   build/myfs disk.img grow 128           — расширить ФС до 128 МБ, старый образ остаётся как disk.img.bak
 
 # На macOS (и вообще не на x86-Linux) системный gcc — это clang под arm64/x86_64-darwin,
 # он не умеет собирать 32-битный ELF. Нужен кросс-тулчейн:
@@ -40,7 +41,9 @@ LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
 
 BUILD   := build
 DISK    := disk.img
-DISK_MB := 16
+# Новый disk.img, если файла ещё нет. Готовый образ сам не растёт:
+# build/myfs disk.img grow 64  (прежний остаётся как disk.img.bak)
+DISK_MB := 64
 C_SRC   := $(wildcard kernel/*.c)
 OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC))
 
@@ -158,7 +161,8 @@ UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -O2 -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
 # --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
 ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
-PROGRAMS := $(basename $(notdir $(wildcard user/*.c))) cc
+# ldso.c — не команда /bin, а исходник /lib/ld.so (собирается отдельно, своим cc).
+PROGRAMS := $(filter-out ldso,$(basename $(notdir $(wildcard user/*.c)))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
 ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
@@ -187,8 +191,37 @@ $(BUILD)/user/code.o: user/code_features.h user/code_index.h user/code_workspace
 $(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-$(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) user/user.ld
+# sh и cc остаются статическими: оболочка и компилятор стартуют даже со сломанной libc.so.
+$(BUILD)/user/sh: $(BUILD)/user/sh.o $(ULIB) user/user.ld
 	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+
+# Динамические программы: libc.so/libgfx.so, интерпретатор /lib/ld.so.
+DYNLDFLAGS := -m elf_i386 -nostdlib -s --gc-sections -dynamic-linker /lib/ld.so \
+              --hash-style=sysv --as-needed -Ttext-segment=0x40000000
+
+$(BUILD)/user/crt0.o: user/lib/crt0.asm | $(BUILD)/user
+	$(NASM) -f elf32 $< -o $@
+
+$(BUILD)/user/libc.so: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ $<
+
+$(BUILD)/user/pic/%.o: user/lib/%.c user/lib/myos.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
+
+$(BUILD)/user/pic: | $(BUILD)/user
+	mkdir -p $@
+
+PIC_GFX := $(patsubst %,$(BUILD)/user/pic/%.o,gfx vec font win)
+$(BUILD)/user/pic/gfx.o: user/lib/gfx.h
+$(BUILD)/user/pic/vec.o: user/lib/gfx.h
+$(BUILD)/user/pic/font.o: user/lib/gfx.h
+$(BUILD)/user/pic/win.o: user/lib/win.h user/lib/gfx.h
+
+$(BUILD)/user/libgfx.so: $(PIC_GFX) $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libgfx.so -Wl,--hash-style=sysv -o $@ $(PIC_GFX) -L$(BUILD)/user -lc
+
+$(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
 
 # HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
 # Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
@@ -204,8 +237,8 @@ $(BUILD)/user/x509.o: user/lib/x509.c user/lib/x509.h user/lib/tls.h user/lib/my
 
 $(patsubst %,%.o,$(TLS_PROGS)) $(BUILD)/user/browser.o: user/lib/tls.h
 
-$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(ULIB) $(TLS_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(ULIB) -o $@
+$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(TLS_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) -L$(BUILD)/user -lc -lgfx
 
 # JavaScript — движок user/lib/js*.c (программа js и браузер) и DOM user/lib/dom*.c (браузер).
 # Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
@@ -225,8 +258,8 @@ user/lib/dom_prelude.h: user/lib/dom_prelude.js
 
 $(BUILD)/user/js.o: user/lib/js.h
 
-$(BUILD)/user/js: $(BUILD)/user/js.o $(ULIB) $(JS_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(JS_OBJS) $(ULIB) -o $@
+$(BUILD)/user/js: $(BUILD)/user/js.o $(JS_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(JS_OBJS) -L$(BUILD)/user -lc -lgfx
 
 # картинки (PNG, GIF, JPEG, BMP) — user/lib/img.c, пока только браузеру
 $(BUILD)/user/l_img.o: user/lib/img.c user/lib/img.h user/lib/myos.h | $(BUILD)/user
@@ -235,8 +268,8 @@ $(BUILD)/user/l_svg.o: user/lib/svg.c user/lib/svg.h user/lib/gfx.h user/lib/js.
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
 
-$(BUILD)/user/browser: $(BUILD)/user/browser.o $(ULIB) $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) user/user.ld
-	$(LD) $(ULDFLAGS) $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(ULIB) -o $@
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) -L$(BUILD)/user -lc -lgfx
 
 # Native browser paint/scroll benchmark (not installed by default).
 $(BUILD)/user/browser-paint.o: tests/browser_paint.c user/browser.c user/lib/dom.h user/lib/gfx.h | $(BUILD)/user
@@ -260,6 +293,44 @@ $(BUILD)/cc-host: $(CC_SRC) user/cc/cc.h | $(BUILD)
 
 programs: $(UBINS)
 
+# Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
+# /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
+CCROOT    := $(BUILD)/ccroot
+CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
+CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
+GFX_PARTS := gfx vec font win
+
+$(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp $(CC_LIBSRC) $(CCROOT)/lib/
+	@touch $@
+
+$(BUILD)/libobj-linux/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -c $< -o $@
+
+$(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -c $< -o $@
+
+$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c
+
+$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(CCROOT)/lib/libgfx.a: $(patsubst %,$(BUILD)/libobj-linux/%.o,$(GFX_PARTS))
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a
+
 # ------------------------------------------------------------------ утилита myfs (хост)
 
 $(BUILD)/myfs: tools/myfs.c tools/host_io.c kernel/fs.c kernel/myfs.c kernel/myfs.h kernel/block.c kernel/block.h kernel/fs.h kernel/string.c | $(BUILD)
@@ -273,10 +344,14 @@ $(DISK):
 
 # Установить программы в /bin (остальные файлы на диске не трогаются).
 # Сторонние утилиты ставятся в /ext/bin командой ext, по файлам /ext/instructions.
-install: $(UBINS) $(BUILD)/myfs | $(DISK)
+$(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
+
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/ar /bin/ranlib || exit 1
 	@echo "==> инструкции сторонних программ в /ext/instructions"
 	@$(BUILD)/myfs $(DISK) mkdir /ext/bin >/dev/null
 	@$(BUILD)/myfs $(DISK) mkdir /ext/instructions >/dev/null
@@ -296,6 +371,10 @@ install: $(UBINS) $(BUILD)/myfs | $(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c regex.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libc.so /lib/libc.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libgfx.so /lib/libgfx.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -354,6 +433,19 @@ test: | $(BUILD)
 	./$(BUILD)/x509-test
 	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c -o $(BUILD)/fs_test
 	./$(BUILD)/fs_test
+	$(MAKE) $(BUILD)/myfs
+	dd if=/dev/zero of=$(BUILD)/v1.img bs=512 count=4096 status=none
+	gcc -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/v1_seed.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $(BUILD)/v1_seed
+	./$(BUILD)/v1_seed $(BUILD)/v1.img
+	./$(BUILD)/myfs $(BUILD)/v1.img grow 4
+	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/note | grep -q v1-ok
+	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
+	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
+	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==2, v'
+	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
+	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
+	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
 	gcc -std=gnu17 -O1 -w -fno-builtin -Ikernel -include tests/host_env.h \
 	    tests/heap_test.c kernel/heap.c kernel/string.c -o $(BUILD)/heap_test
 	./$(BUILD)/heap_test
@@ -418,30 +510,34 @@ gfxtest: | $(BUILD)
 	./$(BUILD)/gfx-host fonts > $(BUILD)/gfxtest.ppm && echo "==> $(BUILD)/gfxtest.ppm"
 
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
-CCROOT := $(BUILD)/ccroot
-cctest: $(BUILD)/cc-host
-	@mkdir -p $(CCROOT)/include $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@mkdir -p $(CCROOT)/include/sys
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
 	    echo "32-bit programs cannot run here - only checking that tests and cc itself compile"; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_x || exit 1; done; \
-	    $(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && echo "compile-only: OK"; \
+	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_x || exit 1; done; \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
+	    sh tests/ccshared.sh $(BUILD)/cc-host $(CCROOT) && echo "compile-only: OK"; \
 	    exit 0; \
 	fi; \
 	for t in tests/cc/*.c; do \
 	    n=$$(basename $$t .c); \
 	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && ./$(BUILD)/cct_$$n || exit 1; \
 	done; \
+	for t in tests/cc/*.c; do \
+	    n=$$(basename $$t .c); \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_pic_$$n && ./$(BUILD)/cct_pic_$$n || exit 1; \
+	done; \
+	echo "cc -fPIC: OK"; \
 	rm -f $(BUILD)/cct_cc1 $(BUILD)/cct_cc2 $(BUILD)/cct_cc3; \
 	$(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
 	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
 	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
-	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)"
+	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)" && \
+	sh tests/cclink.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclink.sh $(BUILD)/cct_cc2 $(CCROOT) && \
+	sh tests/cclib.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclib.sh $(BUILD)/cct_cc2 $(CCROOT) && \
+	sh tests/ccshared.sh $(BUILD)/cc-host $(CCROOT) && sh tests/ccshared.sh $(BUILD)/cct_cc2 $(CCROOT)
 
 vfstest: all
 	python3 tests/vfs_smoke.py
@@ -452,32 +548,24 @@ largetest: | $(BUILD)
 	python3 tests/run_large_fs.py $(BUILD)/large-fs-test
 
 # ext без сети: разбор инструкций, каталоги, отказ на неизвестной команде.
-exttest: $(BUILD)/cc-host $(BUILD)/user/download $(BUILD)/user/ext
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/ext
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
 
 # gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
-gztest: $(BUILD)/cc-host
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+gztest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
 	@sh tests/gzip.sh $(BUILD)/gzip-linux
 
-cptest: $(BUILD)/cc-host
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
-	@cp user/include/sys/*.h $(CCROOT)/include/sys/
-	@cp user/lib/libc.c user/lib/regex.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c $(CCROOT)/lib/
+# tar на хосте: тот же cc, синтетические архивы и настоящий исходник zlib.
+tartest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -o $(BUILD)/tar-linux
+	@sh tests/tar.sh $(BUILD)/tar-linux
+
+cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
 	@sh tests/cp.sh $(BUILD)/cp-linux
 
-.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest cptest
 $(BUILD)/user/gpuscene.o: tests/gpu_scene.c user/desktop.c user/desktop_gpu.inc user/lib/gfx.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/gpuscene: $(BUILD)/user/gpuscene.o $(BUILD)/user/l_img.o $(ULIB) user/user.ld
@@ -509,6 +597,29 @@ $(BUILD)/user/gpucheck.o: tests/gpucheck.c user/lib/gfx.h | $(BUILD)/user
 $(BUILD)/user/gpucheck: $(BUILD)/user/gpucheck.o $(ULIB) user/user.ld
 	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
 
+# Загрузчик и программа с .so: внутри QEMU, диск — копия.
+dynsystest: $(BUILD)/ld.so $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/user/echo $(BUILD)/user/sh $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUILD)/myfs
+	gcc -m32 -shared -fPIC -nostdlib -ffreestanding -fno-builtin -fno-stack-protector -mno-sse -mno-mmx -O2 \
+	    -Wl,-soname,libgccadd.so -Wl,--hash-style=sysv -o $(BUILD)/libgccadd.so tests/dyn/gccadd.c
+	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/cc-gccso tests/dyn/use_gcc.c $(BUILD)/libgccadd.so
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libadd.so tests/ldso/add.c
+	$(NASM) -f elf32 tests/dyn/start.asm -o $(BUILD)/dynstart.o
+	gcc -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx -O2 \
+	    -c tests/dyn/use_cc.c -o $(BUILD)/use_cc.o
+	ld -m elf_i386 -nostdlib -dynamic-linker /lib/ld.so --hash-style=sysv -Ttext-segment=0x40000000 \
+	    -o $(BUILD)/gcc-ccso $(BUILD)/dynstart.o $(BUILD)/use_cc.o $(BUILD)/libadd.so
+	gcc -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx -O2 \
+	    -Iuser/include -Iuser/lib -c tests/dyn/gfxuse.c -o $(BUILD)/gfxuse.o
+	ld $(DYNLDFLAGS) -o $(BUILD)/gfxuse $(BUILD)/user/crt0.o $(BUILD)/gfxuse.o -L$(BUILD)/user -lc -lgfx
+	python3 tests/dynsys_smoke.py
+
+ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUILD)/myfs
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libadd.so tests/ldso/add.c
+	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $(BUILD)/libb.so tests/ldso/b.c $(BUILD)/libadd.so
+	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
+	python3 tests/ldso_smoke.py
+
+.PHONY: all run debug clean cleandisk test programs install cctest jstest gfxtest vfstest largetest exttest gztest tartest cptest ldsotest dynsystest
 .SECONDARY:
 
 

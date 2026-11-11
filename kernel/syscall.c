@@ -34,8 +34,8 @@
 #include "account.h"
 #include "services.h"
 
-#define SBRK_LIMIT SHM_BASE         /* выше — общая память (ipc.c) и стек */
-#define PATH_MAX   128
+#define SBRK_LIMIT INTERP_BASE      /* выше кучи — загрузчик, общая память и стек */
+#define PATH_MAX   FS_PATH_MAX      /* 1023 символа пути и завершающий нуль */
 
 /* ---------------------------------------------------------------- проверки */
 
@@ -46,7 +46,7 @@ static bool user_buf_ok(u32 addr, u32 len, bool write) {
     for (u32 p = addr & ~(PAGE_SIZE - 1); p < addr + len; p += PAGE_SIZE) {
         u32 flags;
         if (!vmm_lookup(dir, p, NULL, &flags) || !(flags & PG_USER)) return false;
-        if (write && !(flags & PG_WRITE)) return false;
+        if (write && !(flags & (PG_WRITE | PG_COW))) return false;
     }
     return true;
 }
@@ -78,6 +78,7 @@ static int fs_errno(int e) {
     case FS_EROFS:        return -30;
     case FS_EBUSY:        return -16;
     case FS_EXDEV:        return -18;
+    case FS_ELOOP:        return -ELOOP;
     default:              return e < 0 ? -EIO : e;
     }
 }
@@ -336,16 +337,13 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
     return 1;
 }
 
-static int sys_stat(u32 upath, u32 uout) {
-    char path[PATH_MAX];
-    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
-    if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
+static int stat_path(const char *path, struct dirent_info *out, bool follow) {
     u32 ino;
     struct fs_stat st;
-    int r = fs_resolve(task_process(task_current())->cwd, path, &ino);
+    int r = follow ? fs_resolve(task_process(task_current())->cwd, path, &ino)
+                   : fs_resolve_nofollow(task_process(task_current())->cwd, path, &ino);
     if (!r) r = fs_stat(ino, &st);
     if (r) return fs_errno(r);
-    struct dirent_info *out = (struct dirent_info *)uout;
     const char *b = path + strlen(path);
     while (b > path && b[-1] != '/') b--;
     memset(out->name, 0, sizeof(out->name));
@@ -353,6 +351,33 @@ static int sys_stat(u32 upath, u32 uout) {
     out->type = st.type;
     out->size = st.size;
     return 0;
+}
+
+static int sys_stat(u32 upath, u32 uout) {
+    char path[PATH_MAX];
+    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
+    return stat_path(path, (struct dirent_info *)uout, true);
+}
+
+static int sys_lstat(u32 upath, u32 uout) {
+    char path[PATH_MAX];
+    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
+    return stat_path(path, (struct dirent_info *)uout, false);
+}
+
+static int sys_symlink(u32 utarget, u32 ulink) {
+    char target[PATH_MAX], link[PATH_MAX];
+    if (!user_str(utarget, target, sizeof(target)) || !user_str(ulink, link, sizeof(link))) return -EFAULT;
+    return fs_errno(fs_symlink(task_process(task_current())->cwd, target, link));
+}
+
+static int sys_readlink(u32 upath, u32 ubuf, u32 len) {
+    char path[PATH_MAX];
+    if (!user_str(upath, path, sizeof(path))) return -EFAULT;
+    if (!len || !user_buf_ok(ubuf, len, true)) return -EFAULT;
+    return fs_errno(fs_readlink(task_process(task_current())->cwd, path, (char *)ubuf, len));
 }
 
 static int sys_mkdir(u32 upath) {
@@ -365,7 +390,7 @@ static int sys_unlink(u32 upath) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
     u32 ino;
-    if(!fs_resolve(task_process(task_current())->cwd,path,&ino) && account_private(ino)) return -EPERM;
+    if(!fs_resolve_nofollow(task_process(task_current())->cwd,path,&ino) && account_private(ino)) return -EPERM;
     return fs_errno(fs_remove(task_process(task_current())->cwd, path));
 }
 
@@ -378,10 +403,10 @@ static int sys_rename(u32 uold, u32 unew) {
     u32 source, target, etc;
     u32 cwd = task_process(task_current())->cwd;
     int result;
-    if (!fs_resolve(cwd, oldp, &source) &&
+    if (!fs_resolve_nofollow(cwd, oldp, &source) &&
         (account_private(source) ||
          (!fs_resolve(FS_ROOT, "/etc", &etc) && source == etc))) result = -EPERM;
-    else if (!fs_resolve(cwd, newp, &target) && account_private(target)) result = -EPERM;
+    else if (!fs_resolve_nofollow(cwd, newp, &target) && account_private(target)) result = -EPERM;
     else result = fs_errno(fs_rename(cwd, oldp, newp));
     fs_namespace_unlock();
     return result;
@@ -625,6 +650,115 @@ static u32 sys_sbrk(i32 inc) {
     }
     task_process(t)->brk = new;
     return old;
+}
+
+/* mmap: анонимные страницы и частная копия файла. Окно — между общей памятью и стеком. */
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+#define MAP_SHARED 1
+#define MAP_PRIVATE 2
+#define MAP_ANON   0x20
+#define MMAP_MAX   (64u * 1024 * 1024)
+
+struct mmap_args { u32 addr, len, prot, flags, fd, off; };
+
+static bool mmap_range_free(u32 dir, u32 start, u32 end) {
+    for (u32 va = start; va < end; va += PAGE_SIZE)
+        if (vmm_lookup(dir, va, NULL, NULL)) return false;
+    return true;
+}
+
+static u32 mmap_hole(u32 dir, u32 len) {
+    for (u32 va = MMAP_BASE; va <= MMAP_END - len; va += PAGE_SIZE)
+        if (mmap_range_free(dir, va, va + len)) return va;
+    return 0;
+}
+
+static u32 prot_to_pg(u32 prot, u32 frame) {
+    u32 flags = 0;
+    if (prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) flags |= PG_USER;
+    if (prot & PROT_WRITE) flags |= pmm_refs(frame) > 1 ? PG_COW : PG_WRITE;
+    return flags;
+}
+
+static void mmap_rollback(struct task *t, u32 va, u32 n) {
+    for (u32 i = 0; i < n; i++) {
+        u32 frame = vmm_unmap_in(t->page_dir, va + i * PAGE_SIZE);
+        if (frame) { pmm_free(frame); if (t->user_pages) t->user_pages--; }
+    }
+}
+
+static int sys_mmap(u32 uargs) {
+    struct mmap_args a;
+    struct task *t = task_current();
+    if (!user_buf_ok(uargs, sizeof(a), false)) return -EFAULT;
+    memcpy(&a, (const void *)uargs, sizeof(a));
+    if (!a.len || a.len > MMAP_MAX) return -EINVAL;
+    if ((a.flags & MAP_PRIVATE) == 0 || (a.flags & MAP_SHARED)) return -EINVAL;
+    u32 len = (a.len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    bool anon = (a.flags & MAP_ANON) != 0;
+    struct file *f = NULL;
+    if (!anon) {
+        if (a.off & (PAGE_SIZE - 1)) return -EINVAL;
+        f = get_fd(a.fd);
+        if (!f || f->type != FILE_DISK || !(f->mode & FMODE_READ)) return -EBADF;
+    }
+    u32 va;
+    if (!a.addr) {
+        va = mmap_hole(t->page_dir, len);
+        if (!va) return -ENOMEM;
+    } else {
+        if (a.addr & (PAGE_SIZE - 1) || a.addr < MMAP_BASE || a.addr > MMAP_END - len) return -EINVAL;
+        if (!mmap_range_free(t->page_dir, a.addr, a.addr + len)) return -EINVAL;
+        va = a.addr;
+    }
+    u32 n = len / PAGE_SIZE;
+    for (u32 i = 0; i < n; i++) {
+        u32 frame = pmm_alloc();
+        if (!frame) { mmap_rollback(t, va, i); return -ENOMEM; }
+        memset((void *)frame, 0, PAGE_SIZE);
+        if (f) {
+            int rd = fs_read(f->ino, a.off + i * PAGE_SIZE, (void *)frame, PAGE_SIZE);
+            if (rd < 0) { pmm_free(frame); mmap_rollback(t, va, i); return -EIO; }
+        }
+        if (vmm_map_in(t->page_dir, va + i * PAGE_SIZE, frame, prot_to_pg(a.prot, frame))) {
+            pmm_free(frame);
+            mmap_rollback(t, va, i);
+            return -ENOMEM;
+        }
+        t->user_pages++;
+    }
+    return (int)va;
+}
+
+static int sys_munmap(u32 addr, u32 len) {
+    struct task *t = task_current();
+    if (!len || len > MMAP_MAX) return -EINVAL;
+    u32 end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (addr & (PAGE_SIZE - 1) || addr < MMAP_BASE || end < addr || end > MMAP_END) return -EINVAL;
+    for (u32 va = addr; va < end; va += PAGE_SIZE) {
+        u32 frame = vmm_unmap_in(t->page_dir, va);
+        if (!frame) continue;
+        pmm_free(frame);
+        if (t->user_pages) t->user_pages--;
+    }
+    return 0;
+}
+
+static int sys_mprotect(u32 addr, u32 len, u32 prot) {
+    struct task *t = task_current();
+    if (!len || len > MMAP_MAX) return -EINVAL;
+    if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
+    u32 end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+    if (addr & (PAGE_SIZE - 1) || addr < MMAP_BASE || end < addr || end > MMAP_END) return -EINVAL;
+    for (u32 va = addr; va < end; va += PAGE_SIZE) {
+        u32 frame, flags;
+        if (!vmm_lookup(t->page_dir, va, &frame, &flags)) return -ENOMEM;
+        frame &= ~(PAGE_SIZE - 1);
+        if (vmm_map_in(t->page_dir, va, frame, prot_to_pg(prot, frame))) return -ENOMEM;
+    }
+    return 0;
 }
 
 
@@ -909,6 +1043,12 @@ void syscall_dispatch(struct regs *r) {
     case SYS_MKDIR:   ret = sys_mkdir(a); break;
     case SYS_UNLINK:  ret = sys_unlink(a); break;
     case SYS_RENAME:  ret = sys_rename(a, b); break;
+    case SYS_MMAP:    ret = sys_mmap(a); break;
+    case SYS_MUNMAP:  ret = sys_munmap(a, b); break;
+    case SYS_MPROTECT: ret = sys_mprotect(a, b, c); break;
+    case SYS_SYMLINK:  ret = sys_symlink(a, b); break;
+    case SYS_READLINK: ret = sys_readlink(a, b, c); break;
+    case SYS_LSTAT:    ret = sys_lstat(a, b); break;
     case SYS_PS:      ret = sys_ps(a, b); break;
     case SYS_GETPPID: ret = task_process(t)->parent; break;
     case SYS_TTYMODE: {

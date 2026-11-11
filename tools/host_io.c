@@ -3,6 +3,8 @@
  * заголовки ядра MyOS (у них свой size_t, вместе их не скрестить). */
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
 
 static FILE *img;
 static unsigned img_sectors;
@@ -27,7 +29,31 @@ int host_write_sector(unsigned lba, const void *buf) {
     return fwrite(buf, 1, 512, img) == 512 ? 0 : -1;
 }
 
-void host_close_image(void) { if (img) fclose(img); }
+void host_close_image(void) { if (img) fclose(img); img = NULL; }
+
+/* новый пустой образ: его размер и станет размером ФС при форматировании */
+int host_create_image(const char *path, unsigned sectors) {
+    FILE *f = fopen(path, "w+b");
+    if (!f) return -1;
+    if (ftruncate(fileno(f), (off_t)sectors * 512)) { fclose(f); return -1; }
+    fclose(f);
+    return host_open_image(path);
+}
+
+void host_remove_file(const char *path) { remove(path); }
+
+/* подменить образ новым; прежний остаётся рядом как path.bak */
+int host_replace_image(const char *path, const char *neu) {
+    char bak[4096];
+    size_t n = strlen(path);
+    if (n + 5 >= sizeof(bak)) return -1;
+    memcpy(bak, path, n);
+    memcpy(bak + n, ".bak", 5);
+    remove(bak);
+    if (rename(path, bak)) return -1;
+    if (rename(neu, path)) { rename(bak, path); return -1; }
+    return 0;
+}
 
 /* прочитать файл компьютера целиком; *len = размер */
 void *host_load_file(const char *path, unsigned *len) {
@@ -45,3 +71,11 @@ void *host_load_file(const char *path, unsigned *len) {
 
 void host_print(const char *s) { fputs(s, stdout); }
 void host_error(const char *s) { fputs(s, stderr); }
+
+void *host_alloc(unsigned n) {
+    void *p = malloc(n ? n : 1);
+    if (!p) { host_error("myfs: out of memory\n"); exit(1); }
+    return p;
+}
+
+void host_free(void *p) { free(p); }

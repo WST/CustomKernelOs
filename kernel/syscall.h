@@ -70,17 +70,26 @@ enum {
     SYS_MKFS,
     SYS_PARTCTL,
     SYS_ACCOUNT,
-    SYS_CLIPBOARD,
-    SYS_LSEEK,
-    SYS_FSTAT,
-    SYS_RENAME,
-    SYS_UNITCTL,
-    SYS_SYSINFO,
-    SYS_SPAWN,
-    SYS_CPUINFO,
+    SYS_CLIPBOARD,      /* clipboard(0 прочитать | 1 записать, buf, len) */
+    SYS_LSEEK,          /* lseek(fd, offset, whence) -> новое смещение */
+    SYS_FSTAT,          /* fstat(fd, &{mode, size}) */
+    SYS_RENAME,         /* rename(old, new) */
+    SYS_UNITCTL,        /* unitctl(op, name|index, &info): службы */
+    SYS_MMAP,           /* mmap(&{addr,len,prot,flags,fd,off}) -> адрес */
+    SYS_MUNMAP,         /* munmap(addr, len) */
+    SYS_MPROTECT,       /* mprotect(addr, len, prot) */
+    SYS_SYMLINK,        /* symlink(target, linkpath) */
+    SYS_READLINK,       /* readlink(path, buf, len) -> байт, без нуля */
+    SYS_LSTAT,          /* lstat(path, &dirent_info): сама ссылка, не цель */
+    SYS_SYSINFO,        /* sysinfo(&system_info, size) */
+    SYS_SPAWN,          /* spawn(path, argv, stdin_fd) */
+    SYS_CPUINFO,        /* cpuinfo(&cpu_info, capacity) */
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX,
     SYS_COUNT
 };
+/* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
+_Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 
 /* коды ошибок (как в Linux) */
 #define EPERM        1
@@ -109,6 +118,7 @@ enum {
 #define ENAMETOOLONG 36
 #define ENOSYS       38
 #define ENOTEMPTY    39
+#define ELOOP        40
 #define EADDRINUSE   98
 #define ENETDOWN     100
 #define ECONNRESET   104
@@ -123,7 +133,7 @@ enum {
 
 /* для readdir */
 struct dirent_info {
-    char name[28];
+    char name[256];                 /* имя до 255 символов и нуль */
     unsigned type;                  /* 1 файл, 2 каталог */
     unsigned size;
 };
