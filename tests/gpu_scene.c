@@ -7,14 +7,17 @@ static void check(int condition, const char *reason) {
     if (!condition) { gfx_close(); printf("GPUSCENE FAIL %s\n", reason); exit(1); }
 }
 
-static void compare(const char *name) {
+static void compare_frame(const char *name,bool repair) {
     compose(mkrect(0, 0, SW, SH));
     color_t *reference = malloc(SW * SH * 4), *actual = malloc(SW * SH * 4);
     check(reference && actual, "pixel allocations");
     memcpy(reference, back, SW * SH * 4);
-    check(gfx_frame_begin() == 0, "frame begin");
-    check(gpu_compose(mkrect(0, 0, SW, SH)), "compose");
-    check(gfx_frame_end() == 0 && gfx_readback(actual) == 0, "frame/readback");
+    if(repair) {
+        check(gfx_frame_begin() == 0, "frame begin");
+        check(gpu_compose(mkrect(0, 0, SW, SH)), "compose");
+        check(gfx_frame_end() == 0,"frame end");
+    }
+    check(gfx_readback(actual) == 0, "readback");
     int different = 0, worst = 0;
     for (int i = 0; i < SW * SH; i++) {
         int delta = 0;
@@ -29,10 +32,22 @@ static void compare(const char *name) {
     free(reference); free(actual);
     check(different == 0, "software/GPU pixels disagree");
 }
+static void compare(const char *name) { compare_frame(name,true); }
+static void effect_run(const char *name) {
+    int frames=0;unsigned began=ticks();
+    while(motions_active() && ticks()-began<2000) {
+        int wait=motion_wait();if(wait>0)sleep_ms(wait);
+        gfx_frame_begin();motions_tick();flush();gfx_frame_end();frames++;
+    }
+    check(!motions_active() && frames>=3,"animation cadence/completion");
+    printf("GPUSCENE EFFECT %s frames %d\n",name,frames);
+    compare_frame(name,false);
+}
 
-int main(void) {
+int main(int argc,char **argv) {
+    (void)argv;
     check(gfx_open() == 0, "open");
-    check(gfx_set_mode(1024, 768) == 0, "mode"); gfx_check_mode();
+    check(gfx_set_mode(argc>1?2560:1024, argc>1?1600:768) == 0, "mode"); gfx_check_mode();
     SW = gfx_w; SH = gfx_h; back = gfx_buf;
     gpu_reset(); check(gpu_scene, "GPU compositor unavailable");
     wallpaper = malloc(SW * SH * 4); check(wallpaper != NULL, "wallpaper");
@@ -52,6 +67,13 @@ int main(void) {
         zorder[k] = k;
     }
     compare("initial");
+    printf("SMOOTHBENCH DRAG BEGIN\n");
+    unsigned drag_begin=ticks();
+    for(int frame=0;frame<100;frame++) {
+        gfx_frame_begin();move_window(&wins[1],380+(frame&1)*16,260+(frame&1)*8);
+        flush();gfx_frame_end();
+    }
+    printf("SMOOTHBENCH DRAG END %u ms\n",ticks()-drag_begin);
     wins[1].x = -35; wins[1].y = 190;
     compare("clipped move");
     struct win *w = &wins[0];
@@ -88,6 +110,16 @@ int main(void) {
     unsigned gpu_ms = ticks() - begin;
     printf("GPUSCENE GPU END\n");
     printf("GPUSCENE BENCH 100 frames software %u ms GPU %u ms\n", cpu_ms, gpu_ms);
+    effects_enabled=true;
+    struct rect to=window_rect(w),from=to;
+    from.x+=8;from.y+=8;from.w-=16;from.h-=16;
+    motion_start(w,from,to,0,255,150);effect_run("animated open");
+    minimize(0);check(wins[0].motion,"minimize animation started");effect_run("animated minimize");
+    restore(0);effect_run("animated restore");
+    maximize(0,true);effect_run("animated maximize");
+    maximize(0,false);effect_run("animated unmaximize");
+    remove_window(0);check(wins[0].used && wins[0].closing,"close defers resource release");
+    effect_run("animated close");check(!wins[0].used,"close releases window");
     for (int k = 0; k < 2; k++) free(wins[k].px);
     free(wallpaper); gfx_close(); printf("GPUSCENE PASS\n");
     return 0;

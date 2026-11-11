@@ -81,6 +81,10 @@ int gfx_surface_blit(int slot, int sx, int sy, int dx, int dy, int w, int h) {
     int a[7] = { slot, sx, sy, dx, dy, w, h };
     return sc(SYS_GFX_ACCEL, 6, (int)a);
 }
+int gfx_surface_scaled(int slot,int x,int y,int w,int h,int cx,int cy,int cw,int ch,int opacity) {
+    int a[10]={slot,x,y,w,h,cx,cy,cw,ch,opacity};
+    return sc(SYS_GFX_ACCEL,9,(int)a);
+}
 int gfx_readback(color_t *pixels) { return sc(SYS_GFX_ACCEL, 7, (int)pixels); }
 int gfx_frame_begin(void) { return sc(SYS_GFX_ACCEL, 3, 0); }
 int gfx_frame_end(void) { return sc(SYS_GFX_ACCEL, 4, 0); }

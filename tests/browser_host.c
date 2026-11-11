@@ -69,6 +69,7 @@ int browser_host_fetch(const char *url, char *location, int loc_max, bool *is_ht
 /* -------- «система» */
 unsigned ticks(void) { long ts[2]; clock_gettime(1, ts); return ts[0] * 1000 + ts[1] / 1000000; }
 void sleep_ms(unsigned ms) { usleep(ms * 1000); }
+void yield(void) { usleep(0); }
 int get_time(struct datetime *t) { memset(t, 0, sizeof(*t)); t->year = 2026; t->month = 11; t->day = 6; t->hour = 12; return 0; }
 int __syscall(int n, int a, int b, int c) { (void)n; (void)a; (void)b; (void)c; return -1; }
 int getpid(void) { return 7; }
@@ -196,7 +197,10 @@ static int clipboard_browser_test(void) {
     return compat_failures ? 1 : 0;
 }
 
-int main(int argc, char **argv) {
+#ifndef BROWSER_HOST_MAIN
+#define BROWSER_HOST_MAIN main
+#endif
+int BROWSER_HOST_MAIN(int argc, char **argv) {
     if(argc>2 && !strcmp(argv[1],"--net")){host_net=1;argc--;argv++;}
     if (argc < 2) { printf("usage: browser-host page.html commands...\n"); return 1; }
     font_set_dir("fonts");

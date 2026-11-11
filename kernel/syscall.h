@@ -159,6 +159,7 @@ struct gfx_info2 {
 };
 #define GA_COPY 1                   /* args: sx, sy, dx, dy, w, h */
 #define GA_SURFACE_UPDATE 8
+#define GA_SURFACE_SCALED 9
 #define GA_READBACK 7
 #define GA_SURFACE_UPLOAD 5
 #define GA_SURFACE_BLIT 6

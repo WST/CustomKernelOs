@@ -12,7 +12,7 @@ elf = executable.read_bytes()
 assert elf[:5] == b'\x7fELF\x01' and elf[18:20] == b'\x03\x00'
 image = build / 'clipboard-smoke.img'
 with image.open('wb') as fresh:
-    fresh.truncate(4 * 1024 * 1024)
+    fresh.truncate(64 * 1024 * 1024)
 subprocess.run(['make', 'install', 'DISK=' + str(image)], check=True)
 subprocess.run(['build/myfs', str(image), 'put', str(executable), '/bin/clipboardcheck'], check=True)
 log = build / 'clipboard-smoke.log'

@@ -39,8 +39,9 @@ static bool init_quad(void) {
         "MOV OUT[1].zw, IMM[1].xxxx\nEND\n";
     static const char fragment[] =
         "FRAG\nDCL IN[0], GENERIC[0], PERSPECTIVE\nDCL OUT[0], COLOR\n"
-        "DCL SAMP[0]\nDCL SVIEW[0], 2D, FLOAT\n"
-        "TEX OUT[0], IN[0], SAMP[0], 2D\nEND\n";
+        "DCL SAMP[0]\nDCL SVIEW[0], 2D, FLOAT\nDCL CONST[0]\nDCL TEMP[0]\n"
+        "TEX TEMP[0], IN[0], SAMP[0], 2D\nMOV OUT[0], TEMP[0]\n"
+        "MUL OUT[0].w, TEMP[0].wwww, CONST[0].xxxx\nEND\n";
     stream_words = 0;
     u32 *p = emit(1, 1, 11); p[1] = 100;
     /* straight-alpha source-over, independent alpha equation, all channels */
@@ -75,7 +76,7 @@ static u32 f32_ratio(int numerator, u32 denominator) {
     return sign | ((u32)(exponent + 127) << 23) | mantissa;
 }
 
-static bool alpha_blit(u32 src, u32 sw, u32 sh, int sx, int sy, int dx, int dy, int w, int h) {
+static bool alpha_blit(u32 src, u32 sw, u32 sh, int sx, int sy, int dx, int dy, int w, int h,u32 format,u32 opacity) {
     if (!quad_ready && !init_quad()) return false;
     stream_words = 0;
     u32 *p = emit(1, 8, 5); p[1] = 108; p[2] = back; p[3] = FORMAT;
@@ -83,7 +84,7 @@ static bool alpha_blit(u32 src, u32 sw, u32 sh, int sx, int sy, int dx, int dy, 
     p = emit(4, 0, 7);
     p[2] = p[5] = f32_ratio(width, 2); p[3] = p[6] = f32_ratio(height, 2);
     p[4] = p[7] = 0x3f000000; /* Z scale/translate */
-    p = emit(1, 6, 6); p[1] = 107; p[2] = src; p[3] = 1 | (2u << 24);
+    p = emit(1, 6, 6); p[1] = 107; p[2] = src; p[3] = format | (2u << 24);
     p[6] = 0 | (1u << 3) | (2u << 6) | (3u << 9); /* identity RGBA swizzle */
     p = emit(10, 0, 3); p[1] = 1; p[3] = 107;
     p = emit(12, 0, 10); /* VS constant slot 0: clip bounds, then UV bounds */
@@ -93,6 +94,7 @@ static bool alpha_blit(u32 src, u32 sw, u32 sh, int sx, int sy, int dx, int dy, 
     p[6] = f32_ratio((int)height - 2 * (dy + h), height);
     p[7] = f32_ratio(sx, sw); p[8] = f32_ratio(sh - sy, sh);
     p[9] = f32_ratio(sx + w, sw); p[10] = f32_ratio(sh - sy - h, sh);
+    p = emit(12,0,6); p[1]=1; p[3]=f32_ratio(opacity,255); /* fragment constant slot 0 */
     p = emit(8, 0, 12); p[2] = 4; p[3] = 5; p[5] = 1; p[11] = 3; /* triangle strip */
     emit(3, 6, 1)[1] = 107;
     emit(3, 8, 1)[1] = 108;

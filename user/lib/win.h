@@ -11,19 +11,29 @@
  *       if (e.type == EV_KEY) ...                 e.key — как у readkey()
  *   }
  *
- * Как устроено: пиксели окна лежат в общей памяти (shm), которую видит и
- * программа, и рабочий стол. Программа рисует, потом сообщением говорит
- * «обнови такой-то прямоугольник», а рабочий стол копирует его на экран
- * поверх обоев и под другими окнами. События идут обратно тоже сообщениями. */
+ * Программа рисует в своём буфере. win_update публикует готовые пиксели в shm;
+ * рабочий стол сохраняет их снимок и подтверждает чтение, прежде чем shm можно
+ * использовать снова. Незавершённая перерисовка не видна рабочему столу. */
 #ifndef WIN_H
 #define WIN_H
 #include "gfx.h"
+
+/* Negotiated through WM_CREATE.d / WM_CREATED.b and WM_SETBUF.data. The
+ * producer owns submitted; only the desktop advances consumed after copying. */
+#define WM_BUFFERED 0x57424631u
+#define WM_FRAME_BYTES 64
+struct win_frame {
+    volatile unsigned submitted, consumed;
+};
 
 typedef struct window {
     int id;                         /* номер у рабочего стола */
     int w, h;                       /* размер области рисования */
     color_t *pixels;                /* w * h пикселей */
     int shm;
+    color_t *shared;                /* immutable while a submitted frame is pending */
+    struct win_frame *frame;       /* NULL for a legacy desktop */
+    bool full_update;              /* retry damage after an IPC send failure */
 } window;
 
 enum {
