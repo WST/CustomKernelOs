@@ -17,8 +17,11 @@ from run_qemu import select
 parser = argparse.ArgumentParser()
 parser.add_argument('--backend', choices=('gpu','tablet','virtio','ps2','all'),default='all')
 parser.add_argument('--latency-only',action='store_true',help='measure input wakeups without interactive pointer sampling')
+parser.add_argument('--render-load',action='store_true',help='measure latency while continuously presenting GPU frames')
 parser.add_argument('--boot',help='compare an older compatible kernel image')
 args = parser.parse_args()
+if args.render_load and args.backend != 'gpu':
+    parser.error('--render-load requires --backend gpu')
 b = Path('build/mouse-test')
 subprocess.run(['make', '-j4','BUILD='+str(b),str(b/'os.img'),str(b/'myfs'),str(b/'user/mousecheck'),str(b/'user/inputlatency')],check=True,stdout=subprocess.DEVNULL)
 original = Path(os.environ.get('MYOS_TEST_DISK','disk.img'))
@@ -124,7 +127,7 @@ for backend in (('gpu','tablet','virtio','ps2') if args.backend=='all' else (arg
                 button('wheel-down',True); button('wheel-down',False); assert state()[3]==start
                 key('q'); wait('MOUSECHECK PASS')
                 print('Pointer '+backend+': PASS (axes, buttons, wheel, bounds'+(', resize, queue reuse' if backend!='ps2' else '')+')',flush=True)
-            time.sleep(.2); key('ctrl-u'); send('inputlatency'+(' wake' if not args.boot else '')+'\n'); wait('LATENCY READY')
+            time.sleep(.2); key('ctrl-u'); send('inputlatency'+(' render' if args.render_load else ' wake' if not args.boot else '')+'\n'); wait('LATENCY READY')
             if not args.boot and backend != 'ps2': assert '(interrupts)' in output(),output()[:2000]
             if not args.boot and backend in ('gpu','virtio'): assert 'LATENCY HARDWARE CURSOR' in output(),output()[-1500:]
             time.sleep(.3)  # settle host window-resize events before measuring
@@ -147,7 +150,7 @@ for backend in (('gpu','tablet','virtio','ps2') if args.backend=='all' else (arg
             key('q'); wait('LATENCY PASS')
             if samples:
                 samples.sort()
-                print('Input latency '+backend+': median %.2f ms, p95 %.2f ms (host injection to owner)' % (
+                print('Input latency '+backend+(' under render load' if args.render_load else '')+': median %.2f ms, p95 %.2f ms (host injection to owner)' % (
                     samples[len(samples)//2],samples[int(len(samples)*.95)]),flush=True)
                 submitted_samples.sort()
                 print('QMP injection overhead: median %.2f ms' % submitted_samples[len(submitted_samples)//2],flush=True)

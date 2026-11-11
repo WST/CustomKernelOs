@@ -54,6 +54,12 @@ static u8 command[CMD_BYTES] __attribute__((aligned(4096)));
 static u8 batch[BATCH_BYTES] __attribute__((aligned(4096)));
 static u32 batch_words;
 static struct header response __attribute__((aligned(16)));
+/* Presentation owns immutable command/response storage until the host has
+ * acknowledged it. Only display flush is deferred; uploads stay fenced. */
+static u8 present_command[48] __attribute__((aligned(16)));
+static struct header present_response __attribute__((aligned(16)));
+static bool present_pending;
+static u64 present_fence;
 static struct pci_dev device;
 
 static u32 pciread(u32 off) { return pci_read(device.bus, device.dev, device.func, off); }
@@ -79,31 +85,55 @@ static void *map_cap(u32 cap) {
     return (void *)(virt + (addr & 4095));
 }
 
-static bool send_now(u8 *packet, u32 bytes, u32 type, u32 ctx) {
-    if (!live || bytes < sizeof(struct header) || bytes > CMD_BYTES) return false;
-    struct header *h = (void *)packet;
-    h->type = type; h->flags = 1; h->fence = ++fence; h->ctx = ctx; h->padding = 0;
-    response.type = 0;
-    u32 cmd_phys, resp_phys;
-    if (!vmm_translate((u32)packet, &cmd_phys) || !vmm_translate((u32)&response, &resp_phys)) return false;
-    descs[0] = (struct desc){ cmd_phys, bytes, 1, 1 };
-    descs[1] = (struct desc){ resp_phys, sizeof(response), 2, 0 };
-    avail[2 + (qindex % QN)] = 0;
-    BARRIER();
-    avail[1] = ++qindex;
-    BARRIER();
-    *notify = 0;
+static int control_complete(const struct header *reply,u64 expected,bool block) {
+    if(!block && used[1]!=qindex)return 0;
     /* No interrupts are required, including during early boot. The bound also
      * prevents a failed host GPU from trapping the kernel in an infinite wait. */
     u32 spins = 100000000;
-    while (used[1] != qindex && --spins) __asm__ volatile ("pause" : : : "memory");
-    BARRIER();
-    if (!spins || response.type != 0x1100 || response.fence != h->fence) {
-        error = spins ? response.type : 0xffff;
-        if (!spins) live = false;
-        return false;
+    /* Some VirGL hosts retire fences on a coarse timer if the guest goes
+     * quiet after submitting. Re-notify the unchanged queue a bounded number
+     * of times to let them observe a completed fence promptly. Descriptors,
+     * response storage and upload backing remain pinned until completion. */
+    u32 gap=1024,until_poll=gap,rechecks=0;
+    while (used[1] != qindex && --spins) {
+        __asm__ volatile ("pause" : : : "memory");
+        if(virgl && rechecks<32 && !--until_poll) {
+            BARRIER();*notify=0;rechecks++;
+            if(gap<16384)gap*=2;
+            until_poll=gap;
+        }
     }
+    BARRIER();
+    if (!spins || reply->type != 0x1100 || reply->fence != expected) {
+        error = spins ? reply->type : 0xffff;
+        if (!spins) live = false;
+        return -1;
+    }
+    return 1;
+}
+static bool present_complete(bool block) {
+    if(!present_pending)return true;
+    int result=control_complete(&present_response,present_fence,block);
+    if(result)present_pending=false;
+    if(result<0) { live=false;return false; }
     return true;
+}
+static bool send_now(u8 *packet, u32 bytes, u32 type, u32 ctx) {
+    if (!live || bytes < sizeof(struct header) || bytes > CMD_BYTES || !present_complete(true)) return false;
+    bool async=virgl && type==0x104 && bytes==sizeof(present_command);
+    if(async) { memcpy(present_command,packet,bytes);packet=present_command; }
+    struct header *h = (void *)packet;
+    h->type = type; h->flags = 1; h->fence = ++fence; h->ctx = ctx; h->padding = 0;
+    struct header *reply=async?&present_response:&response;
+    reply->type = 0;
+    u32 cmd_phys, resp_phys;
+    if (!vmm_translate((u32)packet, &cmd_phys) || !vmm_translate((u32)reply, &resp_phys)) return false;
+    descs[0] = (struct desc){ cmd_phys, bytes, 1, 1 };
+    descs[1] = (struct desc){ resp_phys, sizeof(*reply), 2, 0 };
+    avail[2 + (qindex % QN)] = 0;
+    BARRIER();avail[1] = ++qindex;BARRIER();*notify = 0;
+    if(async) { present_fence=h->fence;present_pending=true;return true; }
+    return control_complete(reply,h->fence,true)>0;
 }
 
 /* Batch trusted draw/blit streams between transfers and scanout changes.
@@ -363,6 +393,7 @@ bool vgpu_upload(int x, int y, int w, int h) {
 
 bool vgpu_commit(void) {
     if (!live) return false;
+    if(!present_complete(false))return false;
     if (!changed) return true;
     if (!scanout(virgl ? back : upload) || !flush(virgl ? back : upload)) return false;
     if (virgl) {

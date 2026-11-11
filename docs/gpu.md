@@ -142,9 +142,29 @@ budget instead of a 100 ms minimum.
 
 These timings target consistent motion, not guaranteed monitor refresh or
 Windows/macOS performance. On this WSLg/D3D12 setup, the 2560x1600 two-window
-drag benchmark remains approximately 1.93–1.97 s for 100 frames (~51–52 guest frames/s).
-The transitions and reduced rasterization remove jumps and pauses without
-claiming a higher measured throughput for that scene.
+drag benchmark originally took approximately 1.93–1.97 s for 100 frames.
+After reducing driver fence stalls, the same benchmark took 1.18 s (~85 guest
+frames/s). These are guest submissions, not a measurement of monitor refresh.
+
+The control queue retains fence validation for every command. While waiting,
+VirGL queues receive bounded, increasingly spaced notifications of the unchanged
+queue. This lets hosts such as QEMU 10.2.1 poll already-signaled fences without
+waiting for their 10 ms fence timer; no descriptor is submitted twice. In a
+diagnostic run this reduced average draw-submit waits from 11.8 to 4.1 ms.
+Display flush alone can remain in flight after frame end, with its own immutable
+command and response buffers. The next control submission drains and validates
+that fence before reusing queue descriptors. Uploads, readbacks and resource
+changes remain synchronous, and software/VirtIO 2D presentation is unchanged.
+This releases the kernel to process input while the host finishes presentation.
+
+On the same host, input latency during continuous GPU presentation measured
+11.71 ms median / 13.92 ms p95, versus 13.04 / 26.21 ms before these changes
+(24 QMP samples; host injection to owner, including about 1.25 ms QMP overhead).
+Run-to-run host scheduling affects these results: a repeat during the main build
+measured 12.24 / 16.68 ms. The hardware renderer was Mesa D3D12 / AMD Radeon
+Graphics; KVM was unavailable in this WSL session, so
+guest CPU execution still used TCG. Browser layout and CPU drawing can remain
+limited by CPU emulation even when the GPU renderer is accelerated.
 
 `gfx_readback` reads the visible GPU scanout for an owning program, including
 while another frame is unfinished. QEMU's `screendump` cannot read SDL GL scanout,
@@ -181,6 +201,12 @@ intermediate scroll positions, endpoints, repeated/reversed input and clamping.
 texture bounds, opacity, split clipping, retained damage and every window
 transition against final software-reference pixels without repairing the frame
 before comparison. `SMOOTHBENCH` records 100 dirty-window moves for comparisons.
+
+`python3 tests/mouse_smoke.py --backend gpu --latency-only --render-load`
+measures input delivery while an owning application continuously presents GPU
+frames. The default latency test also checks that an unfinished frame stays
+invisible. Both use disposable images; `--boot` accepts an older compatible
+kernel for comparison with the same test application.
 
 ### Recorded hardware run
 
