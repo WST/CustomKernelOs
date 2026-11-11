@@ -1455,8 +1455,12 @@ int msg_recv(struct msg *m, int timeout_ms)     { return syscall3(SYS_MSG_RECV, 
 int shm_alloc(unsigned size)                    { return syscall3(SYS_SHM_ALLOC, (int)size, 0, 0); }
 void *shm_map(int id) {
     int r = syscall3(SYS_SHM_MAP, id, 0, 0);
-    return (r < 0 && r > -4096) ? NULL : (void *)r;  /* адреса общей памяти «отрицательные» как int */
+    if(r<0 && r>-4096){errno=-r;return NULL;}return (void*)r;  /* адреса общей памяти «отрицательные» как int */
 }
+int shm_grant(int id,int pid,unsigned rights){unsigned grant[2]={pid,rights};return syscall3(SYS_IPCCTL,1,id,(int)grant);}
+int shm_discard(int id){return syscall3(SYS_IPCCTL,2,id,0);}
+int shm_size(int id){return syscall3(SYS_IPCCTL,4,id,0);}
+int msg_allow(int pid,int allow){return syscall3(SYS_IPCCTL,3,pid,allow);}
 int shm_unmap(void *addr)                       { return syscall3(SYS_SHM_UNMAP, (int)addr, 0, 0); }
 int unitctl(unsigned op, const char *name, struct unit_info *out, unsigned index) {
     return syscall3(SYS_UNITCTL, op, op == UNIT_LIST ? (int)index : (int)name, (int)out);

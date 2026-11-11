@@ -54,8 +54,9 @@ window *win_create(const char *title, int w, int h) {
 
     int id = shm_alloc(WM_FRAME_BYTES + w * h * 4);
     if (id < 0) return NULL;
+    if(shm_grant(id,desktop,SHM_READ|SHM_WRITE)<0){shm_discard(id);return NULL;}
     color_t *px = shm_map(id);
-    if (!px) return NULL;
+    if (!px) { shm_discard(id); return NULL; }
 
     struct msg m;
     memset(&m, 0, sizeof(m));
@@ -171,8 +172,9 @@ static bool resize_buffer(window *w, int nw, int nh) {
     if (nw == w->w && nh == w->h) return false;
     int id = shm_alloc((w->frame ? WM_FRAME_BYTES : 0) + nw * nh * 4);
     if (id < 0) return false;
+    if(shm_grant(id,desktop,SHM_READ|SHM_WRITE)<0){shm_discard(id);return false;}
     void *mapping = shm_map(id);
-    if (!mapping) return false;
+    if (!mapping) { shm_discard(id); return false; }
     color_t *px = w->frame ? malloc(nw * nh * 4) : mapping;
     if (!px) { shm_unmap(mapping); return false; }
     color_t fill = w->pixels[w->w * w->h - 1];

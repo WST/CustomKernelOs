@@ -66,9 +66,11 @@ static int sys_sshctl(u32 op,u32 arg,u32 ptr) {
         if(!p->authenticated) return -EPERM;
         if(p->uid) for(int i=0;i<3;i++)
             if(v[i]!=-1 && (u32)v[i]!=p->uid && (u32)v[i]!=p->real_uid && (u32)v[i]!=p->saved_uid) return -EPERM;
+        u32 old_uid=p->uid,old_real=p->real_uid,old_saved=p->saved_uid;
         if(v[0]!=-1) p->real_uid=v[0];
         if(v[1]!=-1) p->uid=v[1];
         if(v[2]!=-1) p->saved_uid=v[2];
+        if(old_uid!=p->uid || old_real!=p->real_uid || old_saved!=p->saved_uid)ipc_identity_changed(p);
         return 0;
     }
     struct file *f=get_fd(arg);if(!f) return -EBADF;

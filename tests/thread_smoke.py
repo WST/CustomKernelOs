@@ -43,6 +43,10 @@ def run(cpus,extra=()):
                 except subprocess.TimeoutExpired:p.kill();p.wait()
                 (B/f'thread-{suffix}.log').write_text(text())
 if __name__=='__main__':
+    B.mkdir(exist_ok=True)
+    # Recreate only this disposable fixture; a full install exceeds 64 MiB.
+    with (B/'thread-base.img').open('wb') as image:
+        image.truncate(128 * 1024 * 1024)
     subprocess.run(['make','-j4','build/os.img','build/user/threadcheck','build/user/smpcheck','install','DISK=build/thread-base.img'],cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
     for name in ('threadcheck','smpcheck'):
         subprocess.run(['build/myfs','build/thread-base.img','put','build/user/'+name,'/bin/'+name],cwd=ROOT,check=True)

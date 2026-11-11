@@ -49,7 +49,8 @@ struct task {
     u32 uid;
     u32 real_uid, saved_uid, cloexec, fs_root;
     u32 gid, real_gid, saved_gid;
-    u32 creation_mask, fs_account_scope;
+    u32 creation_mask, fs_account_scope, ipc_epoch;
+    u32 user_stack_base,user_stack_size,guard_va,guard_flags;
     bool authenticated;
     u32   parent;                   /* id родителя (0 — ядро/сирота) */
     u32   pgid;                     /* группа процессов: Ctrl+C убивает всю группу */
@@ -77,7 +78,10 @@ bool  tasking_ready(void);
 struct task *task_current(void);
 struct task *task_process(struct task *t);
 bool task_has_threads(struct task *t);
-int task_thread_create(u32 entry, u32 fn, u32 arg, u32 sp);
+int task_thread_create(u32 entry,u32 fn,u32 arg,u32 sp,u32 base,u32 size);
+bool task_stack_busy(u32 dir,u32 start,u32 end);
+bool task_same_identity(struct task *a,struct task *b);
+bool task_can_control(struct task *caller,struct task *target);
 int task_thread_join(u32 tid, int *code);
 void task_set_pgid(struct task *p, u32 pgid);
 void task_exit_group(int code) __attribute__((noreturn));

@@ -791,6 +791,8 @@ $(BUILD)/user/terminalwindowcheck: $(BUILD)/user/terminalwindowcheck.o $(ULIB) u
 
 .PHONY: terminalwindowtest
 terminalwindowtest:
+	@mkdir -p build
+	python3 -c "from pathlib import Path; p = Path('build/terminal-resize-test.img'); f = p.open('wb'); f.truncate(128 * 1024 * 1024); f.close()"
 	$(MAKE) build/os.img build/user/terminalwindowcheck install DISK=build/terminal-resize-test.img
 	python3 tests/terminal_window_smoke.py
 
@@ -899,3 +901,7 @@ install-permissions: $(BUILD)/myfs
 	    $(BUILD)/myfs $(DISK) chown 0 0 $$key && $(BUILD)/myfs $(DISK) chmod 0600 $$key || exit 1; \
 	  fi; \
 	done
+
+.PHONY: isolationtest
+isolationtest:
+	python3 tests/isolation_smoke.py

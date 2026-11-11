@@ -5,6 +5,7 @@
 #include "string.h"
 #include "syscall.h"
 #include "timer.h"
+#include "ipc.h"
 #define ROR(x,n) (((x)>>(n))|((x)<<(32-(n))))
 static u32 be32(const u8 *p) { return (u32)p[0]<<24|(u32)p[1]<<16|(u32)p[2]<<8|p[3]; }
 static void put_be32(u8 *p,u32 x) { p[0]=x>>24;p[1]=x>>16;p[2]=x>>8;p[3]=x; }
@@ -140,14 +141,14 @@ int account_ctl(unsigned op,const char *name,const char *pw) {
     r=load();if(r) goto done;
     if(op==0) {r=bootstrap();goto done;}
     if(op==4) {r=task_process(t)->authenticated?(int)task_process(t)->uid:-EPERM;goto done;}
-    if(op==6) {task_process(t)->authenticated=false;task_process(t)->uid=0;r=0;goto done;}
+    if(op==6) {task_process(t)->authenticated=false;task_process(t)->uid=0;ipc_identity_changed(task_process(t));r=0;goto done;}
     int id=-1;for(int i=0;i<USERS;i++) if(!strcmp(db.users[i].name,name)) id=i;
     if(op==1 || op==10) {
         u8 h[32];struct entry *e=&db.users[id<0?0:id];digest(e,pw,h);unsigned diff=0;
         for(int i=0;i<32;i++) diff|=h[i]^e->hash[i];
         wipe(h,32);r=-EPERM;
         if(op==10) {r=id>=0 && !diff && !bootstrap()?0:-EPERM;goto done;}
-        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,id,&home); if(!r) {task_process(t)->cwd=home;task_process(t)->uid=id;task_process(t)->real_uid=id;task_process(t)->saved_uid=id;task_process(t)->gid=id;task_process(t)->real_gid=id;task_process(t)->saved_gid=id;task_process(t)->authenticated=true;} }
+        if(id>=0 && !diff && !bootstrap()) { u32 home; r=prepare_home(e->name,id,&home); if(!r) {task_process(t)->cwd=home;task_process(t)->uid=id;task_process(t)->real_uid=id;task_process(t)->saved_uid=id;task_process(t)->gid=id;task_process(t)->real_gid=id;task_process(t)->saved_gid=id;task_process(t)->authenticated=true;ipc_identity_changed(task_process(t));} }
         goto done;
     }
     if(op==8) {r=id>=0?id:-ENOENT;goto done;}

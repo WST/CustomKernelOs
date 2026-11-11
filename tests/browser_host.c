@@ -101,6 +101,10 @@ static struct msg q[64];
 static int nq;
 static void *shm[16];
 static int nshm;
+static unsigned shm_bytes[16];
+int shm_grant(int id,int pid,unsigned rights){(void)id;(void)pid;(void)rights;return 0;}
+int shm_discard(int id){(void)id;return 0;}
+int shm_size(int id){return id>=0 && id<nshm?(int)shm_bytes[id]:-1;}
 static void push(int type, int a, int b, int c, int d) {
     if (nq == 64) return;
     struct msg m;
@@ -109,7 +113,7 @@ static void push(int type, int a, int b, int c, int d) {
     q[nq++] = m;
 }
 int service_find(const char *n) { (void)n; return 1; }
-int shm_alloc(unsigned size) { if (nshm == 16) return -1; shm[nshm] = calloc(1, size); return nshm++; }
+int shm_alloc(unsigned size) { if (nshm == 16) return -1; shm_bytes[nshm]=size;shm[nshm] = calloc(1, size); return nshm++; }
 void *shm_map(int id) { return id >= 0 && id < nshm ? shm[id] : NULL; }
 int shm_unmap(void *p) { (void)p; return 0; }
 int msg_send(int pid, struct msg *m) {

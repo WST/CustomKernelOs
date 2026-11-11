@@ -62,6 +62,10 @@ def run(cpus,gui=False):
             err.close()
 
 if __name__=='__main__':
+    B.mkdir(exist_ok=True)
+    # Recreate only this disposable fixture; a full install exceeds 64 MiB.
+    with (B/'launch-base.img').open('wb') as image:
+        image.truncate(128 * 1024 * 1024)
     subprocess.run(['make','-j4','build/os.img','build/user/spawncheck','build/user/launchbench',
         'build/user/desktop_launchcheck','install','DISK=build/launch-base.img'],cwd=ROOT,check=True,stdout=subprocess.DEVNULL)
     for name in ('spawncheck','launchbench','desktop_launchcheck'):

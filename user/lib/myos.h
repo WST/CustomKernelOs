@@ -61,7 +61,7 @@ enum {
     SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
     SYS_SYMLINK, SYS_READLINK, SYS_LSTAT,
     SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
-    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ, SYS_SSHCTL, SYS_FSCTL
+    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ, SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
@@ -164,9 +164,11 @@ void  exit(int code) __attribute__((noreturn));
 int   write(int fd, const void *buf, size_t len);
 int   read(int fd, void *buf, size_t len);
 int   open(const char *path, int flags, ...);
+#ifndef MYOS_HOST_LIBC
 int myos_open_default(const char *path,int flags);
 #define MYOS_OPEN_PICK(_1,_2,_3,NAME,...) NAME
 #define open(...) MYOS_OPEN_PICK(__VA_ARGS__,open,myos_open_default)(__VA_ARGS__)
+#endif
 int   close(int fd);
 int   lseek(int fd, long offset, int whence);
 struct block_info { char name[12]; unsigned start,sectors,partition; };
@@ -212,9 +214,11 @@ int   chdir(const char *path);
 char *getcwd(char *buf, size_t len);   /* буфер или NULL; NULL, 0 — выделить строку */
 int   dirread(const char *path, int index, struct dirent_info *out);  /* 1 есть, 0 конец */
 int   mkdir(const char *path, ...);
+#ifndef MYOS_HOST_LIBC
 int myos_mkdir_default(const char *path);
 #define MYOS_MKDIR_PICK(_1,_2,NAME,...) NAME
-#define mkdir(...) MYOS_MKDIR_PICK(__VA_ARGS__,mkdir,myos_mkdir_default)(__VA_ARGS__)   /* второй аргумент — права, MyFS их не хранит */
+#define mkdir(...) MYOS_MKDIR_PICK(__VA_ARGS__,mkdir,myos_mkdir_default)(__VA_ARGS__)
+#endif
 int   unlink(const char *path);
 int   ps(struct proc_info *buf, int max);
 int   dirstat(const char *path, struct dirent_info *out);   /* 0 или -errno */
@@ -355,7 +359,8 @@ int  sockctl(int fd, int op, unsigned arg);
 /* ---- общение процессов ----
  * Сообщение — 64 байта: кому-то в почтовый ящик (msg_send), из своего — msg_recv.
  * Общая память: shm_alloc создаёт кусок, shm_map(id) делает его видимым в процессе
- * (в каждом процессе — по своему адресу). Так устроена оконная система (win.h). */
+ * (в каждом процессе — по своему адресу). Другому PID нужен явный shm_grant.
+ * Смена UID/exec инвалидирует старые grants; уже полученное отображение сохраняется. */
 struct msg {
     int  from;                      /* pid отправителя — заполняет ядро */
     int  type;
@@ -367,6 +372,13 @@ int   msg_recv(struct msg *m, int timeout_ms);      /* 0 — не ждать, -1
 int   shm_alloc(unsigned size);                     /* -> id */
 void *shm_map(int id);                              /* -> адрес или NULL */
 int   shm_unmap(void *addr);
+#define SHM_READ 1
+#define SHM_WRITE 2
+#define THREAD_STACK_MIN_BYTES 12288u
+int shm_grant(int id,int pid,unsigned rights); /* 0 revokes future attachments */
+int shm_discard(int id); /* release an allocation that has never been mapped */
+int shm_size(int id);
+int msg_allow(int pid,int allow); /* receiver authorizes a foreign sender */
 int   service_register(const char *name);           /* «я — служба name» */
 int   service_find(const char *name);               /* -> pid службы или 0 */
 

@@ -3,7 +3,7 @@
 #include "types.h"
 #include "idt.h"
 
-#define USER_STACK_PAGES 256            /* 1 MiB: recursive native C compilation (OpenSSH packet.c) */
+#include "paging.h" /* shared process stack and guard boundaries */
 #define PROC_MAX_ARGS    64             /* хватает на сборку lua одной командой cc */
 
 enum {

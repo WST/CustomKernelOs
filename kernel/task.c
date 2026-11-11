@@ -147,7 +147,24 @@ static void make_zombie(struct task *t, int code) {
     if (parent) task_wakeup(parent);          /* родителя, ждущего любого ребёнка (waitpid -1) */
 }
 
+bool task_same_identity(struct task *a,struct task *b) {
+    a=task_process(a);b=task_process(b);
+    return a && b && (a==b || (a->authenticated && b->authenticated && a->uid==b->uid));
+}
+bool task_can_control(struct task *caller,struct task *target) {
+    caller=task_process(caller);target=task_process(target);
+    return caller && target && (!caller->user || (caller->authenticated && !caller->uid) || task_same_identity(caller,target));
+}
+bool task_stack_busy(u32 dir,u32 start,u32 end) {
+    for(int i=0;i<MAX_TASKS;i++){struct task *t=tasks[i];
+        if(t && t->leader && t->page_dir==dir && t->guard_va && start<t->user_stack_base+t->user_stack_size && t->user_stack_base<end)return true;
+    }return false;
+}
 static void free_task(struct task *t) {
+    if(t->leader && t->guard_va){u32 frame;
+        if(vmm_lookup(t->page_dir,t->guard_va,&frame,NULL))vmm_map_in(t->page_dir,t->guard_va,frame,t->guard_flags);
+        t->guard_va=0;
+    }
     if (!t->leader) close_all_files(t);
     if (!t->leader && t->user && t->page_dir) { shm_release_all(t, t->page_dir); vmm_destroy_dir(t->page_dir); }
     msg_free(t);
@@ -409,14 +426,20 @@ struct task *task_alloc_user(const char *name, u32 page_dir, u32 entry, u32 user
 
 /* ---------------------------------------------------------------- завершение */
 
-int task_thread_create(u32 entry, u32 fn, u32 arg, u32 sp) {
+int task_thread_create(u32 entry,u32 fn,u32 arg,u32 sp,u32 base,u32 size) {
     struct task *p=task_process(current);
     if (p->state == TASK_ZOMBIE || p->kill_pending) return -EINTR;
+    if(task_stack_busy(p->page_dir,base,base+size))return -EBUSY;
+    u32 guard=(base+PAGE_SIZE-1)&~(PAGE_SIZE-1),frame,page_flags;
+    if(guard+2*PAGE_SIZE>base+size || !vmm_lookup(p->page_dir,guard,&frame,&page_flags))return -EINVAL;
     struct task *t=task_alloc_user(p->name,p->page_dir,entry,sp);
     if (!t) return -ENOMEM;
     /* The process owns these defaults; this thread owns no file references. */
     memset(t->fds,0,sizeof(t->fds));
     t->leader=p; t->parent=p->id; t->pgid=p->pgid; t->keep_zombie=true;
+    t->user_stack_base=base;t->user_stack_size=size;t->guard_va=guard;t->guard_flags=page_flags;
+    /* Keep the backing frame pinned, but make the full page inaccessible in ring 3. */
+    if(vmm_map_in(p->page_dir,guard,frame,page_flags&~PG_USER)){t->guard_va=0;free_task(t);return -ENOMEM;}
     u32 flags=irq_save();
     if (p->state==TASK_ZOMBIE || p->kill_pending || current->kill_pending) {
         free_task(t); irq_restore(flags); return -EINTR;

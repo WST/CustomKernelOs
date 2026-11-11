@@ -50,7 +50,7 @@ struct elf_phdr {
 #define AT_BASE   7
 #define AT_ENTRY  9
 
-#define STACK_BOTTOM (USER_TOP - USER_STACK_PAGES * PAGE_SIZE)
+#define STACK_BOTTOM USER_STACK_BOTTOM
 #define EXEC_MAX      (8u * 1024 * 1024)   /* больше в кучу ядра не читаем */
 #define EXEC_MAX_PHDR 64
 
@@ -451,7 +451,8 @@ int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
     u32 old = t->page_dir;
     t->page_dir = im.dir;
     vmm_switch(im.dir);                                  /* уходим со старого каталога... */
-    shm_release_all(t, old);                             /* общую память — отпустить, не освобождая */
+    shm_release_all(t, old);                             /* release mappings before destroying the old directory */
+    ipc_identity_changed(t);                             /* invalidate capabilities held by the old image */
     vmm_destroy_dir(old);                                /* ...и только теперь его освобождаем */
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;
