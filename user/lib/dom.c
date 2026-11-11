@@ -633,6 +633,23 @@ static void layout_ser(jsbuf *b, dnode *n, int depth) {
     if (!strcmp(t, "script") || !strcmp(t, "style") || !strcmp(t, "template") || !strcmp(t, "head")) return;
     if (!strcmp(t, "noscript") && dom_scripting) return;
     if (css_hidden(n)) return;                                 /* display:none, [hidden], спрятан стилями */
+    if (!strcmp(t,"svg")) {
+        jsbuf xml={0};html_serialize(&xml,n,1);
+        if(xml.n>=4) {
+            const struct dom_style *st=css_style(n);
+            char color[40];snprintf(color,sizeof(color),"<svg color=\"#%06x\"",st->color);
+            jsbuf colored={0};jb_adds(&colored,color);jb_add(&colored,xml.p+4,xml.n-4);
+            static const char alphabet[]="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            jb_adds(b,"<img src=\"data:image/svg+xml;base64,");
+            for(int i=0;i<colored.n;i+=3) {
+                unsigned v=(ju8)colored.p[i]<<16;if(i+1<colored.n)v|=(ju8)colored.p[i+1]<<8;if(i+2<colored.n)v|=(ju8)colored.p[i+2];
+                jb_addc(b,alphabet[v>>18]);jb_addc(b,alphabet[(v>>12)&63]);
+                jb_addc(b,i+1<colored.n?alphabet[(v>>6)&63]:'=');jb_addc(b,i+2<colored.n?alphabet[v&63]:'=');
+            }
+            char attr[50];snprintf(attr,sizeof(attr),"\" data-n=\"%d\">",n->id);jb_adds(b,attr);jb_free(&colored);
+        }
+        jb_free(&xml);return;
+    }
     char num[40];
     jb_addc(b, '<');
     jb_adds(b, t);
@@ -666,7 +683,9 @@ static void layout_ser(jsbuf *b, dnode *n, int depth) {
     jb_adds(b, num);
     jb_addc(b, '>');
     if (dn_is_void(t)) return;
-    if (strcmp(t, "textarea") && strcmp(t, "button")) for (dnode *k = n->first; k; k = k->next) layout_ser(b, k, depth + 1);
+    const struct dom_style *button_style=!strcmp(t,"button")?css_style(n):NULL;
+    int styled_button=button_style && dom_css && (button_style->flex_row || button_style->bg>=0 || button_style->padding[0] || button_style->padding[1] || button_style->padding[2] || button_style->padding[3]);
+    if (strcmp(t, "textarea") && (strcmp(t, "button") || styled_button)) for (dnode *k = n->first; k; k = k->next) layout_ser(b, k, depth + 1);
     jb_adds(b, "</");
     jb_adds(b, t);
     jb_addc(b, '>');

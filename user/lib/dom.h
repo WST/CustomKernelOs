@@ -43,6 +43,16 @@ struct dom_style {
     unsigned char bg_image;                     /* фон — картинка (её не показываем) */
     unsigned char border_box;
     unsigned char flex_wrap;
+    unsigned char justify, align_items, align_self; /* 0 start/stretch, 1 center, 2 end, 3 between, 4 around, 5 evenly */
+    short flex_grow, flex_shrink;                /* factors multiplied by 100 */
+    short height, min_height;                  /* -1 auto; pixels, not inherited */
+    short line_height;                         /* 0 normal; negative = unitless factor * -100 */
+    short grid_columns;                         /* repeat(N,minmax(0,1fr)) or equal fr tracks */
+    short radius;
+    unsigned char fixed;                        /* 1 absolute, 2 fixed, 3 relative */
+    unsigned char height_pct, position_pct, translate_pct;
+    short position_edge[4], translate_x, translate_y;
+    unsigned char clip_overflow;
     short column_gap, row_gap;
     int   color, bg;
     short font_px;
@@ -54,7 +64,10 @@ struct dom_style {
 const struct dom_style *dom_style(int id);
 extern int dom_view_width, dom_view_height;
 void dom_set_viewport(int width, int height);
+void dom_resize(void);                         /* dispatch resize after a window size change */
 int dom_layout_children(int id);
+int dom_layout_next(int parent, int previous);
+int dom_layout_intrinsic(int id, int (*measure)(const char *,int,int));
 int dom_module_scripts(void);
 
 void  dom_init(struct dom_host *h);

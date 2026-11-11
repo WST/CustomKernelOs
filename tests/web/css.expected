@@ -10,7 +10,7 @@
 [style #li2] inline-block color=1e1e1e bg=(000000) fs=16 align=0 m=0,16,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=5
 [style #title] block color=222222 bg=(000000) fs=48 bold align=0 m=32,0,32,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0 upper
 [style #h2] block color=1e1e1e bg=(000000) fs=16 align=0 m=0,0,0,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
-[style #lead] block color=008000 bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
+[style #lead] block color=00747a bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
 [style #note] block color=7d7d7d bg=(000000) fs=14 bold italic align=0 m=14,0,14,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
 [style #imp] block color=0000ff bg=(000000) fs=16 align=0 m=16,0,16,0 p=0,0,0,0 b=0/000000 w=-1 mw=-1 list=0
 [style #card] block color=1e1e1e bg=ffffff fs=16 align=0 m=0,0,0,0 p=16,16,16,16 b=1/dddddd w=-1 mw=-1 list=0

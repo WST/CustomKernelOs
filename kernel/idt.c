@@ -36,7 +36,7 @@ extern void irq0(void), irq1(void), irq2(void),  irq3(void),  irq4(void),
             irq5(void), irq6(void), irq7(void),  irq8(void),  irq9(void),
             irq10(void), irq11(void), irq12(void), irq13(void), irq14(void),
             irq15(void);
-extern void isr129(void), isr128(void);
+extern void isr129(void), isr128(void), isr130(void), isr131(void), isr255(void);
 
 static void (*const isr_stubs[32])(void) = {
     isr0, isr1, isr2, isr3, isr4, isr5, isr6, isr7, isr8, isr9, isr10,
@@ -90,12 +90,17 @@ void idt_init(void) {
     for (int i = 0; i < 32; i++) idt_set(i, isr_stubs[i]);
     pic_remap();
     for (int i = 0; i < 16; i++) idt_set(32 + i, irq_stubs[i]);
+    idt_set(0x82, isr130);
+    idt_set(0x83, isr131);
+    idt_set(0xff, isr255);
     idt_set(0x81, isr129);                  /* task_yield: только для ядра */
     idt_set_gate(0x80, isr128, 0xEE);       /* системные вызовы: DPL 3, программам можно */
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (u32)&idt;
     idt_load(&idtr);
 }
+
+void idt_reload(void) { idt_load(&idtr); }
 
 void irq_install(int irq, irq_handler_t handler) { irq_handlers[irq] = handler; }
 
@@ -150,8 +155,16 @@ struct regs *isr_handler(struct regs *r) {
         /* EOI: сообщаем PIC, что прерывание обработано */
         if (irq >= 8) outb(0xA0, 0x20);
         outb(0x20, 0x20);
-        if (irq == 0) return sched_tick(r);      /* таймер: возможно, пора сменить задачу */
+        if (irq == 0) { smp_tick(); return sched_tick(r); }      /* таймер: возможно, пора сменить задачу */
         return sched_maybe(r);                   /* например, клавиатура разбудила оболочку */
+    } else if (r->int_no == 0x82) {
+        smp_eoi();
+        return sched_tick(r);
+    } else if (r->int_no == 0x83) {
+        smp_eoi();
+        return sched_maybe(r); /* wakeup IPI does not charge a timer tick */
+    } else if (r->int_no == 0xff) {
+        return r; /* LAPIC spurious interrupt: no EOI */
     } else if (r->int_no == 0x81) {
         return schedule(r);                      /* task_yield() */
     } else if (r->int_no == 0x80) {

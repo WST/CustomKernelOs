@@ -4,8 +4,8 @@
 static const char *states[] = { "ready", "running", "sleeping", "blocked", "zombie" };
 
 int main(void) {
-    struct proc_info p[32];
-    int n = ps(p, 32);
+    struct proc_info p[256];
+    int n = ps(p, 256);
     printf("  PID  PPID  PGID RING STATE     CPU%%   CPU ms    MEM  NAME\n");
     for (int i = 0; i < n; i++)
         printf("%5u %5u %5u    %u %-9s %3u%% %8u %4u KB  %s\n",

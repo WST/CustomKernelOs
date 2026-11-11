@@ -4,6 +4,7 @@
 [bits 32]
 section .text
 extern isr_handler
+extern smp_enter, smp_leave
 global idt_load
 
 ; Исключения без кода ошибки — кладём фиктивный 0
@@ -79,6 +80,10 @@ isr129:
     push dword 0x81
     jmp isr_common
 
+ISR_NOERR 130
+ISR_NOERR 131
+ISR_NOERR 255
+
 IRQ 0,  32
 IRQ 1,  33
 IRQ 2,  34
@@ -106,12 +111,18 @@ isr_common:
     mov ds, ax
     mov es, ax
     mov fs, ax
+    mov ax, 0x30            ; per-CPU kernel data segment
     mov gs, ax
+    cld
+    call smp_enter
     push esp                ; аргумент: указатель на struct regs
     call isr_handler
     ; isr_handler возвращает указатель на struct regs, к которому надо вернуться.
     ; Если планировщик выбрал другую задачу — это её стек: так и происходит
     ; переключение контекста. Все pop-ы ниже снимут регистры уже ДРУГОЙ задачи.
+    push eax
+    call smp_leave
+    pop eax
     mov esp, eax
     pop gs
     pop fs

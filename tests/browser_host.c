@@ -8,6 +8,8 @@
  *     keys         набрать текст в первое поле ввода
  *     timers MS    крутить таймеры MS миллисекунд
  *     shot F.ppm   снимок окна
+ *     dump F.html  сохранить текущий DOM с атрибутами и классами
+ *     click-text S щёлкнуть по текстовому фрагменту S
  *
  * Рабочий стол и сеть заменены заглушками: окно — просто буфер в памяти, http(s)
  * отвечает «нет такого хоста», file:/путь читает файлы Linux. */
@@ -141,7 +143,7 @@ static void resize(int w, int h) {
     struct event e;
     if (win_event(&e, 0) && e.type == EV_RESIZE) {
         W = e.x; H = e.y;
-        if (page_is_dom) relayout(true);
+        if (page_is_dom) {dom_set_viewport(view_w(),VIEW_H);dom_resize();relayout(true);}
         else { arena_used = 0; layout_html(body, body_len, true); }
         redraw();
     }
@@ -223,6 +225,15 @@ int main(int argc, char **argv) {
     printf("load: %u ms, items %d, links %d, doc_h %d; %s\n", ticks() - t0, n_items, n_links, doc_h, status);
     for (int i = 2; i < argc; i++) {
         const char *c = argv[i];
+        if (!strcmp(c,"dump") && i+1<argc) {
+            jsval result;
+            const char *expr="document.documentElement.outerHTML";
+            if (js_eval(expr,strlen(expr),"dump",&result)<0 || result.tag!=JS_STR) return 1;
+            int len=result.u.s->len; const char *html=result.u.s->s;
+            void *file=fopen(argv[++i],"wb");
+            if (!file || !html) return 1;
+            fwrite(html,1,len,file); fclose(file); continue;
+        }
         if (!strcmp(c,"console")) { printf("%.*s\n",console_len,console_buf);continue; }
         if (!strcmp(c, "assert-no-errors")) {
             if (dom_last_error()[0]) { printf("FAIL: %s\n", dom_last_error()); return 1; }
@@ -239,6 +250,15 @@ int main(int argc, char **argv) {
                 scroll_by(VIEW_H - 32);
             }
             printf("scrolled %d screens\n", pages);
+        } else if (!strcmp(c,"click-text") && i+1<argc) {
+            const char *label=argv[++i];int found=0;
+            for(int k=0;k<n_items;k++)if(items[k].kind==IT_TEXT && !strcmp(items[k].text,label)) {
+                struct item it=items[k];on_click(it.x+it.w/2,it.y+VIEW_Y-scroll+it.h/2);found=1;break;
+            }
+            if(!found)for(int k=0;k<n_inputs;k++)if(inputs[k].item>=0 && !strcmp(inputs[k].value,label)) {
+                struct item it=items[inputs[k].item];on_click(it.x+it.w/2,it.y+VIEW_Y-scroll+it.h/2);found=1;break;
+            }
+            if(!found) {printf("missing text %s\n",label);return 1;}
         } else if (!strcmp(c, "click")) {
             int clicks = 0;
             for (int k = 0; k < n_items && clicks < 40; k += 1 + n_items / 40) {

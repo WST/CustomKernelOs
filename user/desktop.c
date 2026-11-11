@@ -1352,15 +1352,13 @@ static void launch(int app) {
     char path[64];
     if (app < 0 || app >= N_APPS) return;
     snprintf(path, sizeof(path), "%s", apps[app].path);
-    int pid = fork();
-    if (pid == 0) {
-        int p[2];                                             /* ввод — пустой канал: клавиатура только у стола */
-        if (pipe(p) == 0) { close(p[1]); dup2(p[0], 0); close(p[0]); }
-        char *argv[2];
-        argv[0] = apps[app].prog; argv[1] = NULL;
-        exec(path, argv);
-        exit(127);
-    }
+    /* Start directly: copying the desktop's framebuffer heap with fork()
+     * only to discard it in exec() stalls input and wastes memory. */
+    int input = open("/dev/null", O_READ);
+    if (input < 0) return;
+    char *argv[2] = { apps[app].prog, NULL };
+    int pid = spawn(path, argv, input);
+    close(input);
     if (pid > 0) {
         if (n_launched == 32) { memmove(launched, launched + 1, sizeof(launched[0]) * 31); n_launched = 31; }
         launched[n_launched].pid = pid;
@@ -1845,6 +1843,7 @@ start_session:
     }
     mouse_get(&ms);
     prev_buttons = ms.buttons;
+    unsigned last_wheel = ms.wheel;
     add_dirty(0, 0, SW, SH);
     flush();
 
@@ -1861,6 +1860,15 @@ start_session:
             int ox = mouse_x, oy = mouse_y;
             mouse_x = ms.x; mouse_y = ms.y;
             mouse_move(ox, oy, mouse_x, mouse_y);
+        }
+        int wheel = (int)(ms.wheel - last_wheel);
+        last_wheel = ms.wheel;
+        if (wheel) {
+            int idx = window_at(mouse_x, mouse_y);
+            if (idx >= 0 && capture < 0 &&
+                ui_inside(mouse_x, mouse_y, wins[idx].x, wins[idx].y + HEAD_H, wins[idx].w, wins[idx].h))
+                send(wins[idx].owner, WM_MOUSE_WHEEL, idx, mouse_x - wins[idx].x,
+                     mouse_y - wins[idx].y - HEAD_H, wheel);
         }
         unsigned pressed = ms.buttons & ~prev_buttons, released = prev_buttons & ~ms.buttons;
         prev_buttons = ms.buttons;

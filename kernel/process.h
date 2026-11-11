@@ -12,6 +12,7 @@ enum {
     PROC_ENOMEM  = -3,
     PROC_EAGAIN  = -4,
     PROC_EISDIR  = -5,
+    PROC_EBUSY   = -6,
 };
 
 /* Загрузить ELF-файл и запустить его как процесс. -> pid или PROC_E* */
@@ -19,6 +20,7 @@ int  proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool foregroun
 const char *proc_strerror(int err);
 
 struct file;
+int proc_spawn_child(const char *path, int argc, char **argv, struct file *input);
 int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input);
 
 int  proc_fork(struct regs *r);         /* -> id потомка или PROC_E* */

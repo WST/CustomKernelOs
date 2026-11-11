@@ -2432,6 +2432,7 @@ static void event_body(void *arg) {
         }
         break;
     case 1: domjs_fire(n, "submit", 1, 1, &prevented); break;
+    case 3: domjs_fire(n, "resize", 0, 0, &prevented); break;
     case 2: {                                                  /* набрали текст */
         jsval kv;
         jsval ev = make_event("keydown", 1, 1, "KeyboardEvent");
@@ -2470,6 +2471,7 @@ static int run_event(int node, int kind, int key, const char *value) {
 }
 
 int dom_click(int node) { return run_event(node, 0, 0, NULL); }
+void dom_resize(void) { if(d_window)run_event(d_window->id,3,0,NULL); }
 int dom_submit(int node) { return run_event(node, 1, 0, NULL); }
 
 void dom_key(int node, int key, const char *value) {

@@ -2,10 +2,11 @@
 #define TASK_H
 #include "types.h"
 #include "idt.h"
+#include "smp.h"
 
 /* Задачи (потоки ядра и пользовательские процессы) и вытесняющий планировщик. */
 
-#define MAX_TASKS   32
+#define MAX_TASKS   256
 #define TASK_STACK  (16 * 1024)     /* стек ядра у каждой задачи */
 #define TASK_NAME   16
 #define TIME_SLICE  2               /* тиков таймера (по 10 мс) на задачу */
@@ -18,7 +19,11 @@ struct mutex;
 struct file;
 
 struct task {
+    struct task *leader;           /* NULL for process leader; owns shared resources */
+    u32 joiner;
     u32   id;
+    u32   cpu;                     /* pinned CPU, assigned at task_start */
+    bool  cpu_idle;
     char  name[TASK_NAME];
     enum task_state state;
     u32   esp;                      /* сохранённый указатель на struct regs */
@@ -39,6 +44,7 @@ struct task {
     u32   brk_start, brk;           /* куча программы (sbrk) */
     u32   user_pages;               /* сколько страниц RAM занимает программа */
     u32   cwd;                      /* текущий каталог (inode) */
+    struct file *syscall_fds[MAX_FDS]; /* transient refs while a syscall blocks */
     struct file *fds[MAX_FDS];      /* открытые файлы (общие объекты, см. file.h) */
     u32 uid;
     bool authenticated;
@@ -48,7 +54,7 @@ struct task {
     bool  keep_zombie;              /* кто-то ждёт код выхода — не убирать раньше времени */
     bool  in_syscall;               /* сейчас выполняет системный вызов */
     bool  kill_pending;             /* убить при выходе из системного вызова */
-    int   pending_code;             /* с каким кодом (0 = 137, как SIGKILL) */
+    int   pending_code;             /* exit status, including zero; kill sets 137 */
     u8    fpu[108];                 /* регистры FPU (fnsave), только у процессов */
     struct shm_mapping { int id; u32 addr; } shm[16];   /* общая память (ipc.c) */
     struct mbox *mbox;              /* почтовый ящик для сообщений (ipc.c) */
@@ -62,9 +68,16 @@ struct mutex {                      /* рекурсивный мьютекс */
 void  fpu_init(void);               /* включить FPU, запомнить чистое состояние */
 void  fpu_reset_current(void);      /* exec: новой программе — чистый FPU */
 void  fpu_copy_current(struct task *to);   /* fork: потомку — копию */
+void  tasking_init_ap(void);
 void  tasking_init(void);           /* текущий поток (kmain) становится задачей 0 */
 bool  tasking_ready(void);
 struct task *task_current(void);
+struct task *task_process(struct task *t);
+bool task_has_threads(struct task *t);
+int task_thread_create(u32 entry, u32 fn, u32 arg, u32 sp);
+int task_thread_join(u32 tid, int *code);
+void task_set_pgid(struct task *p, u32 pgid);
+void task_exit_group(int code) __attribute__((noreturn));
 struct task *task_by_id(u32 id);
 int   task_create(const char *name, void (*entry)(void *), void *arg);  /* -> id или <0 */
 struct task *task_alloc_user(const char *name, u32 page_dir, u32 entry, u32 user_esp);
@@ -91,7 +104,7 @@ struct regs *sched_tick(struct regs *r);
 struct regs *schedule(struct regs *r);
 struct regs *sched_maybe(struct regs *r);     /* после IRQ/syscall: надо ли переключиться */
 bool  task_fault(struct regs *r, const char *what);
-extern u32 irq_nesting;                       /* >0 — мы внутри обработчика IRQ */
+#define irq_nesting (cpu_states[smp_cpu()].nesting) /* >0 inside this CPU's IRQ */
 
 /* для ps */
 struct task_info {

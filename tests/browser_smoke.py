@@ -15,8 +15,9 @@ seen = []
 pages = {
     '/': ('text/html', 'gzip', b'<title>Browser smoke</title><link rel="stylesheet" href="/style.css">'
           b'<h1>Browser smoke</h1><div class="row"><div>Alpha</div><div>Beta</div></div>'
+          b'<svg width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#fb8b24"/></svg>'
           b'<p id="result"></p><script type="module" src="/app.js"></script>'),
-    '/style.css': ('text/css', 'deflate', b'.row{display:flex;gap:16px}.row>div{width:50%;padding:12px;box-sizing:border-box;background:#abcdef}'),
+    '/style.css': ('text/css', 'deflate', b'.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.row>div{padding:12px;box-sizing:border-box;background:oklch(70.5% .213 47.604)}'),
     '/app.js': ('application/javascript', 'gzip', b'import {value,inc} from "./counter.js"; inc();'
                b'if(value!==42 || document.currentScript!==null) throw new Error("module context failed");'
                b'async function* seq(){yield Promise.resolve(20);yield await Promise.resolve(22);}'
@@ -62,7 +63,11 @@ class Server(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(('0.0.0.0', 0), Server)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 image = build / 'browser-smoke.img'
+boot_image = build / 'browser-smoke-boot.img'
+shutil.copyfile(build / 'os.img', boot_image)
 shutil.copyfile(os.environ.get('MYOS_TEST_DISK', 'disk.img'), image)
+# Only the disposable disk is changed; a user's desktop service may own the console.
+subprocess.run(['build/myfs', str(image), 'rm', '/etc/services/enabled/desktop.service'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.run(['build/myfs', str(image), 'rm', '/etc/accounts'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.run(['build/myfs', str(image), 'put', 'build/user/browser', '/bin/browser'], check=True)
 script = build / 'browser-smoke.sh'
@@ -72,7 +77,7 @@ log = build / 'browser-smoke.serial.log'
 log.write_text('')
 proc = subprocess.Popen([
     'qemu-system-i386', '-m', '256M', '-vga', 'vmware', '-display', 'none',
-    '-drive', 'format=raw,file=build/os.img,index=0',
+    '-drive', f'format=raw,file={boot_image},index=0',
     '-drive', f'format=raw,file={image},index=1', '-nic', 'user,model=e1000',
     '-serial', f'file:{log}', '-monitor', 'stdio', '-no-reboot',
 ], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)

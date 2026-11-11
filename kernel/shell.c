@@ -1,5 +1,6 @@
 /* Командная оболочка MyOS: история команд, файловые команды, перенаправление вывода. */
 #include "shell.h"
+#include "sysinfo.h"
 #include "services.h"
 #include "vga.h"
 #include "keyboard.h"
@@ -145,7 +146,7 @@ static void cmd_echo(char *a) {
 
 static void cmd_about(char *a) {
     (void)a;
-    kprintf("MyOS 0.5 - hobby operating system written from scratch.\n");
+    sysinfo_print();
     kprintf("  x86 32-bit protected mode, own bootloader, processes in ring 3, MyFS.\n");
 }
 
@@ -716,6 +717,7 @@ static const struct command commands[] = {
     { "help",     "show this list",                cmd_help },
     { "clear",    "clear the screen",              cmd_clear },
     { "echo",     "print text (> file, >> file)",  cmd_echo },
+    { "sysinfo",  "system and build information", cmd_about },
     { "about",    "about MyOS",                    cmd_about },
     { "uptime",   "time since boot",               cmd_uptime },
     { "color",    "text color 0-15",               cmd_color },

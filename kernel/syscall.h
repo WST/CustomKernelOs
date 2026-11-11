@@ -81,6 +81,10 @@ enum {
     SYS_SYMLINK,        /* symlink(target, linkpath) */
     SYS_READLINK,       /* readlink(path, buf, len) -> байт, без нуля */
     SYS_LSTAT,          /* lstat(path, &dirent_info): сама ссылка, не цель */
+    SYS_SYSINFO,        /* sysinfo(&system_info, size) */
+    SYS_SPAWN,          /* spawn(path, argv, stdin_fd) */
+    SYS_CPUINFO,        /* cpuinfo(&cpu_info, capacity) */
+    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX,
     SYS_COUNT
 };
 

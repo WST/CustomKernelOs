@@ -7,8 +7,8 @@ int main(void) {
     ttymode(TTY_RAW | TTY_NONBLOCK);
     printf(ANSI_CLEAR ANSI_HIDE);
     for (;;) {
-        struct proc_info p[32];
-        int n = ps(p, 32);
+        struct proc_info p[256];
+        int n = ps(p, 256);
         /* сортировка по CPU% */
         for (int i = 1; i < n; i++)
             for (int j = i; j > 0 && p[j].cpu_percent > p[j - 1].cpu_percent; j--) {

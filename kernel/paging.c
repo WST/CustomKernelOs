@@ -20,6 +20,7 @@
 #include "pmm.h"
 #include "heap.h"
 #include "string.h"
+#include "smp.h"
 
 #define PD_INDEX(v) ((v) >> 22)
 #define PT_INDEX(v) (((v) >> 12) & 0x3FF)
@@ -32,7 +33,7 @@ static u32 page_dir[1024]    __attribute__((aligned(4096)));   /* каталог
 static u32 first_table[1024] __attribute__((aligned(4096)));   /* первые 4 МБ */
 static u32 identity_limit;
 static u32 tables;
-static u32 cur_dir;
+
 
 static inline void invlpg(u32 addr) { __asm__ volatile ("invlpg (%0)" : : "r"(addr) : "memory"); }
 static inline bool is_user_pde(u32 i) { return i >= USER_PDE_FIRST && i < USER_PDE_END; }
@@ -77,7 +78,7 @@ void paging_init(void) {
     for (u32 a = HEAP_START; a < HEAP_MAX; a += HUGE_SIZE)
         get_pte(page_dir, a, true, false);
 
-    cur_dir = (u32)page_dir;
+
     __asm__ volatile (
         "mov %0, %%cr3\n\t"
         "mov %%cr4, %%eax\n\t"
@@ -96,6 +97,7 @@ int vmm_map(u32 virt, u32 phys, u32 flags) {
     if (!pte) return -1;
     *pte = FRAME(phys) | (flags & 0xFFF) | PG_PRESENT;
     invlpg(virt);
+    smp_kernel_mapping_changed();
     return 0;
 }
 
@@ -105,6 +107,7 @@ u32 vmm_unmap(u32 virt) {
     u32 phys = FRAME(*pte);
     *pte = 0;
     invlpg(virt);
+    smp_kernel_mapping_changed();
     return phys;
 }
 
@@ -124,12 +127,12 @@ bool vmm_lookup(u32 dir_phys, u32 virt, u32 *phys, u32 *flags) {
     return true;
 }
 
-bool vmm_translate(u32 virt, u32 *phys) { return vmm_lookup(cur_dir, virt, phys, NULL); }
+bool vmm_translate(u32 virt, u32 *phys) { return vmm_lookup(vmm_current_dir(), virt, phys, NULL); }
 
 /* ---------------------------------------------------------------- процессы */
 
 u32 vmm_kernel_dir(void)  { return (u32)page_dir; }
-u32 vmm_current_dir(void) { return cur_dir; }
+u32 vmm_current_dir(void) { u32 dir; __asm__ volatile("mov %%cr3,%0":"=r"(dir)); return dir; }
 
 u32 vmm_create_dir(void) {
     u32 frame = pmm_alloc();
@@ -144,8 +147,10 @@ int vmm_map_in(u32 dir, u32 virt, u32 phys, u32 flags) {
     if (user && (virt < USER_BASE || virt >= USER_TOP)) return -1;
     u32 *pte = get_pte((u32 *)dir, virt, true, user);
     if (!pte) return -1;
+    bool replace=(*pte & PG_PRESENT)!=0;
     *pte = FRAME(phys) | (flags & 0xFFF) | PG_PRESENT;
-    if (dir == cur_dir) invlpg(virt);
+    if (dir == vmm_current_dir()) invlpg(virt);
+    if (replace) smp_user_tlb_flush(dir);
     return 0;
 }
 
@@ -155,7 +160,8 @@ u32 vmm_unmap_in(u32 dir, u32 virt) {
     if (!pte || !(*pte & PG_PRESENT)) return 0;
     u32 phys = FRAME(*pte);
     *pte = 0;
-    if (dir == cur_dir) invlpg(virt);
+    if (dir == vmm_current_dir()) invlpg(virt);
+    smp_user_tlb_flush(dir);
     return phys;
 }
 
@@ -177,6 +183,7 @@ u32 vmm_clone_user(u32 src_phys, u32 *pages) {
     if (!dst_phys) return 0;
     u32 *src = (u32 *)src_phys;
     *pages = 0;
+    bool demoted = false;
     for (u32 i = USER_PDE_FIRST; i < USER_PDE_END; i++) {
         if (!(src[i] & PG_PRESENT)) continue;
         if (i >= PD_INDEX(SHM_BASE) && i < PD_INDEX(SHM_END)) continue;
@@ -187,38 +194,41 @@ u32 vmm_clone_user(u32 src_phys, u32 *pages) {
             u32 flags = table[j] & 0xFFF;
             u32 va = (i << 22) | (j << 12);
             if (!pmm_share(frame)) {
-                if (!clone_private(dst_phys, va, frame, flags)) { vmm_destroy_dir(dst_phys); return 0; }
+                if (!clone_private(dst_phys, va, frame, flags)) goto fail;
             } else if (flags & (PG_WRITE | PG_COW)) {
                 u32 shared = (flags & ~PG_WRITE) | PG_COW | PG_PRESENT | PG_USER;
                 table[j] = frame | shared;
-                if (src_phys == cur_dir) invlpg(va);
-                if (vmm_map_in(dst_phys, va, frame, shared)) {
-                    pmm_free(frame);
-                    vmm_destroy_dir(dst_phys);
-                    return 0;
-                }
+                if (src_phys == vmm_current_dir()) invlpg(va);
+                demoted = true;
+                if (vmm_map_in(dst_phys, va, frame, shared)) { pmm_free(frame); goto fail; }
             } else if (vmm_map_in(dst_phys, va, frame, flags)) {
                 pmm_free(frame);
-                vmm_destroy_dir(dst_phys);
-                return 0;
+                goto fail;
             }
             (*pages)++;
         }
     }
+    /* Другие процессоры могли держать в TLB старую записываемую страницу. */
+    if (demoted) smp_user_tlb_flush(src_phys);
     return dst_phys;
+fail:
+    if (demoted) smp_user_tlb_flush(src_phys);
+    vmm_destroy_dir(dst_phys);
+    return 0;
 }
 
 /* Запись в страницу, которую fork отдал на двоих. false — это не наш случай. */
 bool vmm_cow_fault(u32 virt) {
     virt &= ~(PAGE_SIZE - 1);
     if (virt < USER_BASE || virt >= USER_TOP) return false;
-    u32 *pte = get_pte((u32 *)cur_dir, virt, false, false);
+    u32 *pte = get_pte((u32 *)vmm_current_dir(), virt, false, false);
     if (!pte || !(*pte & PG_PRESENT) || !(*pte & PG_COW)) return false;
     u32 old = FRAME(*pte);
     u32 flags = ((*pte & 0xFFF) & ~PG_COW) | PG_WRITE | PG_PRESENT | PG_USER;
     if (pmm_refs(old) <= 1) {
         *pte = old | flags;
         invlpg(virt);
+        smp_user_tlb_flush(vmm_current_dir());
         return true;
     }
     u32 frame = pmm_alloc();
@@ -226,6 +236,7 @@ bool vmm_cow_fault(u32 virt) {
     memcpy((void *)frame, (void *)old, PAGE_SIZE);
     *pte = frame | flags;
     invlpg(virt);
+    smp_user_tlb_flush(vmm_current_dir());
     pmm_free(old);
     return true;
 }
@@ -234,7 +245,7 @@ bool vmm_cow_fault(u32 virt) {
  * Ядерные таблицы общие — их не трогаем. Вызывать НЕ из этого же каталога. */
 u32 vmm_destroy_dir(u32 dir_phys) {
     u32 *dir = (u32 *)dir_phys, pages = 0;
-    if (dir_phys == (u32)page_dir || dir_phys == cur_dir) return 0;
+    if (dir_phys == (u32)page_dir || dir_phys == vmm_current_dir()) return 0;
     for (u32 i = USER_PDE_FIRST; i < USER_PDE_END; i++) {
         if (!(dir[i] & PG_PRESENT)) continue;
         u32 *table = (u32 *)FRAME(dir[i]);
@@ -248,8 +259,7 @@ u32 vmm_destroy_dir(u32 dir_phys) {
 }
 
 void vmm_switch(u32 dir) {
-    if (dir == cur_dir) return;
-    cur_dir = dir;
+    if (dir == vmm_current_dir()) return;
     __asm__ volatile ("mov %0, %%cr3" : : "r"(dir) : "memory");   /* заодно сбрасывает TLB */
 }
 

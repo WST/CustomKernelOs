@@ -7,6 +7,7 @@
  * свободной RAM, и снова занимаем первый мегабайт (ядро, стек, BIOS, VGA). */
 #include "pmm.h"
 #include "string.h"
+#include "bootinfo.h"
 
 #define LOW_RESERVED  0x100000        /* первый 1 МБ не раздаём никогда */
 #define MAX_PHYS      0x40000000u     /* работаем с первым 1 ГБ (выше — память программ, см. paging.h) */
@@ -85,6 +86,15 @@ void pmm_init(void) {
     /* 3) первый мегабайт — наш (ядро, стек, карта E820) и BIOS */
     for (u32 f = 0; f < LOW_RESERVED / PAGE_SIZE; f++) set_used(f);
 
+#ifdef MYOS_HARDWARE
+    extern u8 __kernel_start[], __bss_end[];
+    for (u32 f=(u32)__kernel_start/PAGE_SIZE; f<((u32)__bss_end+PAGE_SIZE-1)/PAGE_SIZE; f++)
+        set_used(f);
+    const struct boot_info *boot=boot_info_get();
+    if (boot && boot->root_phys==0x1000000 && boot->root_bytes && boot->root_bytes<=0x4000000)
+        for (u32 f=boot->root_phys/PAGE_SIZE; f<(boot->root_phys+boot->root_bytes+PAGE_SIZE-1)/PAGE_SIZE; f++)
+            set_used(f);
+#endif
     total_frames = used_frames = 0;
     for (u32 f = LOW_RESERVED / PAGE_SIZE; f < limit_frame; f++) {
         total_frames++;

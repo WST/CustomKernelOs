@@ -12,7 +12,8 @@
 
 static struct mouse_state st;
 static i32 max_x = 1023, max_y = 767;
-static u8  packet[3];
+static u8  packet[4];
+static int packet_size = 3;
 static int idx;
 
 static bool wait_write(void) { for (int i = 0; i < 100000; i++) if (!(inb(0x64) & 2)) return true; return false; }
@@ -38,7 +39,7 @@ static void mouse_irq(struct regs *r) {
     u8 b = inb(0x60);
     if (idx == 0 && !(b & 0x08)) return;        /* потеряли синхронизацию — ждём начала пакета */
     packet[idx++] = b;
-    if (idx < 3) return;
+    if (idx < packet_size) return;
     idx = 0;
     if (packet[0] & 0xC0) return;                /* переполнение — пакет мусорный */
 
@@ -51,6 +52,11 @@ static void mouse_irq(struct regs *r) {
     if (st.x > max_x) st.x = max_x;
     if (st.y > max_y) st.y = max_y;
     st.buttons = packet[0] & 7;
+    if (packet_size == 4) {
+        int wheel = packet[3] & 15;
+        if (wheel & 8) wheel -= 16;
+        st.wheel -= wheel;
+    }
     st.events++;
     fb_cursor_move(st.x, st.y);                  /* аппаратный курсор двигает сама карта */
 }
@@ -65,12 +71,32 @@ bool mouse_init(void) {
     cmd(0x60);
     data(conf);
     if (!mouse_cmd(0xF6)) return false;          /* настройки по умолчанию */
+    /* IntelliMouse negotiation; ordinary mice retain three-byte packets. */
+    packet_size = 3; idx = 0;
+    if (mouse_cmd(0xF3) && mouse_cmd(200) &&
+        mouse_cmd(0xF3) && mouse_cmd(100) &&
+        mouse_cmd(0xF3) && mouse_cmd(80) && mouse_cmd(0xF2) && wait_read()) {
+        u8 id = inb(0x60);
+        if (id == 3 || id == 4) packet_size = 4;
+    }
     if (!mouse_cmd(0xF4)) return false;          /* начать присылать пакеты */
     st.x = (max_x + 1) / 2;
     st.y = (max_y + 1) / 2;
     if (fb_ready()) { struct fb_info fi; fb_get_info(&fi); st.x = fi.width / 2; st.y = fi.height / 2; }
     irq_install(12, mouse_irq);
     return true;
+}
+
+void mouse_usb_report(u32 buttons, i32 dx, i32 dy) {
+    u32 flags=irq_save();
+    st.x+=dx; st.y+=dy;
+    if (st.x<0) st.x=0;
+    if (st.y<0) st.y=0;
+    if (st.x>max_x) st.x=max_x;
+    if (st.y>max_y) st.y=max_y;
+    st.buttons=buttons&7; st.events++;
+    fb_cursor_move(st.x,st.y);
+    irq_restore(flags);
 }
 
 void mouse_set_bounds(i32 w, i32 h) {

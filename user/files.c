@@ -129,14 +129,11 @@ static void draw(void) {
 }
 
 static void launch(const char *prog, const char *arg) {
-    int pid = fork();
-    if (pid == 0) {
-        int p[2];                                             /* ввод — пустой канал: клавиатура только у стола */
-        if (pipe(p) == 0) { close(p[1]); dup2(p[0], 0); close(p[0]); }
-        char *argv[3] = { (char *)prog, (char *)arg, NULL };
-        exec(prog, argv);
-        exit(127);
-    }
+    int input = open("/dev/null", O_READ);
+    if (input < 0) return;
+    char *argv[3] = { (char *)prog, (char *)arg, NULL };
+    spawn(prog, argv, input);
+    close(input);
 }
 
 static void open_entry(int i) {
@@ -175,7 +172,13 @@ int main(int argc, char **argv) {
     struct event e;
     while (win_event(&e, -1)) {
         if (e.type == EV_CLOSE) break;
-        if (e.type == EV_MOUSE_DOWN) {
+        if (e.type == EV_MOUSE_WHEEL) {
+            if (e.x > SIDE_W && e.y >= LIST_Y && e.y < H - STATUS_H) {
+                top -= e.wheel * 3;
+                if (top > n_ents - VIS) top = n_ents - VIS;
+                if (top < 0) top = 0;
+            }
+        } else if (e.type == EV_MOUSE_DOWN) {
             if (ui_inside(e.x, e.y, 10, 10, 44, 26)) go_up();
             else if(ui_inside(e.x,e.y,62,10,58,26)) { strcpy(cwd,home); read_dir(); }
             else if(e.x<SIDE_W && e.y>=BAR_H+44 && e.y<BAR_H+44+4*34) {

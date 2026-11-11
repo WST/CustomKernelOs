@@ -3,3 +3,4 @@ disk.img
 *.img
 *.img.bak
 *.img.new
+*.pyc
