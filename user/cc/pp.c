@@ -558,6 +558,7 @@ static void init_macros(void) {
     define_macro("__SIZEOF_INT__", "4");
     define_macro("__SIZEOF_POINTER__", "4");
     if (opt_linux) define_macro("__LINUX_TEST__", "1");
+    if (opt_pic) { define_macro("__PIC__", "2"); define_macro("__pic__", "2"); }
     add_macro("__FILE__", true, NULL)->builtin = 1;
     add_macro("__LINE__", true, NULL)->builtin = 2;
 }

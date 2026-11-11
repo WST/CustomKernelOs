@@ -723,8 +723,8 @@ static unsigned char *gzip_unwrap_n(const unsigned char *in, int n, char *saved,
     return g.p;
 }
 
-/* MyOS has no symlinks. Compare absolute, normalized paths so ./ and ..
- * cannot disguise writing the decompressed output over its input. */
+/* Сравнение абсолютных путей. Символические ссылки здесь не раскрываются:
+ * проверка только не даёт ./ и .. указать вывод на входной файл. */
 static int normalized_path(const char *path, char out[256]) {
     char joined[384];
     if (path[0] == '/') {

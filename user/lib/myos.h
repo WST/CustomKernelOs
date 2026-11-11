@@ -48,9 +48,22 @@ enum {
     SYS_GFX_MODE, SYS_GFX_INFO2, SYS_GFX_ACCEL, SYS_GFX_CURSOR,
     SYS_PTY_OPEN, SYS_TTYCTL, SYS_KBLAYOUT, SYS_SOCKCTL,
     SYS_MOUNT, SYS_MOUNTINFO, SYS_BLOCKINFO, SYS_MKFS, SYS_PARTCTL, SYS_ACCOUNT,
-    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL, SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
+    SYS_CLIPBOARD, SYS_LSEEK, SYS_FSTAT, SYS_RENAME, SYS_UNITCTL,
+    SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
+    SYS_SYMLINK, SYS_READLINK, SYS_LSTAT,
+    SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX
 };
+/* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
+_Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
+
+#define PROT_READ  1
+#define PROT_WRITE 2
+#define PROT_EXEC  4
+#define MAP_SHARED 1
+#define MAP_PRIVATE 2
+#define MAP_ANONYMOUS 0x20
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
  * дополнительно приводят его к -1 и пишут сюда, как в POSIX. */
@@ -88,6 +101,7 @@ extern int errno;
 #define EPIPE 32
 #define ENAMETOOLONG 36
 #define ENOTEMPTY 39
+#define ELOOP 40
 #define EMSGSIZE 90
 #define EADDRINUSE 98
 #define ENETDOWN 100
@@ -101,8 +115,8 @@ extern int errno;
 #define WNOHANG 1
 
 struct dirent_info {
-    char name[28];
-    unsigned type;                  /* 1 файл, 2 каталог */
+    char name[256];                 /* имя до 255 символов и нуль */
+    unsigned type;                  /* 1 файл, 2 каталог, 5 символическая ссылка */
     unsigned size;
 };
 
@@ -150,6 +164,9 @@ int blockinfo(unsigned index,struct block_info *info);
 int mkfs(const char *device);
 int partctl(const char *device,unsigned op,unsigned slot,unsigned start,unsigned sectors);
 void *sbrk(int increment);
+void *mmap(void *addr, unsigned len, int prot, int flags, int fd, unsigned off);
+int   munmap(void *addr, unsigned len);
+int   mprotect(void *addr, unsigned len, int prot);
 void  sleep_ms(unsigned ms);
 int   getpid(void);
 unsigned ticks(void);           /* миллисекунды с момента загрузки */
@@ -183,6 +200,8 @@ int   mkdir(const char *path);
 int   unlink(const char *path);
 int   ps(struct proc_info *buf, int max);
 int   dirstat(const char *path, struct dirent_info *out);   /* 0 или -errno */
+int   symlink(const char *target, const char *linkpath);
+ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 
 /* ---- терминал ---- */
 int  term_cols(void);           /* размер терминала: 128x48 в графике, 80x25 в тексте */

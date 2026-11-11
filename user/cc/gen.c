@@ -99,12 +99,15 @@ static void resolve_fixups(void) {
 typedef struct Reloc2 {
     int  pos;                       /* где в text */
     char *name;
-    bool rel;                       /* true — call rel32, false — абсолютный адрес */
+    int  type;                      /* R_386_* */
 } Reloc2;
 static Reloc2 *relocs;
 static int n_relocs, cap_relocs;
 
-static void sym_ref(char *name, bool rel) {
+/* Слагаемое лежит в самих байтах. У PC32/PLT32 это −4: процессор считает
+ * смещение от следующей команды, а P в формуле ELF — начало поля. У GOTPC
+ * это +2: после call ebx указывает на add, а поле начинается двумя байтами позже. */
+static void sym_ref(char *name, int type) {
     if (n_relocs == cap_relocs) {
         cap_relocs = cap_relocs ? cap_relocs * 2 : 256;
         Reloc2 *r = xcalloc(sizeof(Reloc2) * cap_relocs);
@@ -114,9 +117,12 @@ static void sym_ref(char *name, bool rel) {
     }
     relocs[n_relocs].pos = text.len;
     relocs[n_relocs].name = name;
-    relocs[n_relocs].rel = rel;
+    relocs[n_relocs].type = type;
     n_relocs++;
-    imm32(0);
+    int addend = 0;
+    if (type == R_386_PC32 || type == R_386_PLT32) addend = -4;
+    else if (type == R_386_GOTPC) addend = 2;
+    imm32(addend);
 }
 
 /* ------------------------------------------------------------ простые инструкции */
@@ -301,14 +307,24 @@ static void gen_cast(Type *from, Type *to) {
 
 static Obj *cur_fn;
 static int  ret_label;
+static bool fn_got;                 /* в этой функции ebx — указатель на GOT */
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
+static void reload_got(void);
 
+/* -fPIC: ebx указывает на GOT. Своё (static, литерал) — lea от ebx,
+ * чужое — адрес из ячейки GOT, чтобы потом его мог подставить загрузчик. */
 static void gen_addr(Node *node) {
     switch (node->kind) {
     case ND_VAR:
         if (node->var->is_local) lea_eax_ebp(node->var->offset);
-        else { E("B8"); sym_ref(node->var->name, false); }       /* mov eax, адрес */
+        else if (opt_pic && (node->var->is_static || node->var->is_rodata)) {
+            E("8D 83"); sym_ref(node->var->name, R_386_GOTOFF);   /* lea eax, [ebx + имя@GOTOFF] */
+        } else if (opt_pic) {
+            E("8B 83"); sym_ref(node->var->name, R_386_GOT32);    /* mov eax, [ebx + имя@GOT] */
+        } else {
+            E("B8"); sym_ref(node->var->name, R_386_32);          /* mov eax, адрес */
+        }
         return;
     case ND_DEREF:
         gen_expr(node->lhs);
@@ -413,12 +429,19 @@ static void gen_funcall(Node *node) {
     }
     Node *fn = node->lhs;
     if (fn->kind == ND_VAR && fn->var->ty->kind == TY_FUNC) {
-        E("E8"); sym_ref(fn->var->name, true);                  /* call имя */
+        E("E8");                                                /* call имя или имя@PLT */
+        sym_ref(fn->var->name, opt_pic && !fn->var->is_static ? R_386_PLT32 : R_386_PC32);
     } else {
         gen_expr(fn);
         E("FF D0");                                             /* call eax */
     }
-    add_esp(pushed);
+    /* по i386 System V скрытый адрес ответа снимает со стека сама функция (ret 4) */
+    add_esp(node->ret_buffer ? pushed - 4 : pushed);
+    /* char и short в eax определены только в младших битах: функцию мог собрать gcc */
+    Type *rt = node->ty;
+    if (rt->kind == TY_BOOL) E("0F B6 C0");
+    else if (is_integer(rt) && rt->size == 1) E(rt->is_unsigned ? "0F B6 C0" : "0F BE C0");
+    else if (is_integer(rt) && rt->size == 2) E(rt->is_unsigned ? "0F B7 C0" : "0F BF C0");
 }
 
 static void gen_syscall(Node *node) {
@@ -427,6 +450,7 @@ static void gen_syscall(Node *node) {
     for (Node *a = node->args; a; a = a->next) { gen_expr(a); E("50"); n++; }
     for (int i = n - 1; i >= 0; i--) E(pop[i]);
     E("CD 80");                                                 /* int 0x80 */
+    reload_got();                                               /* int 0x80 затирает ebx */
 }
 
 static void gen_cmp_double(Node *node) {
@@ -501,7 +525,8 @@ static void pop_i64_rhs(void) { E("5B 59"); depth -= 8; }      /* pop ebx (lo); 
 
 static void call_i64(const char *name) {
     E("51 53 52 50");                                           /* push b_hi, b_lo, a_hi, a_lo */
-    E("E8"); sym_ref((char *)name, true);
+    E("E8");
+    sym_ref((char *)name, opt_pic ? R_386_PLT32 : R_386_PC32);
     add_esp(16);
 }
 
@@ -723,7 +748,7 @@ static void gen_expr(Node *node) {
     }
 
     /* двухместные операции */
-    if (node->lhs->ty->kind == TY_LONGLONG) { gen_i64_bin(node); return; }
+    if (node->lhs->ty->kind == TY_LONGLONG) { gen_i64_bin(node); reload_got(); return; }
     if (is_flonum(node->lhs->ty)) {
         if (node->kind == ND_EQ || node->kind == ND_NE || node->kind == ND_LT || node->kind == ND_LE) {
             gen_cmp_double(node);
@@ -927,6 +952,44 @@ static void gen_stmt(Node *node) {
 
 /* ------------------------------------------------------------ функции */
 
+#define SAVED_REGS 12
+#define GOT_SLOT (-(SAVED_REGS + 4))            /* [ebp-16]: сюда прячем GOT, пока ebx занят */
+
+static char thunk_name[] = "__x86.get_pc_thunk.bx";
+static char got_name[] = "_GLOBAL_OFFSET_TABLE_";
+static bool need_thunk;
+
+/* Глобальные данные требуют GOT. Прямой вызов не-static функции тоже: в
+ * разделяемой библиотеке он идёт через PLT, а PLT читает ячейку как смещение от ebx. */
+static bool needs_got(Node *n) {
+    if (!n) return false;
+    if (n->kind == ND_VAR && n->var && !n->var->is_local) return true;
+    if (n->kind == ND_FUNCALL) {
+        for (Node *a = n->args; a; a = a->next)
+            if (needs_got(a)) return true;
+        if (!(n->lhs && n->lhs->kind == ND_VAR && n->lhs->var && n->lhs->var->ty->kind == TY_FUNC))
+            return needs_got(n->lhs);
+        return !n->lhs->var->is_static;
+    }
+    if (needs_got(n->lhs) || needs_got(n->rhs) || needs_got(n->cond) || needs_got(n->then) ||
+        needs_got(n->els) || needs_got(n->init) || needs_got(n->inc))
+        return true;
+    for (Node *s = n->body; s; s = s->next)
+        if (needs_got(s)) return true;
+    return false;
+}
+
+static void reload_got(void) {
+    if (!fn_got) return;
+    E("8B"); ebp_operand(3, GOT_SLOT);                          /* mov ebx, [ebp-16] */
+}
+
+static void pic_setup(void) {
+    E("E8"); sym_ref(thunk_name, R_386_PC32);                   /* ebx = адрес следующей команды */
+    E("81 C3"); sym_ref(got_name, R_386_GOTPC);                 /* add ebx, _GLOBAL_OFFSET_TABLE_ */
+    E("89"); ebp_operand(3, GOT_SLOT);                          /* mov [ebp-16], ebx */
+}
+
 static void assign_offsets(Obj *fn) {
     int off = 8;
     Type *rt = fn->ty->return_ty;
@@ -935,37 +998,50 @@ static void assign_offsets(Obj *fn) {
         p->offset = off;
         off += align_to(p->ty->size, 4);
     }
-    int bottom = 0;
+    int bottom = SAVED_REGS;                                    /* под ebp — сохранённые ebx, esi, edi */
+    if (fn_got) bottom += 4;                                    /* и сохранённый указатель на GOT */
     for (Obj *v = fn->locals; v && v != fn->params; v = v->next) {
         int align = v->ty->align < 4 ? (v->ty->size >= 4 ? 4 : v->ty->align) : v->ty->align;
         if (align > 4) align = 4;
         bottom = align_to(bottom + v->ty->size, align);
         v->offset = -bottom;
     }
-    fn->stack_size = align_to(bottom, 4);
+    fn->stack_size = align_to(bottom, 4) - SAVED_REGS;
 }
 
+/* Кадр: [ebp] — старый ebp, ниже ebx, esi, edi (их по соглашению i386 бережёт
+ * вызываемая функция, а код ниже ими пользуется), ещё ниже — локальные переменные.
+ * В -fPIC между ними и локальными лежит копия ebx, указывающего на GOT. */
 static void gen_function(Obj *fn) {
     cur_fn = fn;
+    fn_got = opt_pic && needs_got(fn->body);
+    if (fn_got) need_thunk = true;
     assign_offsets(fn);
     fn->section = 1;
     fn->addr = text.len;
     ret_label = new_label();
-    E("55 89 E5");                                              /* push ebp; mov ebp, esp */
+    E("55 89 E5 53 56 57");                                     /* push ebp; mov ebp, esp; push ebx, esi, edi */
     if (fn->stack_size) { E("81 EC"); imm32(fn->stack_size); }
+    if (fn_got) pic_setup();
     depth = 0;
     gen_stmt(fn->body);
     if (!strcmp(fn->name, "main")) mov_eax_imm(0);              /* main без return вернёт 0 */
     label_here(ret_label);
-    E("89 EC 5D C3");                                           /* mov esp, ebp; pop ebp; ret */
+    E("8D 65 F4 5F 5E 5B 5D");                                  /* lea esp, [ebp-12]; pop edi, esi, ebx, ebp */
+    Type *rt = fn->ty->return_ty;
+    if (rt->kind == TY_STRUCT || rt->kind == TY_UNION) E("C2 04 00");   /* ret 4 */
+    else E("C3");
     resolve_fixups();
+    fn->code_end = text.len;
 }
 
-/* ------------------------------------------------------------ компоновка */
+/* ------------------------------------------------------------ объектный файл */
 
 #define HBUCKETS 1024
-typedef struct Sym { struct Sym *next; char *name; Obj *obj; } Sym;
+typedef struct Sym { struct Sym *next; char *name; Obj *obj; int idx; } Sym;
 static Sym *symtab[HBUCKETS];
+static Sym *undefs[HBUCKETS];       /* имя -> номер неопределённого символа в obj */
+static ObjFile *obj;
 
 static unsigned shash(const char *s) {
     unsigned h = 2166136261u;
@@ -1002,137 +1078,126 @@ static void build_symtab(Obj *prog) {
     }
 }
 
-/* оставить только то, до чего можно дойти от main */
-static void mark_live(const char *name, const char *from) {
+/* оставить только то, до чего можно дойти от корней. Чего здесь нет — найдёт
+ * (или не найдёт и сообщит об ошибке) компоновщик в других объектных файлах. */
+static void mark_live(const char *name) {
     Obj *o = sym_find(name);
-    if (!o) error("undefined reference to '%s'%s%s", name, from ? " in " : "", from ? from : "");
-    if (o->is_live) return;
+    if (!o || o->is_live) return;
     o->is_live = true;
-    for (int i = 0; i < o->n_refs; i++) mark_live(o->refs[i], o->name);
-    for (Reloc *r = o->rel; r; r = r->next) mark_live(r->label, o->name);
+    for (int i = 0; i < o->n_refs; i++) mark_live(o->refs[i]);
+    for (Reloc *r = o->rel; r; r = r->next) mark_live(r->label);
 }
 
-static void write_file(const char *path, Buf *b) {
-#ifdef CC_HOST
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-#else
-    int fd = open(path, O_WRITE);
-#endif
-    if (fd < 0) error("cannot write %s", path);
-    int off = 0;
-    while (off < b->len) {
-        int n = write(fd, b->data + off, b->len - off);
-        if (n <= 0) error("write error: %s", path);
-        off += n;
+static bool emitted(Obj *o) { return o->is_live && sym_find(o->name) == o; }
+
+static int thunk_sym;
+
+static int undef_sym(char *name) {
+    unsigned h = shash(name);
+    for (Sym *s = undefs[h]; s; s = s->next)
+        if (!strcmp(s->name, name)) return s->idx;
+    Sym *s = xcalloc(sizeof(Sym));
+    s->name = name;
+    s->idx = obj_add_sym(obj, name, BIND_GLOBAL, STY_NOTYPE, SYM_UNDEF, 0, 0);
+    s->next = undefs[h];
+    undefs[h] = s;
+    return s->idx;
+}
+
+static int sym_of(char *name) {
+    if (need_thunk && !strcmp(name, thunk_name)) return thunk_sym;
+    Obj *o = sym_find(name);
+    if (o && o->section) return o->sym;
+    return undef_sym(name);
+}
+
+static void define_sym(Obj *o, int sec, unsigned value, unsigned size) {
+    o->sym = obj_add_sym(obj, o->name, o->is_static ? BIND_LOCAL : BIND_GLOBAL,
+                         o->is_function ? STY_FUNC : STY_OBJECT, sec, value, size);
+}
+
+/* переменная или литерал: своя секция, указатели в инициализаторе — перемещения */
+static void emit_data(Obj *o, const char *prefix, int kind, int align) {
+    int s = obj_add_section(obj, format("%s.%s", prefix, o->name), kind, align,
+                            (unsigned char *)o->init_data, o->ty->size);
+    define_sym(o, s, 0, o->ty->size);
+}
+
+static void emit_data_relocs(Obj *o) {
+    Section *sec = obj->secs[obj->syms[o->sym].sec];
+    for (Reloc *r = o->rel; r; r = r->next) {
+        unsigned char *p = sec->data + r->offset;
+        unsigned v = r->addend;
+        p[0] = v; p[1] = v >> 8; p[2] = v >> 16; p[3] = v >> 24;
+        obj_add_reloc(sec, r->offset, R_386_32, sym_of(r->label));
     }
-    close(fd);
 }
 
-void codegen(Obj *prog, const char *out_path) {
+ObjFile *codegen(Obj *prog, const char *name, char **roots, int n_roots, bool export_all) {
+    memset(symtab, 0, sizeof(symtab));
+    memset(undefs, 0, sizeof(undefs));
+    text.len = 0;
+    n_relocs = 0;
+    need_thunk = false;
+    thunk_sym = -1;
+    obj = obj_new(name);
+
     build_symtab(prog);
-    mark_live("__libc_start", NULL);
-    mark_live("main", NULL);
-    mark_live("exit", NULL);
+    for (int i = 0; i < n_roots; i++) mark_live(roots[i]);
+    if (export_all)
+        for (Obj *o = prog; o; o = o->next)
+            if (!o->is_static && sym_find(o->name) == o) mark_live(o->name);
     /* Деление long long зовётся из генератора, до разметки живых функций этого не видно. */
-    if (sym_find("__divdi3")) mark_live("__divdi3", NULL);
-    if (sym_find("__udivdi3")) mark_live("__udivdi3", NULL);
-    if (sym_find("__moddi3")) mark_live("__moddi3", NULL);
-    if (sym_find("__umoddi3")) mark_live("__umoddi3", NULL);
+    mark_live("__divdi3");
+    mark_live("__udivdi3");
+    mark_live("__moddi3");
+    mark_live("__umoddi3");
 
-    /* место под заголовки ELF: 52 + 2*32 = 116 байт, код с 0x80 */
-    for (int i = 0; i < 0x80; i++) buf_byte(&text, 0);
-    unsigned entry = TEXT_BASE + text.len;
-    if (opt_linux) {
-        E("8B 04 24 8D 4C 24 04 51 50");                        /* argc = [esp], argv = esp+4 */
-    } else {
-        E("FF 74 24 08 FF 74 24 08");                           /* ядро: _start(argc, argv) */
-    }
-    E("E8"); sym_ref("__libc_start", true);
-    E("EB FE");
-
-    /* код всех нужных функций */
+    /* код всех нужных функций — подряд в text, потом каждая станет своей секцией */
     for (Obj *o = prog; o; o = o->next)
-        if (o->is_function && o->body && o->is_live && sym_find(o->name) == o) gen_function(o);
+        if (o->is_function && o->body && emitted(o)) gen_function(o);
 
-    /* строки и прочие только-для-чтения данные — тоже в сегмент кода */
+    /* секции и символы: сначала все определения, потом перемещения (они ссылаются вперёд) */
     for (Obj *o = prog; o; o = o->next) {
-        if (o->is_function || !o->is_rodata || !o->is_live || sym_find(o->name) != o) continue;
-        while (text.len % (o->align > 4 ? 4 : o->align)) buf_byte(&text, 0);
+        if (!o->is_function || !o->body || !emitted(o)) continue;
+        int s = obj_add_section(obj, format(".text.%s", o->name), SEC_TEXT, 1,
+                                text.data + o->addr, o->code_end - o->addr);
+        define_sym(o, s, 0, o->code_end - o->addr);
+    }
+    if (need_thunk) {
+        static unsigned char thunk[] = { 0x8B, 0x1C, 0x24, 0xC3 };   /* mov ebx, [esp]; ret */
+        int s = obj_add_section(obj, ".text.__x86.get_pc_thunk.bx", SEC_TEXT, 1, thunk, 4);
+        thunk_sym = obj_add_sym(obj, thunk_name, BIND_LOCAL, STY_FUNC, s, 0, 4);
+    }
+    for (Obj *o = prog; o; o = o->next) {
+        if (o->is_function || !o->is_rodata || !emitted(o)) continue;
         o->section = 1;
-        o->addr = text.len;
-        buf_put(&text, o->init_data, o->ty->size);
+        emit_data(o, ".rodata", SEC_RODATA, o->align < 1 ? 1 : o->align > 4 ? 4 : o->align);
     }
-
-    /* данные: с новой страницы */
-    unsigned data_vaddr = (TEXT_BASE + text.len + 4095) & ~4095u;
-    Buf data = {0};
     for (Obj *o = prog; o; o = o->next) {
-        if (o->is_function || o->is_rodata || !o->is_live || sym_find(o->name) != o || !o->init_data) continue;
-        int al = o->align < 1 ? 1 : o->align;
-        while (data.len % al) buf_byte(&data, 0);
-        o->section = 2;
-        o->addr = data.len;
-        buf_put(&data, o->init_data, o->ty->size);
-    }
-    if (!data.len) buf_u32(&data, 0);
-    int bss = data.len;
-    for (Obj *o = prog; o; o = o->next) {
-        if (o->is_function || o->is_rodata || !o->is_live || sym_find(o->name) != o || o->init_data) continue;
+        if (o->is_function || o->is_rodata || !emitted(o)) continue;
         if (o->ty->size < 0) error("'%s' has incomplete type", o->name);
         int al = o->align < 1 ? 1 : o->align;
-        bss = align_to(bss, al);
-        o->section = 3;
-        o->addr = bss;
-        bss += o->ty->size;
-    }
-
-    /* адреса символов */
-    #define ADDR(o) ((o)->section == 1 ? TEXT_BASE + (o)->addr : data_vaddr + (o)->addr)
-    for (int i = 0; i < n_relocs; i++) {
-        Obj *o = sym_find(relocs[i].name);
-        if (!o || !o->section) error("undefined reference to '%s'", relocs[i].name);
-        unsigned a = ADDR(o);
-        if (relocs[i].rel) put_u32_at(&text, relocs[i].pos, a - (TEXT_BASE + relocs[i].pos + 4));
-        else put_u32_at(&text, relocs[i].pos, a);
-    }
-    for (Obj *o = prog; o; o = o->next) {
-        if (!o->is_live || sym_find(o->name) != o || o->is_function) continue;
-        for (Reloc *r = o->rel; r; r = r->next) {
-            Obj *t = sym_find(r->label);
-            if (!t || !t->section) error("undefined reference to '%s'", r->label);
-            unsigned v = ADDR(t) + r->addend;
-            if (o->section == 1) put_u32_at(&text, o->addr + r->offset, v);
-            else put_u32_at(&data, o->addr + r->offset, v);
+        if (o->init_data) {
+            o->section = 2;
+            emit_data(o, ".data", SEC_DATA, al);
+        } else if (o->is_static) {
+            o->section = 3;
+            emit_data(o, ".bss", SEC_BSS, al);
+        } else {                                            /* int x; — общий (COMMON), как у gcc -fcommon */
+            o->section = 4;
+            define_sym(o, SYM_COMMON, al, o->ty->size);
         }
     }
 
-    /* заголовки ELF */
-    unsigned data_off = (text.len + 4095) & ~4095u;
-    Buf h = {0};
-    buf_put(&h, "\x7f" "ELF\x01\x01\x01\0\0\0\0\0\0\0\0\0", 16);
-    buf_byte(&h, 2); buf_byte(&h, 0);                           /* e_type = EXEC */
-    buf_byte(&h, 3); buf_byte(&h, 0);                           /* e_machine = 386 */
-    buf_u32(&h, 1);                                             /* e_version */
-    buf_u32(&h, entry);
-    buf_u32(&h, 52);                                            /* e_phoff */
-    buf_u32(&h, 0);                                             /* e_shoff */
-    buf_u32(&h, 0);                                             /* e_flags */
-    buf_byte(&h, 52); buf_byte(&h, 0);                          /* e_ehsize */
-    buf_byte(&h, 32); buf_byte(&h, 0);                          /* e_phentsize */
-    buf_byte(&h, 2); buf_byte(&h, 0);                           /* e_phnum */
-    buf_u32(&h, 0);                                             /* shentsize, shnum */
-    buf_byte(&h, 0); buf_byte(&h, 0);                           /* shstrndx */
-    /* сегмент кода: R-X */
-    buf_u32(&h, 1); buf_u32(&h, 0); buf_u32(&h, TEXT_BASE); buf_u32(&h, TEXT_BASE);
-    buf_u32(&h, text.len); buf_u32(&h, text.len); buf_u32(&h, 5); buf_u32(&h, 0x1000);
-    /* сегмент данных: RW- */
-    buf_u32(&h, 1); buf_u32(&h, data_off); buf_u32(&h, data_vaddr); buf_u32(&h, data_vaddr);
-    buf_u32(&h, data.len); buf_u32(&h, bss); buf_u32(&h, 6); buf_u32(&h, 0x1000);
-    memcpy(text.data, h.data, h.len);
-
-    Buf out = {0};
-    buf_put(&out, text.data, text.len);
-    while ((unsigned)out.len < data_off) buf_byte(&out, 0);
-    buf_put(&out, data.data, data.len);
-    write_file(out_path, &out);
+    int ri = 0;
+    for (Obj *o = prog; o; o = o->next) {
+        if (!o->is_function || !o->body || !emitted(o)) continue;
+        Section *sec = obj->secs[obj->syms[o->sym].sec];
+        for (; ri < n_relocs && relocs[ri].pos < (int)o->code_end; ri++)
+            obj_add_reloc(sec, relocs[ri].pos - o->addr, relocs[ri].type, sym_of(relocs[ri].name));
+    }
+    for (Obj *o = prog; o; o = o->next)
+        if (!o->is_function && o->section && o->section != 4 && emitted(o)) emit_data_relocs(o);
+    return obj;
 }
