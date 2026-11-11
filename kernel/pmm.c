@@ -147,6 +147,11 @@ void pmm_free(u32 addr) {
     if (!refs) return;
     u32 f = addr / PAGE_SIZE;
     if (addr % PAGE_SIZE || addr < LOW_RESERVED || f >= limit_frame || !is_used(f)) return;
+    /* Ноль у занятого кадра — зарезервированная память (таблица счётчиков,
+     * ядро), а не последняя ссылка. Отдавать такой кадр нельзя: следующий
+     * pmm_alloc перезапишет его. Повторное освобождение уже свободного кадра
+     * отсекается проверкой is_used выше. */
+    if (refs[f] == 0) kpanic("free of a reserved frame");
     if (refs[f] > 1) { refs[f]--; return; }          /* кадр ещё отображён в другом процессе */
     refs[f] = 0;
     set_free(f);
