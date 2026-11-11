@@ -1,3 +1,4 @@
+#include "klog.h"
 /* Сетевой стек: Ethernet, ARP, IPv4, ICMP, UDP, DHCP и сетевой поток ядра.
  *
  * Путь пакета наружу:  данные -> [UDP/TCP заголовок] -> ip_send -> [IP] -> [Ethernet] -> e1000
@@ -61,12 +62,12 @@ static bool arp_lookup(u32 ip, u8 *mac) {
     return false;
 }
 
-static void eth_send(const u8 *dst, u16 type, u32 payload_len) {
+static int eth_send(const u8 *dst, u16 type, u32 payload_len) {
     struct eth_hdr *e = (struct eth_hdr *)frame;
     memcpy(e->dst, dst, 6);
     memcpy(e->src, netcfg.mac, 6);
     e->type = htons(type);
-    e1000_send(frame, sizeof(*e) + payload_len);
+    return e1000_send(frame,sizeof(*e)+payload_len)<0?-EAGAIN:0;
 }
 
 static void arp_send(u16 op, const u8 *tha, u32 tpa) {
@@ -158,8 +159,7 @@ int ip_send(u32 dst, u8 proto, const void *payload, u32 len) {
         loop_n++;
         return 0;
     }
-    eth_send(mac, ETH_IP, sizeof(*ip) + len);
-    return 0;
+    return eth_send(mac,ETH_IP,sizeof(*ip)+len);
 }
 
 /* ------------------------------------------------------------ ICMP (ping) */
@@ -292,18 +292,24 @@ struct dhcp_msg {
     u8  options[312];
 } __attribute__((packed));
 
-static struct { int state; u32 xid, offer, server, mask, gw, dns, lease; } dh;   /* 1 ждём OFFER, 2 ждём ACK, 3 готово */
+static struct {
+    int state; /* 1 OFFER, 2 ACK, 3 configured, 4 NAK */
+    u32 xid,offer,server,mask,gw,dns,lease,started,received,rejected;
+} dh;
 
 static void dhcp_send(int type) {
     static struct dhcp_msg m;
     memset(&m, 0, sizeof(m));
     m.op = 1; m.htype = 1; m.hlen = 6;
     m.xid = htonl(dh.xid);
+    u32 elapsed=(timer_ticks()-dh.started)/TIMER_HZ;
+    m.secs=htons(elapsed>65535?65535:elapsed);
     m.flags = htons(0x8000);                     /* ответ — широковещательно: у нас ещё нет адреса */
     memcpy(m.chaddr, netcfg.mac, 6);
     m.magic = htonl(0x63825363);
     u8 *o = m.options;
     *o++ = 53; *o++ = 1; *o++ = type;            /* тип сообщения */
+    *o++=61;*o++=7;*o++=1;memcpy(o,netcfg.mac,6);o+=6; /* Ethernet client ID */
     if (type == 3) {
         *o++ = 50; *o++ = 4; u32 ip = htonl(dh.offer); memcpy(o, &ip, 4); o += 4;      /* хотим этот адрес */
         *o++ = 54; *o++ = 4; u32 sv = htonl(dh.server); memcpy(o, &sv, 4); o += 4;     /* у этого сервера */
@@ -311,23 +317,29 @@ static void dhcp_send(int type) {
     *o++ = 55; *o++ = 3; *o++ = 1; *o++ = 3; *o++ = 6;   /* нужны: маска, шлюз, DNS */
     *o++ = 12; *o++ = 4; memcpy(o, "myos", 4); o += 4;    /* имя хоста */
     *o++ = 255;
-    udp_send(0xFFFFFFFF, 68, 67, &m, sizeof(m) - sizeof(m.options) + (o - m.options));
+    u32 bytes=sizeof(m)-sizeof(m.options)+(o-m.options);
+    if (bytes<300)bytes=300; /* RFC 1542 BOOTP minimum; zero pad after END */
+    int result=udp_send(0xFFFFFFFF,68,67,&m,bytes);
+    klogf("NET: DHCP %s xid=%x bytes=%u result=%d\n",type==1?"DISCOVER":"REQUEST",dh.xid,bytes,result);
 }
 
 static void dhcp_input(const u8 *p, u32 len) {
-    if (len < sizeof(struct dhcp_msg) - 312 || dh.state == 0 || dh.state == 3) return;
+    if (dh.state==0 || dh.state>=3)return;
+    dh.received++;
+    if (len < sizeof(struct dhcp_msg) - 312) { dh.rejected++;return; }
     const struct dhcp_msg *m = (const struct dhcp_msg *)p;
-    if (m->op != 2 || ntohl(m->xid) != dh.xid || ntohl(m->magic) != 0x63825363) return;
+    if (m->op != 2 || m->htype!=1 || m->hlen!=6 || memcmp(m->chaddr,netcfg.mac,6) ||
+        ntohl(m->xid) != dh.xid || ntohl(m->magic) != 0x63825363) { dh.rejected++;return; }
     int type = 0;
     u32 mask = 0, gw = 0, dns = 0, server = 0, lease = 0;
     const u8 *o = m->options, *end = p + len;
     while (o < end && *o != 255) {
         if (*o == 0) { o++; continue; }
-        if (o + 2 > end || o + 2 + o[1] > end) break;
+        if (o + 2 > end || o + 2 + o[1] > end) { dh.rejected++;return; }
         u8 code = o[0], l = o[1];
         const u8 *v = o + 2;
         u32 val = l >= 4 ? (u32)v[0] << 24 | v[1] << 16 | v[2] << 8 | v[3] : 0;
-        if (code == 53) type = v[0];
+        if (code == 53 && l==1) type = v[0];
         if (code == 1) mask = val;
         if (code == 3) gw = val;
         if (code == 6) dns = val;
@@ -335,55 +347,90 @@ static void dhcp_input(const u8 *p, u32 len) {
         if (code == 51) lease = val;
         o += 2 + l;
     }
-    if (dh.state == 1 && type == 2) {             /* OFFER */
+    if (dh.state == 1 && type == 2 && server && ntohl(m->yiaddr)) {
         dh.offer = ntohl(m->yiaddr);
         dh.server = server;
+        dh.mask=mask;dh.gw=gw;dh.dns=dns;dh.lease=lease;
+        klogf("NET: DHCP OFFER address=%x server=%x\n",dh.offer,server);
         dh.state = 2;
         dhcp_send(3);
-    } else if (dh.state == 2 && type == 5) {      /* ACK */
-        dh.mask = mask; dh.gw = gw; dh.dns = dns; dh.lease = lease;
+    } else if (dh.state == 2 && type == 5 && (!server || server==dh.server) &&
+               (!m->yiaddr || ntohl(m->yiaddr)==dh.offer)) {
+        if(mask)dh.mask=mask;
+        if(gw)dh.gw=gw;
+        if(dns)dh.dns=dns;
+        if(lease)dh.lease=lease;
+        klogf("NET: DHCP ACK address=%x\n",dh.offer);
         dh.state = 3;
-    }
+    } else if (dh.state==2 && type==6 && (!server || server==dh.server)) {
+        klogf("NET: DHCP NAK from server=%x\n",server);
+        dh.state=4;
+    } else dh.rejected++;
 }
 
-static void dhcp_run(void) {
+static bool dhcp_run(void) {
     dh.xid = 0x4D794F53 ^ timer_ticks();
+    dh.started=timer_ticks();dh.received=dh.rejected=0;dh.state=1;
     for (int attempt = 0; attempt < 3 && dh.state != 3; attempt++) {
-        dh.state = 1;
+        if (!e1000_link())break;
         mutex_lock(&net_lock);
-        dhcp_send(1);
+        dhcp_send(dh.state==2?3:1);
         mutex_unlock(&net_lock);
-        for (int t = 0; t < 100 && dh.state != 3; t++) {     /* до 1 секунды */
+        u32 deadline=timer_ticks()+(4u<<attempt)*TIMER_HZ;
+        int previous=dh.state;
+        bool refused=false;
+        while (dh.state!=3 && (i32)(timer_ticks()-deadline)<0 && e1000_link()) {
             mutex_lock(&net_lock);
             net_poll();
             mutex_unlock(&net_lock);
+            if (dh.state==4) { dh.state=1;refused=true;break; }
+            if (previous==1 && dh.state==2)deadline=timer_ticks()+4*TIMER_HZ;
+            previous=dh.state;
             sleep_ms(10);
+        }
+        if(dh.state!=3 && !refused) {
+            klogf("NET: DHCP timeout waiting for %s, attempt=%u replies=%u rejected=%u\n",
+                dh.state==2?"ACK":"OFFER",attempt+1,dh.received,dh.rejected);
+            e1000_diagnose();
         }
     }
     mutex_lock(&net_lock);
-    if (dh.state == 3) {
+    bool configured=dh.state==3 && dh.offer!=0;
+    if (configured) {
         netcfg.ip = dh.offer;
         netcfg.mask = dh.mask ? dh.mask : IP(255, 255, 255, 0);
         netcfg.gw = dh.gw;
         netcfg.dns = dh.dns;
         netcfg.lease = dh.lease;
         netcfg.dhcp = true;
-    } else {                                      /* запасной вариант: адреса встроенной сети QEMU */
-        netcfg.ip = IP(10, 0, 2, 15);
-        netcfg.mask = IP(255, 255, 255, 0);
-        netcfg.gw = IP(10, 0, 2, 2);
-        netcfg.dns = IP(10, 0, 2, 3);
+        klogf("NET: DHCP configured %u.%u.%u.%u\n",netcfg.ip>>24,(netcfg.ip>>16)&255,(netcfg.ip>>8)&255,netcfg.ip&255);
+        if (netcfg.gw)arp_send(1,NULL,netcfg.gw);
+    } else {
+        dh.state=0;
+        klogf("NET: DHCP pending; retrying after link/server becomes available\n");
     }
-    arp_send(1, NULL, netcfg.gw);                 /* сразу узнаем MAC шлюза */
     mutex_unlock(&net_lock);
+    return configured;
 }
 
 /* ------------------------------------------------------------ поток */
 
 static void net_thread(void *arg) {
     (void)arg;
-    dhcp_run();
+    u32 retry_at=timer_ticks();bool linked_before=false;
     for (;;) {
+        bool linked=e1000_link();
+        if (linked && !linked_before && netcfg.dhcp) {
+            mutex_lock(&net_lock);
+            netcfg.ip=netcfg.mask=netcfg.gw=netcfg.dns=netcfg.lease=0;
+            netcfg.dhcp=false;dh.state=0;memset(arp_cache,0,sizeof(arp_cache));
+            mutex_unlock(&net_lock);
+            retry_at=timer_ticks();
+        }
+        if (linked && !netcfg.ip && (i32)(timer_ticks()-retry_at)>=0) {
+            dhcp_run();retry_at=timer_ticks()+5*TIMER_HZ;
+        }
+        linked_before=linked;
         mutex_lock(&net_lock);
         net_poll();
         tcp_timer();
@@ -398,6 +445,6 @@ bool net_init(void) {
     e1000_mac(netcfg.mac);
     netcfg.up = true;
     ip_id = timer_ticks();
-    task_create("net", net_thread, NULL);
+    if (task_create("net", net_thread, NULL)<0) { netcfg.up=false;return false; }
     return true;
 }

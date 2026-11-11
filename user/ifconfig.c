@@ -18,9 +18,9 @@ int main(int argc, char **argv) {
     if (argc != 1) { dprintf(STDERR, "usage: ifconfig            show settings\n       ifconfig dns IP     use another DNS server\n"); return 2; }
 
     struct net_info n;
-    if (netinfo(&n) < 0 || !n.up) { printf("No network card. Start QEMU with: -nic user,model=e1000\n"); return 1; }
+    if (netinfo(&n) < 0 || !n.up) { printf("No supported network adapter. Check NET boot diagnostics.\n"); return 1; }
     char a[16], b[16], c[16], d[16];
-    printf(ANSI_BOLD "eth0" ANSI_RESET "  Intel e1000   MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
+    printf(ANSI_BOLD "eth0" ANSI_RESET "  Intel Ethernet   MAC %02x:%02x:%02x:%02x:%02x:%02x\n",
            n.mac[0], n.mac[1], n.mac[2], n.mac[3], n.mac[4], n.mac[5]);
     if (!n.ip) { printf("      no address yet (DHCP in progress...)\n"); return 0; }
     printf("      inet " ANSI_GREEN "%s" ANSI_RESET "  mask %s", ip_str(n.ip, a), ip_str(n.mask, b));

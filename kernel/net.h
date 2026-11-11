@@ -40,7 +40,7 @@ struct net_config {
     u8   mac[6];
     u32  ip, mask, gw, dns;
     bool up;                        /* есть карта */
-    bool dhcp;                      /* адрес получен по DHCP (иначе — запасной статический) */
+    bool dhcp;                      /* адрес получен по DHCP */
     u32  lease;                     /* секунд */
 };
 extern struct net_config netcfg;

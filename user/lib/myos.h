@@ -6,6 +6,15 @@
 int sysinfo(struct system_info *out, unsigned size);
 /* Returns online CPU count, or negative errno; capacity is in records. */
 int cpuinfo(struct cpu_info *out, unsigned capacity);
+#define KLOG_CAPACITY 16384u
+#define KLOG_OLDEST 1u
+#define KLOG_END 2u
+struct klog_cursor { unsigned lo,hi,dropped,flags; };
+/* Returns bytes or -1/errno; updates this reader's cursor, never clears logs.
+ * OLDEST starts at retained history; END skips history. Flags reset on read.
+ * dropped reports overwritten bytes since the previous call. */
+int klog_read(void *buffer,unsigned capacity,struct klog_cursor *cursor);
+
 
 typedef unsigned int   size_t;
 typedef int            ssize_t;
@@ -52,7 +61,7 @@ enum {
     SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
     SYS_SYMLINK, SYS_READLINK, SYS_LSTAT,
     SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
-    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX
+    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");

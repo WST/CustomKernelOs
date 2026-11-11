@@ -1,3 +1,4 @@
+#include "klog.h"
 /* Главная функция ядра: сюда приходит управление из entry.asm. */
 #include "vga.h"
 #include "sysinfo.h"
@@ -17,6 +18,7 @@
 #include "fb.h"
 #include "display.h"
 #include "net.h"
+#include "e1000.h"
 #include "mouse.h"
 #include "virtinput.h"
 #include "xhci.h"
@@ -133,10 +135,10 @@ void kmain(void) {
 
     boot_stage("network adapter");
     if (net_init())
-        ok("Network: Intel e1000, MAC %02x:%02x:%02x:%02x:%02x:%02x, DHCP in background",
-           netcfg.mac[0], netcfg.mac[1], netcfg.mac[2], netcfg.mac[3], netcfg.mac[4], netcfg.mac[5]);
+        ok("Network: %s, MAC %02x:%02x:%02x:%02x:%02x:%02x, DHCP in background",
+           e1000_name(),netcfg.mac[0], netcfg.mac[1], netcfg.mac[2], netcfg.mac[3], netcfg.mac[4], netcfg.mac[5]);
     else
-        fail("Network", "no e1000 card (run QEMU with -nic user,model=e1000)");
+        fail("Network", "adapter unavailable; use dmesg");
 
     boot_stage("storage probe");
     if (ata_init()) {
@@ -170,6 +172,7 @@ void kmain(void) {
     smp_init();
     ok("SMP initialization complete: %u CPU(s)",smp_count());
     boot_stage("services");
+    kprintf("Kernel log: 16 KiB memory ring; use dmesg\n");
     services_init();
     boot_stage("kernel ready; entering login/shell");
     shell_run();

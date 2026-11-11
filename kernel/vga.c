@@ -7,6 +7,7 @@
  * kprintf — одинаково в обоих режимах. */
 #include "vga.h"
 #include "string.h"
+#include "klog.h"
 #include "fb.h"
 #include "bootinfo.h"
 
@@ -358,45 +359,56 @@ void vga_write_at(int x, int y, const char *s, u8 fg, u8 bg) {
 }
 
 /* ---- kprintf: %s %c %d %u %x %p %% и ширина вида %08x / %5d ---- */
-static void print_num(u32 v, int base, bool neg, int width, char pad) {
+static void print_num(u32 v, int base, bool neg, int width, char pad,void (*emit)(char)) {
     char buf[16];
     int i = 0;
     const char *digits = "0123456789abcdef";
     do { buf[i++] = digits[v % base]; v /= base; } while (v);
     if (neg) buf[i++] = '-';
     while (i < width) buf[i++] = pad;
-    while (i) vga_putc(buf[--i]);
+    while (i) emit(buf[--i]);
 }
 
-void kprintf(const char *fmt, ...) {
-    va_list ap;
-    u32 f = irq_save();
-    va_start(ap, fmt);
-    vkprintf(fmt, ap);
-    va_end(ap);
-    irq_restore(f);
+static void emit_string(const char *s,void (*emit)(char)) {
+    while(*s)emit(*s++);
 }
-
-void vkprintf(const char *fmt, va_list ap) {
-    u32 flags=irq_save(); cursor_defer++;
+static void format(const char *fmt,va_list ap,void (*emit)(char)) {
     for (; *fmt; fmt++) {
-        if (*fmt != '%') { vga_putc(*fmt); continue; }
+        if (*fmt != '%') { emit(*fmt); continue; }
         fmt++;
         char pad = ' ';
         int width = 0;
         if (*fmt == '0') { pad = '0'; fmt++; }
         while (*fmt >= '0' && *fmt <= '9') width = width * 10 + (*fmt++ - '0');
         switch (*fmt) {
-        case 's': { const char *s = va_arg(ap, const char *); vga_puts(s ? s : "(null)"); break; }
-        case 'c': vga_putc((char)va_arg(ap, int)); break;
+        case 's': { const char *s = va_arg(ap, const char *); emit_string(s ? s : "(null)",emit); break; }
+        case 'c': emit((char)va_arg(ap, int)); break;
         case 'd': { int v = va_arg(ap, int);
-                    print_num(v < 0 ? -(u32)v : (u32)v, 10, v < 0, width, pad); break; }
-        case 'u': print_num(va_arg(ap, u32), 10, false, width, pad); break;
-        case 'x': print_num(va_arg(ap, u32), 16, false, width, pad); break;
-        case 'p': vga_puts("0x"); print_num(va_arg(ap, u32), 16, false, 8, '0'); break;
-        case '%': vga_putc('%'); break;
-        default:  vga_putc('%'); vga_putc(*fmt);
+                    print_num(v < 0 ? -(u32)v : (u32)v, 10, v < 0, width, pad,emit); break; }
+        case 'u': print_num(va_arg(ap, u32), 10, false, width, pad,emit); break;
+        case 'x': print_num(va_arg(ap, u32), 16, false, width, pad,emit); break;
+        case 'p': emit_string("0x",emit); print_num(va_arg(ap, u32), 16, false, 8, '0',emit); break;
+        case '%': emit('%'); break;
+        default:  emit('%'); emit(*fmt);
         }
     }
-    cursor_defer--; update_cursor(); irq_restore(flags);
+}
+static void console_log(char c) {
+    klog_write(&c,1);vga_putc(c);
+}
+static void quiet_log(char c) {
+    klog_write(&c,1);outb(0x3f8,(u8)c);
+}
+void klogf(const char *fmt,...) {
+    va_list ap;u32 flags=irq_save();
+    va_start(ap,fmt);format(fmt,ap,quiet_log);va_end(ap);
+    irq_restore(flags);
+}
+void kprintf(const char *fmt,...) {
+    va_list ap;va_start(ap,fmt);vkprintf(fmt,ap);va_end(ap);
+}
+void vkprintf(const char *fmt,va_list ap) {
+    u32 flags=irq_save();cursor_defer++;
+    format(fmt,ap,console_log);
+    cursor_defer--;update_cursor();irq_restore(flags);
 }

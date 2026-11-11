@@ -676,6 +676,7 @@ sysinfotest:
 # Hardware/USB live build is isolated from the original QEMU boot image.
 HWBUILD := $(BUILD)/hardware
 $(HWBUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
+$(BUILD)/e1000.o $(HWBUILD)/e1000.o: kernel/e1000_pch.inc
 HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC))
 $(HWBUILD):
 	mkdir -p $@
@@ -691,7 +692,15 @@ $(BUILD)/user/consoleload.o: tests/console_load.c user/lib/myos.h | $(BUILD)/use
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/consoleload: $(BUILD)/user/consoleload.o $(BUILD)/user/libmyos.a user/user.ld
 	$(LD) $(ULDFLAGS) $< $(BUILD)/user/libmyos.a -o $@
-.PHONY: usb-image usbtest consoletest consoleloadtest
+.PHONY: usb-image usbtest consoletest consoleloadtest ethernettest ethernet-smoke dhcptest
+dhcptest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections tests/dhcp_client.c -Wl,--gc-sections -o $(BUILD)/dhcp-client-test
+	./$(BUILD)/dhcp-client-test
+ethernet-smoke: usb-image
+	python3 tests/ethernet_smoke.py
+ethernettest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/e1000_driver.c -o $(BUILD)/e1000-driver-test
+	./$(BUILD)/e1000-driver-test
 consoleloadtest: usb-image $(BUILD)/user/consoleload
 	python3 tests/console_load_smoke.py
 consoletest: | $(BUILD)
@@ -748,3 +757,21 @@ $(BUILD)/user/threadcheck: $(BUILD)/user/threadcheck.o $(ULIB) user/user.ld
 .PHONY: threadtest
 threadtest:
 	python3 tests/thread_smoke.py
+
+.PHONY: klogtest
+klogtest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/klog_test.c -o $(BUILD)/klog-test
+	./$(BUILD)/klog-test
+
+.PHONY: dmesgtest
+dmesgtest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -DMYOS_HOST_LIBC -g -O1 -fsanitize=address,undefined -fno-builtin -Iuser/lib tests/dmesg_test.c -o $(BUILD)/dmesg-test
+	./$(BUILD)/dmesg-test
+
+$(BUILD)/user/klogcheck.o: tests/klogcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/klogcheck: $(BUILD)/user/klogcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: klog-smoke
+klog-smoke: usb-image $(BUILD)/user/klogcheck
+	python3 tests/klog_smoke.py

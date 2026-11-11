@@ -27,7 +27,7 @@ def save_png(ppm,png):
                     chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
 
 class VM:
-    def __init__(self,name,usb=True,vga='std',memory='256M',machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1):
+    def __init__(self,name,usb=True,vga='std',memory='256M',machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None):
         self.temp=tempfile.TemporaryDirectory(prefix='myos-usb-')
         # Poll a native filesystem log: DrvFS can return ENODATA while a Windows
         # file is concurrently extended by QEMU.
@@ -48,6 +48,7 @@ class VM:
                    '-drive','format=raw,file=build/hardware/live-root.img,snapshot=on,index=1']
         else:
             args+=['-drive',f'format=raw,file={IMAGE},snapshot=on']
+        args+=extra or []
         self.err=(B/(name+'.stderr')).open('w')
         self.p=subprocess.Popen(args,stdout=subprocess.DEVNULL,stderr=self.err)
         self.s=socket.socket(socket.AF_UNIX); self.s.settimeout(5)
@@ -81,7 +82,12 @@ class VM:
     def send(self,text,marker):
         start=len(clean(self.log))
         for char in text:
-            self.key({' ':'spc','/':'slash','.':'dot','-':'minus',':':'semicolon','>':'dot'}.get(char,char))
+            if char=='>':
+                self.qmp('send-key',{'keys':[{'type':'qcode','data':'shift'},
+                                           {'type':'qcode','data':'dot'}],'hold-time':35})
+                time.sleep(.08)
+            else:
+                self.key({' ':'spc','/':'slash','.':'dot','-':'minus',':':'semicolon'}.get(char,char))
         self.key('ret')
         return self.wait(marker,start)
     def stop(self):

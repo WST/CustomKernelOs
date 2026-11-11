@@ -8,7 +8,8 @@
 extern int printf(const char *,...);
 extern void exit(int);
 static u32 pixels[80*64];
-static unsigned glyphs,underlines,scrolls;
+static unsigned glyphs,underlines,scrolls,log_bytes;
+void klog_write(const char *s,u32 n) { (void)s;log_bytes+=n; }
 #define CHECK(condition) do { if (!(condition)) { printf("console check failed at %d: %s\n",__LINE__,#condition);exit(1); } } while(0)
 
 static u32 glyph_pixel(u8 ch,int x,int y,u32 fg,u32 bg) {
@@ -51,7 +52,11 @@ int main(void) {
     for(int mode=0;mode<2;mode++) {
         setup(mode);
         vga_puts("abcdefgh");verify();CHECK(underlines==1);
-        underlines=0;kprintf("%s %u %x","test",123u,42u);verify();CHECK(underlines<=1);
+        unsigned old_log=log_bytes,old_glyphs=glyphs;
+        klogf("NET: quiet diagnostic %u\n",42u);
+        CHECK(log_bytes>old_log && glyphs==old_glyphs);verify();
+        old_log=log_bytes;
+        underlines=0;kprintf("%s %u %x","test",123u,42u);verify();CHECK(underlines<=1 && log_bytes>old_log);
         for(int i=0;i<30;i++) { kprintf("\033[%umline %u\n",31u+i%7,(unsigned)i);verify(); }
         CHECK(mode?scrolls==0:scrolls>0);
         if(mode) {
