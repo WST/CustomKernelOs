@@ -134,9 +134,37 @@ static int iread(u32 ino, struct inode *out) {
     return FS_OK;
 }
 
+/* Последние прочитанные inode и блок файла. Обход каталога читает заголовок
+ * записи и имя двумя вызовами подряд: оба попадают в один блок и один inode. */
+static struct {
+    int slot;
+    u32 ino;
+    struct inode in;
+    bool valid;
+} inocache;
+static struct {
+    int slot;
+    u32 ino, index;
+    u8 data[BS];
+    bool valid;
+} blkcache;
+
+static void cache_drop_all(void) {
+    inocache.valid = false;
+    blkcache.valid = false;
+}
+
+static void cache_drop_ino(u32 ino) {
+    if (inocache.valid && inocache.slot == selected && inocache.ino == ino)
+        inocache.valid = false;
+    if (blkcache.valid && blkcache.slot == selected && blkcache.ino == ino)
+        blkcache.valid = false;
+}
+
 static int iwrite(u32 ino, const struct inode *in) {
     static struct inode blk[INODES_PER_BLK];
     u32 b = sb.inode_start + ino / INODES_PER_BLK;
+    cache_drop_ino(ino);
     if (ino == 0 || ino >= sb.inode_count) return FS_EINVAL;
     if (bread(b, blk)) return FS_EIO;
     blk[ino % INODES_PER_BLK] = *in;
@@ -298,22 +326,38 @@ static void free_all_blocks(struct inode *in) {
 /* ---------------------------------------------------------------- чтение/запись */
 
 static int myfs_read_impl(u32 ino, u32 off, void *buf, u32 n) {
-    static u8 blk[BS];
     struct inode in;
-    int r = iread(ino, &in);
-    if (r) return r;
+    int r;
+    if (inocache.valid && inocache.slot == selected && inocache.ino == ino) {
+        in = inocache.in;
+    } else {
+        r = iread(ino, &in);
+        if (r) return r;
+        inocache.slot = selected;
+        inocache.ino = ino;
+        inocache.in = in;
+        inocache.valid = true;
+    }
     if (off >= in.size) return 0;
     if (n > in.size - off) n = in.size - off;
 
     u8 *dst = buf;
     u32 done = 0;
     while (done < n) {
-        u32 pos = off + done, bo = pos % BS;
+        u32 pos = off + done, bo = pos % BS, index = pos / BS;
         u32 chunk = BS - bo;
         if (chunk > n - done) chunk = n - done;
-        u32 b = bmap(&in, pos / BS, false);
-        if (b) { if (bread(b, blk)) return FS_EIO; memcpy(dst + done, blk + bo, chunk); }
-        else   memset(dst + done, 0, chunk);    /* «дырка» в файле */
+        u32 b = bmap(&in, index, false);
+        if (b) {
+            if (!(blkcache.valid && blkcache.slot == selected && blkcache.ino == ino && blkcache.index == index)) {
+                if (bread(b, blkcache.data)) return FS_EIO;
+                blkcache.slot = selected;
+                blkcache.ino = ino;
+                blkcache.index = index;
+                blkcache.valid = true;
+            }
+            memcpy(dst + done, blkcache.data + bo, chunk);
+        } else memset(dst + done, 0, chunk);    /* «дырка» в файле */
         done += chunk;
     }
     return done;
@@ -758,6 +802,7 @@ static int myfs_getpath_impl(u32 ino, char *buf, u32 len) {
 
 static int myfs_format_impl(u32 version) {
     static u8 zero[BS];
+    cache_drop_all();
     u32 total = block_get(states[selected].device)->sectors;
     if (!total) return FS_ENODEV;
     if (version < VERSION_MIN || version > VERSION) return FS_EINVAL;
@@ -807,6 +852,7 @@ static int myfs_format_impl(u32 version) {
 }
 
 static int myfs_init_impl(bool *formatted, bool allow_format) {
+    cache_drop_all();
     *formatted = false;
     mounted = false;
     if (!block_get(states[selected].device)->sectors) return FS_ENODEV;
