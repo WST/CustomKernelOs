@@ -174,10 +174,11 @@ static int is_elf(const unsigned char *b, unsigned sz) {
 }
 
 /* Теги-указатели храним уже с базой загрузки. */
-static void read_dynamic(Obj *o, unsigned dyn) {
+static void read_dynamic(Obj *o, unsigned dyn, unsigned end) {
     unsigned p;
+    if (!dyn || end < dyn || end - dyn < 8) die("bad dynamic section");
     o->syment = 16;
-    for (p = dyn; rd32((unsigned char *)p) != DT_NULL; p += 8) {
+    for (p = dyn; p + 8 <= end && rd32((unsigned char *)p) != DT_NULL; p += 8) {
         unsigned tag = rd32((unsigned char *)p);
         unsigned val = rd32((unsigned char *)(p + 4));
         unsigned ptr = val + o->bias;
@@ -214,13 +215,20 @@ static void read_dynamic(Obj *o, unsigned dyn) {
     }
 }
 
-static unsigned dyn_addr(const unsigned char *eh, unsigned bias) {
+static unsigned dyn_addr(const unsigned char *eh, unsigned bias, unsigned *end) {
     unsigned phoff = rd32(eh + 28);
     unsigned phnum = rd16(eh + 44);
     unsigned i;
+    if (!phnum || phnum > 64 || phoff > 4096 || phoff + phnum * 32 < phoff) return 0;
     for (i = 0; i < phnum; i++) {
         const unsigned char *ph = eh + phoff + i * 32;
-        if (rd32(ph) == PT_DYNAMIC) return bias + rd32(ph + 8);
+        unsigned memsz, addr;
+        if (rd32(ph) != PT_DYNAMIC) continue;
+        memsz = rd32(ph + 20);
+        addr = bias + rd32(ph + 8);
+        if (!memsz || memsz > 65536 || addr + memsz < addr) return 0;
+        *end = addr + memsz;
+        return addr;
     }
     return 0;
 }
@@ -467,9 +475,12 @@ static Obj *map_library(const char *path) {
         if (off + filesz > sz) die("segment past end of file");
         mem_copy(o->map + va, file + off, filesz);
     }
-    dyn = dyn_addr(o->map, o->bias);
-    if (!dyn) die("library has no dynamic section");
-    read_dynamic(o, dyn);
+    {
+        unsigned dend = 0;
+        dyn = dyn_addr(o->map, o->bias, &dend);
+        if (!dyn) die("library has no dynamic section");
+        read_dynamic(o, dyn, dend);
+    }
     if (!o->symtab || !o->strtab || !o->hash) die("library has no symbol hash");
     return o;
 }
@@ -492,14 +503,18 @@ static void fill_mapped(Obj *o, unsigned char *eh, unsigned bias, int kind) {
     o->kind = kind;
     o->pinned = 1;
     o->refs = 1;
-    dyn = dyn_addr(eh, bias);
-    if (!dyn) die(kind == 3 ? "ld.so has no dynamic section" : "executable has no dynamic section");
-    read_dynamic(o, dyn);
+    {
+        unsigned dend = 0;
+        dyn = dyn_addr(eh, bias, &dend);
+        if (!dyn) die(kind == 3 ? "ld.so has no dynamic section" : "executable has no dynamic section");
+        read_dynamic(o, dyn, dend);
+    }
     if (!o->symtab || !o->strtab || !o->hash) die("missing symbol hash");
 }
 
 static unsigned exe_bias(unsigned char *eh, unsigned header) {
     unsigned phoff = rd32(eh + 28), phnum = rd16(eh + 44), i;
+    if (!phnum || phnum > 64 || phoff > 4096) return 0;
     for (i = 0; i < phnum; i++) {
         const unsigned char *ph = eh + phoff + i * 32;
         if (rd32(ph) != PT_LOAD || rd32(ph + 4) != 0) continue;
