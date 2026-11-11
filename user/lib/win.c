@@ -8,6 +8,29 @@ static struct msg pending[16];                  /* пришли, пока жда
 static int n_pending;
 static bool font_loaded;
 
+/* Pixel copies precede publication/acknowledgement on all guest CPUs. */
+static void frame_barrier(void) {
+#ifndef __MYOS_CC__
+    __asm__ volatile ("mfence" : : : "memory");
+#endif
+}
+
+static bool wait_consumed(window *w) {
+    unsigned start = ticks();
+    while (w->frame->submitted != w->frame->consumed) {
+        frame_barrier();
+        if (ticks() - start >= 2000 || service_find("desktop") != desktop) return false;
+        sleep_ms(1);
+    }
+    frame_barrier();
+    return true;
+}
+
+static void release_buffer(window *w) {
+    if (w->frame) { shm_unmap(w->frame); free(w->pixels); }
+    else shm_unmap(w->pixels);
+}
+
 int win_desktop_pid(void) {
     if (!desktop) desktop = service_find("desktop");
     return desktop;
@@ -26,7 +49,7 @@ window *win_create(const char *title, int w, int h) {
     for (int i = 0; i < MAX_WINDOWS; i++) if (!wins[i]) { slot = i; break; }
     if (slot < 0) return NULL;
 
-    int id = shm_alloc(w * h * 4);
+    int id = shm_alloc(WM_FRAME_BYTES + w * h * 4);
     if (id < 0) return NULL;
     color_t *px = shm_map(id);
     if (!px) return NULL;
@@ -34,7 +57,7 @@ window *win_create(const char *title, int w, int h) {
     struct msg m;
     memset(&m, 0, sizeof(m));
     m.type = WM_CREATE;
-    m.a = id; m.b = w; m.c = h;
+    m.a = id; m.b = w; m.c = h; m.d = WM_BUFFERED;
     copy_title(m.data, title);
     if (msg_send(desktop, &m) < 0) { shm_unmap(px); return NULL; }
 
@@ -44,10 +67,21 @@ window *win_create(const char *title, int w, int h) {
         if (r.from == desktop && r.type == WM_CREATED) {
             if (r.a < 0) { shm_unmap(px); return NULL; }
             window *win = calloc(1, sizeof(window));
+            color_t *draw = (unsigned)r.b == WM_BUFFERED ? calloc(w * h, 4) : px;
+            if (!win || !draw) {
+                struct msg close = {0}; close.type = WM_DESTROY; close.a = r.a;
+                msg_send(desktop, &close);
+                if ((unsigned)r.b == WM_BUFFERED) free(draw);
+                free(win); shm_unmap(px); return NULL;
+            }
             win->id = r.a;
             win->w = w; win->h = h;
-            win->pixels = px;
+            win->pixels = draw;
             win->shm = id;
+            if ((unsigned)r.b == WM_BUFFERED) {
+                win->frame = (struct win_frame *)px;
+                win->shared = (color_t *)((char *)px + WM_FRAME_BYTES);
+            }
             wins[slot] = win;
             win_select(win);
             return win;
@@ -64,7 +98,7 @@ void win_destroy(window *w) {
     m.a = w->id;
     msg_send(desktop, &m);
     for (int i = 0; i < MAX_WINDOWS; i++) if (wins[i] == w) wins[i] = NULL;
-    shm_unmap(w->pixels);
+    release_buffer(w);
     free(w);
 }
 
@@ -75,13 +109,37 @@ void win_select(window *w) {
 }
 
 void win_update_rect(window *w, int x, int y, int rw, int rh) {
+    if (!w || rw <= 0 || rh <= 0) return;
+    if (w->full_update) { x = y = 0; rw = w->w; rh = w->h; }
+    if (x < 0) { rw += x; x = 0; }
+    if (y < 0) { rh += y; y = 0; }
+    if (x >= w->w || y >= w->h || rw <= 0 || rh <= 0) return;
+    if (rw > w->w - x) rw = w->w - x;
+    if (rh > w->h - y) rh = w->h - y;
+    if (w->frame) {
+        if (!wait_consumed(w)) { w->full_update = true; return; }
+        for (int row = y; row < y + rh; row++)
+            memcpy(w->shared + row * w->w + x, w->pixels + row * w->w + x, rw * 4);
+        frame_barrier();
+        w->frame->submitted++;
+        frame_barrier();
+    }
     struct msg m;
     memset(&m, 0, sizeof(m));
     m.type = WM_UPDATE;
     m.a = w->id;
     m.b = x; m.c = y;
     m.d = (rw & 0xFFFF) | (rh << 16);
-    msg_send(desktop, &m);
+    int result;
+    unsigned start = ticks();
+    while ((result = msg_send(desktop, &m)) == -EAGAIN && ticks() - start < 2000)
+        sleep_ms(1);
+    /* No message references this publication after a failed send. The next
+     * update publishes the entire buffer so its earlier damage is not lost. */
+    if (result < 0 && w->frame) {
+        w->frame->consumed = w->frame->submitted;
+        w->full_update = true;
+    } else if (result == 0) w->full_update = false;
 }
 
 void win_update(window *w) { win_update_rect(w, 0, 0, w->w, w->h); }
@@ -108,10 +166,12 @@ void win_set_resizable(window *w, int min_w, int min_h) {
 static bool resize_buffer(window *w, int nw, int nh) {
     if (nw <= 0 || nh <= 0 || nw > 2560 || nh > 1600) return false;
     if (nw == w->w && nh == w->h) return false;
-    int id = shm_alloc(nw * nh * 4);
+    int id = shm_alloc((w->frame ? WM_FRAME_BYTES : 0) + nw * nh * 4);
     if (id < 0) return false;
-    color_t *px = shm_map(id);
-    if (!px) return false;
+    void *mapping = shm_map(id);
+    if (!mapping) return false;
+    color_t *px = w->frame ? malloc(nw * nh * 4) : mapping;
+    if (!px) { shm_unmap(mapping); return false; }
     color_t fill = w->pixels[w->w * w->h - 1];
     int cw = nw < w->w ? nw : w->w, ch = nh < w->h ? nh : w->h;
     for (int y = 0; y < nh; y++) {
@@ -124,12 +184,26 @@ static bool resize_buffer(window *w, int nw, int nh) {
     memset(&m, 0, sizeof(m));
     m.type = WM_SETBUF;
     m.a = w->id; m.b = id; m.c = nw; m.d = nh;
-    msg_send(desktop, &m);
+    if (w->frame) {
+        unsigned marker = WM_BUFFERED; memcpy(m.data, &marker, sizeof(marker));
+        memcpy((char *)mapping + WM_FRAME_BYTES, px, nw * nh * 4);
+        ((struct win_frame *)mapping)->submitted = 1;
+        frame_barrier();
+    }
+    if (msg_send(desktop, &m) < 0) {
+        if (w->frame) free(px);
+        shm_unmap(mapping); return false;
+    }
     bool selected = gfx_buf == w->pixels;
-    shm_unmap(w->pixels);                       /* стол держит своё отображение, пока не возьмёт новое */
+    bool buffered = w->frame != NULL;
+    release_buffer(w);
     w->pixels = px;
     w->shm = id;
     w->w = nw; w->h = nh;
+    if (buffered) {
+        w->frame = mapping;
+        w->shared = (color_t *)((char *)mapping + WM_FRAME_BYTES);
+    }
     if (selected) win_select(w);
     return true;
 }

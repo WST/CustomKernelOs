@@ -571,6 +571,11 @@ $(BUILD)/user/gpuscene.o: tests/gpu_scene.c user/desktop.c user/desktop_gpu.inc 
 $(BUILD)/user/gpuscene: $(BUILD)/user/gpuscene.o $(BUILD)/user/l_img.o $(ULIB) user/user.ld
 	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
 
+$(BUILD)/user/windowframecheck.o: tests/window_framecheck.c user/desktop.c user/desktop_gpu.inc user/lib/win.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/windowframecheck: $(BUILD)/user/windowframecheck.o $(BUILD)/user/l_img.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
 $(BUILD)/user/mousecheck.o: tests/mousecheck.c user/lib/gfx.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/mousecheck: $(BUILD)/user/mousecheck.o $(ULIB) user/user.ld

@@ -18,7 +18,7 @@ parser.add_argument('--build', default='build/graphics-test', help='isolated bui
 args = parser.parse_args()
 b = pathlib.Path(args.build)
 make = ['make', 'BUILD=' + str(b)]
-subprocess.run(make + [str(b / 'os.img'), str(b / 'myfs'), str(b / 'user/gpucheck'), str(b / 'user/desktop'), str(b / 'user/gpuscene')], check=True, stdout=subprocess.DEVNULL)
+subprocess.run(make + [str(b / 'os.img'), str(b / 'myfs'), str(b / 'ld.so'), str(b / 'user/gpucheck'), str(b / 'user/desktop'), str(b / 'user/browser'), str(b / 'user/gpuscene'), str(b / 'user/windowframecheck')], check=True, stdout=subprocess.DEVNULL)
 image = b / ('graphics-' + args.backend + '.img')
 if not args.reuse:
     with image.open('wb') as f:
@@ -29,6 +29,11 @@ else:
 subprocess.run([str(b / 'myfs'), str(image), 'rm', '/etc/services/enabled/desktop.service'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.run([str(b / 'myfs'), str(image), 'put', str(b / 'user/gpucheck'), '/bin/gpucheck'], check=True, stdout=subprocess.DEVNULL)
 subprocess.run([str(b / 'myfs'), str(image), 'put', str(b / 'user/gpuscene'), '/bin/gpuscene'], check=True, stdout=subprocess.DEVNULL)
+subprocess.run([str(b / 'myfs'), str(image), 'put', str(b / 'user/windowframecheck'), '/bin/windowframecheck'], check=True, stdout=subprocess.DEVNULL)
+subprocess.run([str(b / 'myfs'), str(image), 'put', str(b / 'user/browser'), '/bin/browser'], check=True, stdout=subprocess.DEVNULL)
+for source, target in ((b / 'ld.so', '/lib/ld.so'), (b / 'user/libc.so', '/lib/libc.so'),
+                       (b / 'user/libgfx.so', '/lib/libgfx.so')):
+    subprocess.run([str(b / 'myfs'), str(image), 'put', str(source), target], check=True, stdout=subprocess.DEVNULL)
 server = None
 requests = []
 if args.backend == 'gpu':
@@ -85,7 +90,7 @@ def wait(marker):
         data = output()
         for name in ('SOFTWARE BEGIN', 'SOFTWARE END', 'GPU BEGIN', 'GPU END'):
             if 'GPUSCENE ' + name in data and name not in milestones: milestones[name] = time.monotonic()
-        if 'GPUSCENE FAIL' in data or 'GPUCHECK FAIL' in data or 'PAGE FAULT' in data or 'PANIC' in data:
+        if 'GPUSCENE FAIL' in data or 'GPUCHECK FAIL' in data or 'FRAMECHECK FAIL' in data or 'PAGE FAULT' in data or 'PANIC' in data:
             raise AssertionError(data[-2500:])
         if marker in data:
             return
@@ -184,6 +189,13 @@ try:
         print('GPUSCENE HOST WALL: software %.3f s, GPU %.3f s' % (
             milestones['SOFTWARE END'] - milestones['SOFTWARE BEGIN'],
             milestones['GPU END'] - milestones['GPU BEGIN']), flush=True)
+        time.sleep(.3); key('ctrl-u'); send('windowframecheck\n'); wait('FRAMECHECK PASS')
+        time.sleep(.3); key('ctrl-u'); send('windowframecheck large\n')
+        end = time.monotonic() + 35
+        while output().count('FRAMECHECK PASS') < 2:
+            assert 'FRAMECHECK FAIL' not in output(), output()[-2500:]
+            assert time.monotonic() < end, output()[-2500:]
+            time.sleep(.1)
         # Ensure the actual desktop, including ARGB decorations, runs afterward.
         time.sleep(.3); key('ctrl-u')
         send('sh /graphics-desktop.sh\n'); time.sleep(7)

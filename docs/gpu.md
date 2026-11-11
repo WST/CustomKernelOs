@@ -84,6 +84,18 @@ storage are bounded. Partial updates must match the retained texture dimensions
 and fit entirely inside its bounds. Textures are released on owner exit and mode change.
 
 The desktop retains wallpaper, application-content and ARGB decoration textures.
+Window clients draw into private pixels. `win_update_rect` copies completed
+damage into a shared publication buffer, which stays immutable until the
+desktop captures it into its own retained CPU snapshot. A shared sequence
+acknowledgement releases the publication even for minimized windows; it cannot
+be lost when the input mailbox fills. The application may rasterize its next
+frame meanwhile, and a subsequent update waits before reusing the publication.
+Resize seeds and transfers a new publication before releasing the old mapping.
+This prevents an application's clear/paint pass from appearing as flicker.
+The handshake is negotiated when creating a window; legacy clients/desktops
+retain their previous layout. Rebuild window applications and restart the
+desktop to use the buffered path on both sides.
+
 The dock, panel, menu, tooltip and cursor keep separate small cached textures;
 hover, focus, title, clock and layout changes invalidate their appearance.
 Trusted draw/blit streams are batched until the next fenced transfer or scanout
@@ -129,6 +141,12 @@ page through the desktop and checks that GPU composition remains active. It neve
 The GPU test requires a hardware-capable Linux/WSL graphical session. macOS
 selection is covered by launcher tests; a native macOS runtime still needs to
 be checked on a Mac.
+
+`windowframecheck` uses the real window library and desktop message handler
+in separate processes, deliberately delaying capture until the client starts
+an unfinished repaint. GPU readback must contain only completed pixels. The
+graphics test runs it at 1024x768 and 2560x1600 and checks partial damage,
+back-to-back publications, resize, minimized updates and window destruction.
 
 ### Recorded hardware run
 

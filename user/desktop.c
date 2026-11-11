@@ -141,6 +141,7 @@ struct win {
     int  owner;                         /* pid программы */
     int  shm;
     color_t *px;
+    struct win_frame *frame;            /* buffered clients publish immutable snapshots */
     int  w, h;                          /* размер содержимого на экране (рамки) */
     int  bw, bh;                        /* размер буфера программы (отстаёт, пока она не ответит) */
     int  x, y;                          /* левый верхний угол заголовка */
@@ -1065,7 +1066,8 @@ static void remove_window(int idx) {
     if (!w->used) return;
     if (!w->minimized) dirty_win(w);
     if (gpu_scene) { gfx_surface_upload(idx * 2, NULL, 0, 0, false); gfx_surface_upload(idx * 2 + 1, NULL, 0, 0, false); }
-    shm_unmap(w->px);
+    if (w->frame) { shm_unmap(w->frame); free(w->px); }
+    else shm_unmap(w->px);
     w->used = false;
     int k = 0, j = 0;
     for (; k < nz; k++) if (zorder[k] != idx) zorder[j++] = zorder[k];
@@ -1293,13 +1295,19 @@ static void handle_msg(struct msg *m) {
             send(m->from, WM_CREATED, -1, 0, 0, 0);
             return;
         }
+        bool buffered = (unsigned)m->d == WM_BUFFERED;
+        color_t *snapshot = buffered ? calloc(m->b * m->c, 4) : px;
+        if (!snapshot) {
+            shm_unmap(px); send(m->from, WM_CREATED, -1, 0, 0, 0); return;
+        }
         struct win *w = &wins[idx];
         memset(w, 0, sizeof(*w));
         w->used = true;
         w->gpu_dirty = true; gpu_content_ready[idx] = false; gpu_frame_hash[idx] = 0;
         w->owner = m->from;
         w->shm = m->a;
-        w->px = px;
+        w->px = snapshot;
+        if (buffered) w->frame = (struct win_frame *)px;
         w->w = w->bw = m->b; w->h = w->bh = m->c;
         memcpy(w->title, m->data, 39);
         w->title[39] = 0;
@@ -1311,7 +1319,7 @@ static void handle_msg(struct msg *m) {
         cascade++;
         fit_window(w);
         zorder[nz++] = idx;
-        send(m->from, WM_CREATED, idx, 0, 0, 0);
+        send(m->from, WM_CREATED, idx, buffered ? WM_BUFFERED : 0, 0, 0);
         if (overview_open) { overview_open = false; add_dirty(0, 0, SW, SH); }
         dirty_win(w);
         set_focus(idx);
@@ -1324,6 +1332,17 @@ static void handle_msg(struct msg *m) {
         int rw = m->d & 0xFFFF, rh = (m->d >> 16) & 0xFFFF;
         struct rect r = { m->b, m->c, rw, rh }, all = { 0, 0, w->bw, w->bh };
         if (!intersect(r, all, &r)) return;
+        if (w->frame) {
+            unsigned submitted = w->frame->submitted;
+            __asm__ volatile ("mfence" : : : "memory");
+            const color_t *shared = (const color_t *)((const char *)w->frame + WM_FRAME_BYTES);
+            for (int row = r.y; row < r.y + r.h; row++)
+                memcpy(w->px + row * w->bw + r.x, shared + row * w->bw + r.x, r.w * 4);
+            /* Composition only reads our private snapshot. Releasing shm here
+             * is safe even when presentation is delayed or the window hidden. */
+            __asm__ volatile ("mfence" : : : "memory");
+            w->frame->consumed = submitted;
+        }
         w->gpu_dirty = true;
         w->gpu_damage = w->gpu_damage.w ? bounding(w->gpu_damage, r) : r;
         if (w->minimized || overview_open) return;
@@ -1359,8 +1378,22 @@ static void handle_msg(struct msg *m) {
         if (m->c <= 0 || m->d <= 0 || m->c > 2560 || m->d > 1600) return;
         color_t *px = shm_map(m->b);
         if (!px) return;
-        shm_unmap(w->px);
-        w->px = px; w->shm = m->b;
+        unsigned marker; memcpy(&marker, m->data, sizeof(marker));
+        bool buffered = marker == WM_BUFFERED;
+        color_t *snapshot = buffered ? malloc(m->c * m->d * 4) : px;
+        if (!snapshot) { shm_unmap(px); return; }
+        if (buffered) {
+            struct win_frame *frame = (struct win_frame *)px;
+            unsigned submitted = frame->submitted;
+            __asm__ volatile ("mfence" : : : "memory");
+            memcpy(snapshot, (char *)px + WM_FRAME_BYTES, m->c * m->d * 4);
+            __asm__ volatile ("mfence" : : : "memory");
+            frame->consumed = submitted;
+        }
+        if (w->frame) { shm_unmap(w->frame); free(w->px); }
+        else shm_unmap(w->px);
+        w->frame = buffered ? (struct win_frame *)px : NULL;
+        w->px = snapshot; w->shm = m->b;
         w->bw = m->c; w->bh = m->d;
         w->gpu_dirty = true; gpu_content_ready[m->a] = false;
         w->gpu_damage = mkrect(0, 0, 0, 0);
@@ -1967,7 +2000,10 @@ start_session:
     }
     sleep_ms(300);
     for (int j = 0; j < n_owners; j++) kill(owners[j]);
-    for (int i = 0; i < MAXWIN; i++) if (wins[i].used) shm_unmap(wins[i].px);
+    for (int i = 0; i < MAXWIN; i++) if (wins[i].used) {
+        if (wins[i].frame) { shm_unmap(wins[i].frame); free(wins[i].px); }
+        else shm_unmap(wins[i].px);
+    }
     while (waitpid(-1, NULL, WNOHANG) > 0) {}
     if (logout_requested) {
         for (int i=n-1;i>=0;i--) if (member[i]) kill(pi[i].pid);
