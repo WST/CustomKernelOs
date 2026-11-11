@@ -10,7 +10,7 @@ static struct { u16 base,control; u8 slave; u32 sectors; char model[41]; } units
     { .base=0x170, .control=0x376, .slave=0 }
 };
 static void delay(int u) { for(int i=0;i<4;i++) inb(units[u].control); }
-static int wait(int u,bool drq) {
+static int wait_status(int u,bool drq,bool identifying) {
     /* Host sparse-file allocation/flush can take seconds. A count of port
      * reads is not a stable timeout across real CPUs and QEMU. */
     u32 began=timer_ticks();
@@ -18,17 +18,25 @@ static int wait(int u,bool drq) {
         u8 st=inb(units[u].base+7);
         if(st==0 || st==0xff) return -1;
         if(st&0x80) continue;
+        if(identifying) {
+            /* IDENTIFY DEVICE is rejected by packet devices (e.g. QEMU's
+             * default CD-ROM). Inspect the signature after BSY clears,
+             * before treating its expected ABRT as a disk I/O failure. */
+            u8 mid=inb(units[u].base+4),hi=inb(units[u].base+5);
+            if((mid==0x14 && hi==0xeb) || (mid==0x69 && hi==0x96)) return -1;
+        }
         if(st&0x21) { kprintf("ATA unit %u: status=%x error=%x\n",u,st,inb(units[u].base+1)); return -1; }
         if(!drq || (st&8)) return 0;
     }
     kprintf("ATA unit %u: timeout, status=%x\n",u,inb(units[u].base+7)); return -1;
 }
+static int wait(int u,bool drq) { return wait_status(u,drq,false); }
 static bool identify(int u) {
     u16 b=units[u].base; units[u].sectors=0;
     outb(units[u].control,2); outb(b+6,0xa0|units[u].slave); delay(u);
     for(int i=2;i<=5;i++) outb(b+i,0);
     outb(b+7,0xec); delay(u);
-    if(wait(u,true)<0 || inb(b+4) || inb(b+5)) return false;
+    if(wait_status(u,true,true)<0 || inb(b+4) || inb(b+5)) return false;
     u16 id[256]; for(int i=0;i<256;i++) id[i]=inw(b);
     if(!(id[49]&(1<<9))) return false;
     u32 n=id[60]|(u32)id[61]<<16;
