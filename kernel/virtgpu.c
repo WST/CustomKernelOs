@@ -37,12 +37,29 @@ static u32 queue_page, next_mmio, next_id = 1, front, back, upload;
 static u32 width, height, error;
 static u64 fence;
 static bool virgl, live, changed;
+static u32 damage_x0,damage_y0,damage_x1,damage_y1;
+static void damage(u32 x,u32 y,u32 w,u32 h) {
+    if(!changed) { damage_x0=x;damage_y0=y;damage_x1=x+w;damage_y1=y+h; }
+    else {
+        if(x<damage_x0)damage_x0=x;
+        if(y<damage_y0)damage_y0=y;
+        if(x+w>damage_x1)damage_x1=x+w;
+        if(y+h>damage_y1)damage_y1=y+h;
+    }
+    changed=true;
+}
 static struct { u32 id, w, h, format; } surfaces[VGPU_SURFACE_LIMIT];
 static u32 surface_bytes;
 static u8 command[CMD_BYTES] __attribute__((aligned(4096)));
 static u8 batch[BATCH_BYTES] __attribute__((aligned(4096)));
 static u32 batch_words;
 static struct header response __attribute__((aligned(16)));
+/* Presentation owns immutable command/response storage until the host has
+ * acknowledged it. Only display flush is deferred; uploads stay fenced. */
+static u8 present_command[48] __attribute__((aligned(16)));
+static struct header present_response __attribute__((aligned(16)));
+static bool present_pending;
+static u64 present_fence;
 static struct pci_dev device;
 
 static u32 pciread(u32 off) { return pci_read(device.bus, device.dev, device.func, off); }
@@ -68,31 +85,55 @@ static void *map_cap(u32 cap) {
     return (void *)(virt + (addr & 4095));
 }
 
-static bool send_now(u8 *packet, u32 bytes, u32 type, u32 ctx) {
-    if (!live || bytes < sizeof(struct header) || bytes > CMD_BYTES) return false;
-    struct header *h = (void *)packet;
-    h->type = type; h->flags = 1; h->fence = ++fence; h->ctx = ctx; h->padding = 0;
-    response.type = 0;
-    u32 cmd_phys, resp_phys;
-    if (!vmm_translate((u32)packet, &cmd_phys) || !vmm_translate((u32)&response, &resp_phys)) return false;
-    descs[0] = (struct desc){ cmd_phys, bytes, 1, 1 };
-    descs[1] = (struct desc){ resp_phys, sizeof(response), 2, 0 };
-    avail[2 + (qindex % QN)] = 0;
-    BARRIER();
-    avail[1] = ++qindex;
-    BARRIER();
-    *notify = 0;
+static int control_complete(const struct header *reply,u64 expected,bool block) {
+    if(!block && used[1]!=qindex)return 0;
     /* No interrupts are required, including during early boot. The bound also
      * prevents a failed host GPU from trapping the kernel in an infinite wait. */
     u32 spins = 100000000;
-    while (used[1] != qindex && --spins) __asm__ volatile ("pause" : : : "memory");
-    BARRIER();
-    if (!spins || response.type != 0x1100 || response.fence != h->fence) {
-        error = spins ? response.type : 0xffff;
-        if (!spins) live = false;
-        return false;
+    /* Some VirGL hosts retire fences on a coarse timer if the guest goes
+     * quiet after submitting. Re-notify the unchanged queue a bounded number
+     * of times to let them observe a completed fence promptly. Descriptors,
+     * response storage and upload backing remain pinned until completion. */
+    u32 gap=1024,until_poll=gap,rechecks=0;
+    while (used[1] != qindex && --spins) {
+        __asm__ volatile ("pause" : : : "memory");
+        if(virgl && rechecks<32 && !--until_poll) {
+            BARRIER();*notify=0;rechecks++;
+            if(gap<16384)gap*=2;
+            until_poll=gap;
+        }
     }
+    BARRIER();
+    if (!spins || reply->type != 0x1100 || reply->fence != expected) {
+        error = spins ? reply->type : 0xffff;
+        if (!spins) live = false;
+        return -1;
+    }
+    return 1;
+}
+static bool present_complete(bool block) {
+    if(!present_pending)return true;
+    int result=control_complete(&present_response,present_fence,block);
+    if(result)present_pending=false;
+    if(result<0) { live=false;return false; }
     return true;
+}
+static bool send_now(u8 *packet, u32 bytes, u32 type, u32 ctx) {
+    if (!live || bytes < sizeof(struct header) || bytes > CMD_BYTES || !present_complete(true)) return false;
+    bool async=virgl && type==0x104 && bytes==sizeof(present_command);
+    if(async) { memcpy(present_command,packet,bytes);packet=present_command; }
+    struct header *h = (void *)packet;
+    h->type = type; h->flags = 1; h->fence = ++fence; h->ctx = ctx; h->padding = 0;
+    struct header *reply=async?&present_response:&response;
+    reply->type = 0;
+    u32 cmd_phys, resp_phys;
+    if (!vmm_translate((u32)packet, &cmd_phys) || !vmm_translate((u32)reply, &resp_phys)) return false;
+    descs[0] = (struct desc){ cmd_phys, bytes, 1, 1 };
+    descs[1] = (struct desc){ resp_phys, sizeof(*reply), 2, 0 };
+    avail[2 + (qindex % QN)] = 0;
+    BARRIER();avail[1] = ++qindex;BARRIER();*notify = 0;
+    if(async) { present_fence=h->fence;present_pending=true;return true; }
+    return control_complete(reply,h->fence,true)>0;
 }
 
 /* Batch trusted draw/blit streams between transfers and scanout changes.
@@ -223,6 +264,7 @@ bool vgpu_mode(u32 w, u32 h) {
     u32 old_upload = upload, old_front = front, old_back = back;
     u32 old_width = width, old_height = height;
     bool old_changed = changed;
+    u32 old_damage[4]={damage_x0,damage_y0,damage_x1,damage_y1};
     /* Preserve the previous mode until every new resource has been verified. */
     u32 old_bytes = width * height * 4;
     void *saved = old_bytes ? kmalloc(old_bytes) : NULL;
@@ -252,7 +294,7 @@ bool vgpu_mode(u32 w, u32 h) {
         px[0] = px[1] = 0;
         if (!transfer(upload, 0, 0, 2, 1, false) || !blit(upload, back, 0, 0, 0, 0, w, h)) goto fail;
     }
-    changed = true;
+    changed = false; damage(0,0,w,h);
     if (!vgpu_commit()) goto fail;
     destroy(old_upload); destroy(old_front); destroy(old_back);
     vgpu_surfaces_clear();
@@ -261,6 +303,7 @@ bool vgpu_mode(u32 w, u32 h) {
 fail:
     width = old_width; height = old_height;
     upload = old_upload; front = old_front; back = old_back; changed = old_changed;
+    damage_x0=old_damage[0];damage_y0=old_damage[1];damage_x1=old_damage[2];damage_y1=old_damage[3];
     if (saved) memcpy((void *)FB_VIRT, saved, old_bytes);
     if (old_upload) { scanout(virgl ? old_front : old_upload); flush(virgl ? old_front : old_upload); }
     destroy(new_upload); destroy(new_front); destroy(new_back);
@@ -344,18 +387,21 @@ bool vgpu_init(struct fb_info *info) {
 bool vgpu_upload(int x, int y, int w, int h) {
     if (!transfer(upload, x, y, w, h, false)) return false;
     if (virgl && !blit(upload, back, x, y, x, y, w, h)) return false;
-    changed = true;
+    damage(x,y,w,h);
     return true;
 }
 
 bool vgpu_commit(void) {
     if (!live) return false;
+    if(!present_complete(false))return false;
     if (!changed) return true;
     if (!scanout(virgl ? back : upload) || !flush(virgl ? back : upload)) return false;
     if (virgl) {
         u32 old = front; front = back; back = old;
-        /* Preserve unchanged pixels entirely on the GPU for the next frame. */
-        if (!blit(front, back, 0, 0, 0, 0, width, height)) return false;
+        /* Both targets already agree outside this frame's damage. Copy only
+         * the changed area, rather than a 16 MiB screen on every small move. */
+        if (!blit(front, back, damage_x0,damage_y0,damage_x0,damage_y0,
+                  damage_x1-damage_x0,damage_y1-damage_y0)) return false;
     }
     changed = false;
     return true;
@@ -366,7 +412,7 @@ bool vgpu_copy(int sx, int sy, int dx, int dy, int w, int h) {
     /* The upload texture is scratch here: two distinct resources make even
      * overlapping scroll/drag copies well defined on every OpenGL backend. */
     if (!blit(back, upload, sx, sy, 0, 0, w, h) || !blit(upload, back, 0, 0, dx, dy, w, h)) return false;
-    changed = true;
+    damage(dx,dy,w,h);
     return true;
 }
 
@@ -433,10 +479,25 @@ bool vgpu_surface_blit(u32 slot, int sx, int sy, int dx, int dy, int w, int h) {
         (u32)w > surfaces[slot].w - sx || (u32)h > surfaces[slot].h - sy ||
         (u32)dx > width || (u32)dy > height || (u32)w > width - dx || (u32)h > height - dy) return false;
     bool ok = surfaces[slot].format == 1
-        ? alpha_blit(surfaces[slot].id, surfaces[slot].w, surfaces[slot].h, sx, sy, dx, dy, w, h)
+        ? alpha_blit(surfaces[slot].id, surfaces[slot].w, surfaces[slot].h, sx, sy, dx, dy, w, h, 1,255)
         : blit_format(surfaces[slot].id, back, sx, sy, dx, dy, w, h, FORMAT, surfaces[slot].h);
     if (!ok) return false;
-    changed = true;
+    damage(dx,dy,w,h);
+    return true;
+}
+
+/* Draw a complete retained surface into a destination rectangle, clipped in
+ * destination space. UVs keep their original phase across dirty rectangles. */
+bool vgpu_surface_scaled(u32 slot,int x,int y,int w,int h,int cx,int cy,int cw,int ch,u32 opacity) {
+    if(!vgpu_accelerated() || slot>=VGPU_SURFACE_LIMIT || !surfaces[slot].id ||
+       w<=0 || h<=0 || w>8192 || h>8192 || x < -8192 || y < -8192 ||
+       x>8192 || y>8192 || cx<0 || cy<0 || cw<=0 || ch<=0 ||
+       (u32)cx>width || (u32)cy>height || (u32)cw>width-cx || (u32)ch>height-cy || opacity>255) return false;
+    int left=x>cx?x:cx, top=y>cy?y:cy;
+    int right=x+w<cx+cw?x+w:cx+cw, bottom=y+h<cy+ch?y+h:cy+ch;
+    if(left>=right || top>=bottom || !opacity)return true;
+    if(!alpha_blit(surfaces[slot].id,w,h,left-x,top-y,left,top,right-left,bottom-top,surfaces[slot].format,opacity)) return false;
+    damage(left,top,right-left,bottom-top);
     return true;
 }
 

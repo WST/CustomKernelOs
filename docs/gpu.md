@@ -84,6 +84,18 @@ storage are bounded. Partial updates must match the retained texture dimensions
 and fit entirely inside its bounds. Textures are released on owner exit and mode change.
 
 The desktop retains wallpaper, application-content and ARGB decoration textures.
+Window clients draw into private pixels. `win_update_rect` copies completed
+damage into a shared publication buffer, which stays immutable until the
+desktop captures it into its own retained CPU snapshot. A shared sequence
+acknowledgement releases the publication even for minimized windows; it cannot
+be lost when the input mailbox fills. The application may rasterize its next
+frame meanwhile, and a subsequent update waits before reusing the publication.
+Resize seeds and transfers a new publication before releasing the old mapping.
+This prevents an application's clear/paint pass from appearing as flicker.
+The handshake is negotiated when creating a window; legacy clients/desktops
+retain their previous layout. Rebuild window applications and restart the
+desktop to use the buffered path on both sides.
+
 The dock, panel, menu, tooltip and cursor keep separate small cached textures;
 hover, focus, title, clock and layout changes invalidate their appearance.
 Trusted draw/blit streams are batched until the next fenced transfer or scanout
@@ -107,6 +119,53 @@ use a distinct scratch texture. Timer updates cannot expose unfinished frames.
 This prevents partially assembled guest frames; it does not promise physical
 monitor vsync on every host/display configuration.
 
+## Frame cadence and motion
+
+The desktop waits for input outside an unfinished frame. Open/close,
+minimize/restore and maximize transitions reuse retained GPU textures with
+time-based easing, clipped scaling and opacity over 120–180 ms. Active
+transitions request frames on a 16 ms timeline; missed deadlines are skipped
+rather than replayed. Idle desktops still sleep. Pointer dragging remains
+direct, including pulling a maximized window down, and interaction cancels
+outstanding transitions before hit testing. Software composition keeps its
+immediate behavior. Maximized decoration textures contain only the title bar,
+avoiding full-screen transparent rasterization before the first frame.
+
+GPU targets are synchronized only across the union of changed pixels, while
+uploads, draw batches and presentation remain fenced. A ready desktop gets
+bounded scheduler yields before a publisher falls back to timer sleep, avoiding
+a mandatory 10 ms publication delay. Settings repaints on hover-region changes
+instead of every mouse coordinate. Browser wheel and keyboard scrolling uses a
+160 ms curve, accumulates repeated input and reuses exposed scroll strips;
+navigation, selection and resize cancel it. Deferred DOM repaint has a 16 ms
+budget instead of a 100 ms minimum.
+
+These timings target consistent motion, not guaranteed monitor refresh or
+Windows/macOS performance. On this WSLg/D3D12 setup, the 2560x1600 two-window
+drag benchmark originally took approximately 1.93–1.97 s for 100 frames.
+After reducing driver fence stalls, the same benchmark took 1.18 s (~85 guest
+frames/s). These are guest submissions, not a measurement of monitor refresh.
+
+The control queue retains fence validation for every command. While waiting,
+VirGL queues receive bounded, increasingly spaced notifications of the unchanged
+queue. This lets hosts such as QEMU 10.2.1 poll already-signaled fences without
+waiting for their 10 ms fence timer; no descriptor is submitted twice. In a
+diagnostic run this reduced average draw-submit waits from 11.8 to 4.1 ms.
+Display flush alone can remain in flight after frame end, with its own immutable
+command and response buffers. The next control submission drains and validates
+that fence before reusing queue descriptors. Uploads, readbacks and resource
+changes remain synchronous, and software/VirtIO 2D presentation is unchanged.
+This releases the kernel to process input while the host finishes presentation.
+
+On the same host, input latency during continuous GPU presentation measured
+11.71 ms median / 13.92 ms p95, versus 13.04 / 26.21 ms before these changes
+(24 QMP samples; host injection to owner, including about 1.25 ms QMP overhead).
+Run-to-run host scheduling affects these results: a repeat during the main build
+measured 12.24 / 16.68 ms. The hardware renderer was Mesa D3D12 / AMD Radeon
+Graphics; KVM was unavailable in this WSL session, so
+guest CPU execution still used TCG. Browser layout and CPU drawing can remain
+limited by CPU emulation even when the GPU renderer is accelerated.
+
 `gfx_readback` reads the visible GPU scanout for an owning program, including
 while another frame is unfinished. QEMU's `screendump` cannot read SDL GL scanout,
 so the GPU integration test uses this fenced readback to compare actual pixels.
@@ -129,6 +188,25 @@ page through the desktop and checks that GPU composition remains active. It neve
 The GPU test requires a hardware-capable Linux/WSL graphical session. macOS
 selection is covered by launcher tests; a native macOS runtime still needs to
 be checked on a Mac.
+
+`windowframecheck` uses the real window library and desktop message handler
+in separate processes, deliberately delaying capture until the client starts
+an unfinished repaint. GPU readback must contain only completed pixels. The
+graphics test runs it at 1024x768 and 2560x1600 and checks partial damage,
+back-to-back publications, resize, minimized updates and window destruction.
+
+`make smoothtest` exercises actual browser layout and painting while checking
+intermediate scroll positions, endpoints, repeated/reversed input and clamping.
+`python3 tests/graphics_smoke.py --backend gpu --large-scene` also checks scaled
+texture bounds, opacity, split clipping, retained damage and every window
+transition against final software-reference pixels without repairing the frame
+before comparison. `SMOOTHBENCH` records 100 dirty-window moves for comparisons.
+
+`python3 tests/mouse_smoke.py --backend gpu --latency-only --render-load`
+measures input delivery while an owning application continuously presents GPU
+frames. The default latency test also checks that an unfinished frame stays
+invisible. Both use disposable images; `--boot` accepts an older compatible
+kernel for comparison with the same test application.
 
 ### Recorded hardware run
 

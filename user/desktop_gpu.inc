@@ -38,7 +38,10 @@ static bool gpu_frame_surface(int idx) {
     unsigned hash = frame_hash(idx);
     if (gpu_frame_hash[idx] == hash) return true;
     struct win *w = &wins[idx];
-    int tw = outer_w(w) + SH_PAD * 2, th = outer_h(w) + SH_PAD * 2;
+    /* Maximized windows have only a title bar: do not rasterize millions of
+     * transparent content pixels before the first animation frame. */
+    int pad=w->maximized?0:SH_PAD;
+    int tw = outer_w(w) + pad * 2, th = w->maximized?HEAD_H:outer_h(w)+pad*2;
     struct gfx_canvas cv;
     memset(&cv, 0, sizeof(cv));
     cv.w = tw; cv.h = th; cv.save_buf = gfx_buf; cv.save_w = gfx_w; cv.save_h = gfx_h;
@@ -46,7 +49,7 @@ static bool gpu_frame_surface(int idx) {
     cv.black = malloc(tw * th * 4); cv.white = malloc(tw * th * 4);
     if (!cv.black || !cv.white) { free(cv.black); free(cv.white); return false; }
     int ox = w->x, oy = w->y;
-    w->x = SH_PAD; w->y = SH_PAD;
+    w->x = pad; w->y = pad;
     for (int pass = 0; pass < 2; pass++) {
         color_t *pixels = pass ? cv.white : cv.black;
         for (int i = 0; i < tw * th; i++) pixels[i] = pass ? 0xffffff : 0;
@@ -159,10 +162,20 @@ static bool gpu_compose(struct rect r) {
     for (int k = 0; k < nz; k++) {
         int idx = zorder[k];
         struct win *w = &wins[idx];
-        if (w->minimized || !intersect(r, win_full(w), NULL)) continue;
+        if ((w->minimized && !w->motion) || !intersect(r, win_full(w), NULL)) continue;
         if (!gpu_frame_surface(idx)) return false;
-        if (!gpu_part(idx * 2, mkrect(w->x - SH_PAD, w->y - SH_PAD,
-                    outer_w(w) + SH_PAD * 2, outer_h(w) + SH_PAD * 2), r)) return false;
+        if(w->motion) {
+            int pad=w->maximized?0:SH_PAD;
+            int px=pad*w->visual.w/w->w,py=pad*w->visual.h/outer_h(w);
+            int fh=w->maximized?HEAD_H*w->visual.h/outer_h(w):w->visual.h+py*2;
+            if(fh<1)fh=1;
+            if(gfx_surface_scaled(idx*2,w->visual.x-px,w->visual.y-py,
+                w->visual.w+px*2,fh,r.x,r.y,r.w,r.h,w->opacity)<0)return false;
+        } else {
+            int pad=w->maximized?0:SH_PAD;
+            if(!gpu_part(idx*2,mkrect(w->x-pad,w->y-pad,w->w+pad*2,
+                w->maximized?HEAD_H:outer_h(w)+pad*2),r))return false;
+        }
         if (w->gpu_dirty || !gpu_content_ready[idx]) {
             struct rect d = w->gpu_damage;
             int result = gpu_content_ready[idx] && d.w && d.h
@@ -173,7 +186,11 @@ static bool gpu_compose(struct rect r) {
             w->gpu_damage = mkrect(0, 0, 0, 0);
         }
         struct rect cr = mkrect(w->x, w->y + HEAD_H, w->w, w->h);
-        if (!gpu_part(idx * 2 + 1, cr, r)) return false;
+        if(w->motion) {
+            int head=HEAD_H*w->visual.h/outer_h(w);
+            if(gfx_surface_scaled(idx*2+1,w->visual.x,w->visual.y+head,
+                w->visual.w,w->visual.h-head,r.x,r.y,r.w,r.h,w->opacity)<0)return false;
+        } else if (!gpu_part(idx * 2 + 1, cr, r)) return false;
     }
     return gpu_overlay(r);
 }

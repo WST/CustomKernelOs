@@ -108,6 +108,17 @@ static void gallery(void) {
 }
 
 static int page, focus;
+static int hover_region(void) {
+    for(int i=0;i<4;i++)if(i!=page && over(12,102+i*52,166,44))return i+1;
+    if(page<2 && over(CX,ACTION_Y,180,38))return 10;
+    if(page==1) {
+        for(int i=0;i<6;i++)if(over(CX+i%3*180,100+i/3*120,162,108))return 20+i;
+        if(over(CX+194,ACTION_Y,180,38))return 26;
+    }
+    if(page==2 && over(CX,290,CW,76))return 30;
+    if(page==3)for(int i=0;i<3;i++)if(over(CX,210+i*88,CW,76))return 31+i;
+    return 0;
+}
 static const char *tabs[] = {"Сеть", "Рабочий стол", "Экран", "Система"};
 
 static void launch(const char *name) {
@@ -246,7 +257,12 @@ int main(void) {
     draw(); struct event e;
     while(win_event(&e,1000)) {
         if(e.type==EV_CLOSE || e.type==EV_QUIT || (e.type==EV_KEY && e.key==27)) break;
-        if(e.type==EV_MOUSE_MOVE) { hover_x=e.x; hover_y=e.y; }
+        if(e.type==EV_MOUSE_MOVE) {
+            int before=hover_region();hover_x=e.x;hover_y=e.y;
+            if(before==hover_region())continue;
+        }
+        if(e.type==EV_MOUSE_UP || e.type==EV_FOCUS || e.type==EV_MOUSE_WHEEL)continue;
+        if(e.type==EV_TIMEOUT && page!=0 && page!=3)continue;
         if(e.type==EV_MOUSE_DOWN) {
             focus=0;
             for(int i=0;i<4;i++) if(ui_inside(e.x,e.y,12,100+i*52,166,44)) { page=i; status[0]=0; }

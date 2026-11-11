@@ -96,6 +96,33 @@ int main(void) {
             abs((int)(c & 255) - 60) <= 2, "batch flush ordering");
     free(check);
     printf("GPUCHECK BATCH PASS\n");
+    require(gfx_surface_scaled(70,0,0,64,64,0,0,800,600,255)<0,"scaled slot bounds");
+    require(gfx_surface_scaled(0,0,0,0,64,0,0,800,600,255)<0,"scaled size bounds");
+    require(gfx_surface_scaled(0,0,0,64,64,-1,0,800,600,255)<0,"scaled clip bounds");
+    require(gfx_surface_scaled(0,0,0,64,64,0,0,800,600,256)<0,"scaled opacity bounds");
+    require(gfx_frame_begin()==0,"scaled begin");
+    require(gfx_surface_scaled(0,500,100,128,128,500,100,64,128,255)==0,"scaled left clip");
+    require(gfx_surface_scaled(0,500,100,128,128,564,100,64,128,255)==0,"scaled right clip");
+    require(gfx_surface_scaled(0,660,100,64,64,0,0,800,600,128)==0,"opaque fade");
+    require(gfx_surface_scaled(0,-32,260,128,128,0,0,800,600,255)==0,"offscreen scaled clip");
+    require(gfx_frame_end()==0,"scaled end");
+    check=malloc(gfx_w*gfx_h*4);
+    require(check && gfx_readback(check)==0,"scaled readback");
+    require((check[120*gfx_w+520]&0xffffff)==RGB(200,40,20) &&
+            (check[212*gfx_w+520]&0xffffff)==RGB(40,20,200) &&
+            (check[270*gfx_w+10]&0xffffff)==RGB(200,40,20),"scaled pixels/origin");
+    c=check[110*gfx_w+670];
+    require(abs((int)((c>>16)&255)-110)<=2 && abs((int)((c>>8)&255)-40)<=2 &&
+            abs((int)(c&255)-40)<=2,"scaled opacity pixels");
+    free(check);
+    require(gfx_frame_begin()==0,"small damage begin");
+    require(gfx_surface_blit(0,0,0,700,400,8,8)==0,"small retained damage");
+    require(gfx_frame_end()==0,"small damage end");
+    check=malloc(gfx_w*gfx_h*4);
+    require(check && gfx_readback(check)==0,"retained damage readback");
+    require((check[120*gfx_w+520]&0xffffff)==RGB(200,40,20),"damage preserves unchanged scanout");
+    free(check);
+    printf("GPUCHECK SCALED PASS\n");
     require(gfx_surface_upload(1, NULL, 0, 0, false) == 0, "delete surface");
     require(gfx_surface_blit(1, 0, 0, 0, 0, 1, 1) < 0, "deleted handle");
     require(gfx_set_mode(1280, 720) == 0, "1280x720"); gfx_check_mode();

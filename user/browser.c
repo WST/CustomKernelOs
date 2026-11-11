@@ -37,6 +37,7 @@ static int W = 800, H = 576;          /* окно можно растягива�
 #define ADDR_X 154
 #define ADDR_TEXT_X 184
 #define STATUS_H 20
+#define FRAME_MS 16
 #define VIEW_Y BAR_H
 #define VIEW_H (H - BAR_H - STATUS_H)
 #define MARGIN 12
@@ -134,6 +135,9 @@ static char *links[MAX_LINKS];
 static int link_node[MAX_LINKS];           /* узел DOM ссылки (для событий JS) или -1 */
 static int n_links;
 static int doc_h, scroll;
+static bool scroll_animating;
+static int scroll_from,scroll_target;
+static unsigned scroll_started,scroll_deadline;
 static unsigned paint_epoch;
 static int paint_damage_top,paint_damage_bottom;
 static unsigned scroll_reuse_frames;
@@ -2625,7 +2629,7 @@ static void after_js_ex(bool lazy) {
         draw_toolbar();
         win_update_rect(win, 0, 0, W, BAR_H);
     }
-    if (page_is_dom && dom_dirty && !(lazy && ticks() - last_layout < 100)) { relayout(true); redraw(); }
+    if (page_is_dom && dom_dirty && !(lazy && ticks() - last_layout < FRAME_MS)) { relayout(true); redraw(); }
 }
 
 static void after_js(void) { after_js_ex(false); }
@@ -2637,6 +2641,7 @@ static bool same_page(const char *a, const char *b) {
 }
 
 static void navigate(const char *target, bool add_history) {
+    scroll_animating=false;
     char u[512], loc[512];
     snprintf(u, sizeof(u), "%s", target);
     if (!strstr(u, "://") && strncmp(u, "about:", 6) && strncmp(u, "file:", 5)) {   /* «example.com» */
@@ -2807,9 +2812,38 @@ static int item_at(int x, int y) {
 }
 
 static void scroll_by(int d) {
+    scroll_animating=false;
     scroll += d;
     if (scroll > doc_h - VIEW_H) scroll = doc_h - VIEW_H;
     if (scroll < 0) scroll = 0;
+}
+
+/* Wheel/key scrolling follows a time-based curve; direct selection and JS
+ * offsets keep their immediate semantics. Repeated input extends the target. */
+static void smooth_scroll_by(int d) {
+    int limit=doc_h-VIEW_H;if(limit<0)limit=0;
+    int target=(scroll_animating?scroll_target:scroll)+d;
+    if(target<0)target=0;
+    if(target>limit)target=limit;
+    if(target==scroll) { scroll_animating=false;return; }
+    scroll_from=scroll;scroll_target=target;
+    scroll_started=ticks();scroll_deadline=scroll_started;
+    scroll_animating=true;
+}
+static void smooth_scroll_tick(void) {
+    if(!scroll_animating)return;
+    unsigned now=ticks();if((int)(now-scroll_deadline)<0)return;
+    int before=scroll;unsigned elapsed=now-scroll_started;
+    int limit=doc_h-VIEW_H;if(limit<0)limit=0;
+    if(scroll_target>limit)scroll_target=limit;
+    if(elapsed>=160) { scroll=scroll_target;scroll_animating=false; }
+    else {
+        int t=1024-(int)(elapsed*1024/160),eased=1024-t*t*t/(1024*1024);
+        scroll=scroll_from+(scroll_target-scroll_from)*eased/1024;
+    }
+    scroll_deadline+=FRAME_MS;
+    if((int)(now-scroll_deadline)>32)scroll_deadline=now+16;
+    if(scroll!=before)redraw();
 }
 
 /* Locate a UTF-8 character boundary in the nearest rendered text run. */
@@ -2855,8 +2889,7 @@ static void on_click(int x, int y) {
     editing_addr = false;
     if (x >= W - SB_W && doc_h > VIEW_H) {                  /* полоса прокрутки: страница вверх/вниз */
         int ky = VIEW_Y + (VIEW_H - 24) * scroll / (doc_h - VIEW_H);
-        scroll_by(y < ky ? -VIEW_H + 32 : VIEW_H - 32);
-        redraw();
+        smooth_scroll_by(y < ky ? -VIEW_H + 32 : VIEW_H - 32);
         return;
     }
     int i = item_at(x, y);
@@ -3043,12 +3076,12 @@ static void on_key(int k) {
         return;
     }
     switch (k) {
-    case KEY_DOWN: scroll_by(48); break;
-    case KEY_UP: scroll_by(-48); break;
-    case KEY_PGDN: case ' ': scroll_by(VIEW_H - 32); break;
-    case KEY_PGUP: scroll_by(-(VIEW_H - 32)); break;
-    case KEY_HOME: scroll = 0; break;
-    case KEY_END: scroll_by(doc_h); break;
+    case KEY_DOWN: smooth_scroll_by(48); return;
+    case KEY_UP: smooth_scroll_by(-48); return;
+    case KEY_PGDN: case ' ': smooth_scroll_by(VIEW_H - 32); return;
+    case KEY_PGUP: smooth_scroll_by(-(VIEW_H - 32)); return;
+    case KEY_HOME: smooth_scroll_by(-(scroll_animating?scroll_target:scroll)); return;
+    case KEY_END: smooth_scroll_by(doc_h); return;
     case 8: case 127: go_history(-1); return;
     case KEY_RIGHT: go_history(1); return;
     case CTRL('r'): navigate(url, false); return;
@@ -3090,10 +3123,15 @@ int main(int argc, char **argv) {
     if (verbose) printf("[browser %u ms] %s\n", ticks() - t_start, status);
     struct event e;
     for (;;) {
+        smooth_scroll_tick();
         int wait = page_is_dom ? dom_next_timer() : -1;
+        if(scroll_animating) {
+            int left=(int)(scroll_deadline-ticks());if(left<0)left=0;
+            if(wait<0 || left<wait)wait=left;
+        }
         if (img_more && !n_later) wait = 0;                /* есть нескачанные картинки: только заглянуть в события */
         if (page_is_dom && dom_dirty) {                    /* отложенная перерисовка */
-            int left = 100 - (int)(ticks() - last_layout);
+            int left = FRAME_MS - (int)(ticks() - last_layout);
             if (left < 0) left = 0;
             if (wait < 0 || left < wait) wait = left;
         }
@@ -3107,9 +3145,10 @@ int main(int argc, char **argv) {
         }
         if (e.type == EV_CLOSE) break;
         if (e.type == EV_MOUSE_WHEEL) {
-            if (e.y >= VIEW_Y && e.y < H - STATUS_H) { scroll_by(-e.wheel * 48); redraw(); }
+            if (e.y >= VIEW_Y && e.y < H - STATUS_H) smooth_scroll_by(-e.wheel * 48);
         }
         else if (e.type == EV_MOUSE_DOWN && (e.buttons & MOUSE_LEFT)) {
+            scroll_animating=false;
             int hit = item_at(e.x, e.y);
             if (e.y >= VIEW_Y && e.y < H - STATUS_H && hit >= 0 && items[hit].kind == IT_TEXT) {
                 sel_item = sel_end_item = text_position(e.x, e.y, &sel_byte);
@@ -3135,6 +3174,7 @@ int main(int argc, char **argv) {
         else if (e.type == EV_MOUSE_MOVE && !e.buttons) on_move(e.x, e.y);
         else if (e.type == EV_KEY) on_key(e.key);
         else if (e.type == EV_RESIZE) {                    /* новая ширина — разложить страницу заново */
+            scroll_animating=false;
             W = e.x; H = e.y;
             if (page_is_dom) {dom_set_viewport(view_w(),VIEW_H);dom_resize();relayout(true);}
             else { arena_used = 0; layout_html(body, body_len, true); }
