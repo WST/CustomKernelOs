@@ -167,7 +167,7 @@ ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(filter-out ldso,$(basename $(notdir $(wildcard user/*.c)))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
-ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
+ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o $(BUILD)/user/zlib.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
 ULIB := $(BUILD)/user/libmyos.a
 
 $(ULIB): $(ULIB_OBJS)
@@ -181,6 +181,9 @@ $(BUILD)/user/setjmp.o: user/lib/setjmp.S | $(BUILD)/user
 
 $(BUILD)/user/alloca.o: user/lib/alloca.S | $(BUILD)/user
 	$(CC) -m32 -c $< -o $@
+
+$(BUILD)/user/zlib.o: user/lib/zlib.c user/include/zlib.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
@@ -227,6 +230,19 @@ $(BUILD)/user/pic/win.o: user/lib/win.h user/lib/gfx.h
 
 $(BUILD)/user/libgfx.so: $(PIC_GFX) $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libgfx.so -Wl,--hash-style=sysv -o $@ $(PIC_GFX) -L$(BUILD)/user -lc
+
+$(BUILD)/user/pic/zlib.o: user/include/zlib.h
+$(BUILD)/user/libz.so: $(BUILD)/user/pic/zlib.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libz.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/zlib.o -L$(BUILD)/user -lc
+
+$(BUILD)/user/pic/math.o: user/include/math.h
+$(BUILD)/user/libm.so: $(BUILD)/user/pic/math.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libm.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/math.o -L$(BUILD)/user -lc
+
+$(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
+$(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/tar.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 
 $(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
@@ -276,8 +292,8 @@ $(BUILD)/user/l_svg.o: user/lib/svg.c user/lib/svg.h user/lib/gfx.h user/lib/js.
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
 
-$(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
-	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) -L$(BUILD)/user -lc -lgfx
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 
 # Native browser paint/scroll benchmark (not installed by default).
 $(BUILD)/user/browser-paint.o: tests/browser_paint.c user/browser.c user/lib/dom.h user/lib/gfx.h | $(BUILD)/user
@@ -305,7 +321,7 @@ programs: $(UBINS)
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
 CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
-CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/math.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
+CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/math.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
@@ -335,9 +351,19 @@ $(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/user/setjmp.o $(BUILD
 $(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+$(CCROOT)/lib/libz.a: $(BUILD)/libobj-linux/zlib.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libz.a: $(BUILD)/libobj-myos/zlib.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+$(CCROOT)/lib/libm.a: $(BUILD)/libobj-linux/math.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libm.a: $(BUILD)/libobj-myos/math.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -355,7 +381,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -390,11 +416,13 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in libc.c regex.c math.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in libc.c regex.c math.c zlib.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libc.so /lib/libc.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libgfx.so /lib/libgfx.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libz.so /lib/libz.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libm.so /lib/libm.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -490,7 +518,7 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 
 # Картинки и сертификаты на образцах (нужен python3 с Pillow и cryptography: pip install pillow cryptography)
 imgtest: | $(BUILD)
-	$(HOSTCC) -std=gnu17 -O1 -w -Iuser/lib -DIMG_HOST tests/img_test.c user/lib/img.c -o $(BUILD)/img-test
+	$(HOSTCC) -std=gnu17 -O1 -w -Iuser/lib -DIMG_HOST tests/img_test.c user/lib/img.c user/lib/zlib.c -o $(BUILD)/img-test
 	python3 tests/img/make.py $(BUILD)/imgt
 	@fails=0; while read n w h t; do ./$(BUILD)/img-test $(BUILD)/imgt/$$n $(BUILD)/imgt/$$n.rgba $$w $$h $$t || fails=1; done < $(BUILD)/imgt/cases.txt; \
 	    [ $$fails = 0 ] && echo "images: OK"
@@ -503,26 +531,26 @@ x509test: | $(BUILD)
 # Весь браузер (загрузка, DOM, JS, CSS, раскладка, картинки) на Linux с AddressSanitizer:
 #   build/browser-host страница.html [w 1280] [scroll] [click] [keys] [images] [timers 500] [shot f.ppm]
 # Optimized host benchmark; sanitizer builds are used separately by browsertest.
-$(BUILD)/browser-smooth-test: tests/browser_smooth_test.c tests/browser_host.c tests/browser_compat.h user/browser.c $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/svg.c | $(BUILD)
-	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/lib \
+$(BUILD)/browser-smooth-test: tests/browser_smooth_test.c tests/browser_host.c tests/browser_compat.h user/browser.c $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/zlib.c user/lib/svg.c | $(BUILD)
+	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/include -Iuser/lib \
 	    tests/browser_smooth_test.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
+	    user/lib/img.c user/lib/zlib.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
 .PHONY: smoothtest
 smoothtest: $(BUILD)/browser-smooth-test
 	./$(BUILD)/browser-smooth-test
 
-$(BUILD)/browser-bench: tests/browser_host.c tests/browser_compat.h user/browser.c user/lib/dom_prelude.h $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/svg.c | $(BUILD)
-	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/lib \
+$(BUILD)/browser-bench: tests/browser_host.c tests/browser_compat.h user/browser.c user/lib/dom_prelude.h $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/zlib.c user/lib/svg.c | $(BUILD)
+	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/include -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
+	    user/lib/img.c user/lib/zlib.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
 .PHONY: browserbench
 browserbench: $(BUILD)/browser-bench
 	./$(BUILD)/browser-bench tests/web/layout.html w 1920 h 600 bench 500
 
 browsertest: user/lib/dom_prelude.h | $(BUILD)
-	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
+	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/include -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
+	    user/lib/img.c user/lib/zlib.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --clipboard-test
@@ -584,14 +612,26 @@ exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/e
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
 
+# libm: -lm находит библиотеку, а вызов без флага по-прежнему берётся из libc.
+lmtest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/cc/libm.c -o $(BUILD)/lm-libc
+	@./$(BUILD)/lm-libc
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/cc/libm.c -lm -o $(BUILD)/lm-test
+	@./$(BUILD)/lm-test
+
+# libz: round-trip, куски входа и повтор после deflateReset.
+ztest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/zlib_test.c -lz -o $(BUILD)/zlib-test
+	@./$(BUILD)/zlib-test
+
 # gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
 gztest: $(BUILD)/cc-host $(CCROOT_READY)
-	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -lz -o $(BUILD)/gzip-linux
 	@sh tests/gzip.sh $(BUILD)/gzip-linux
 
 # tar на хосте: тот же cc, синтетические архивы и настоящий исходник zlib.
 tartest: $(BUILD)/cc-host $(CCROOT_READY)
-	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -o $(BUILD)/tar-linux
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -lz -o $(BUILD)/tar-linux
 	@sh tests/tar.sh $(BUILD)/tar-linux
 
 # Небольшой make: правила, шаблоны, переменные. Тот же cc, что внутри системы.

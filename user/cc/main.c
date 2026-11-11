@@ -5,6 +5,7 @@
  *   cc -E hello.c              -> показать текст после препроцессора
  *
  *   cc -c a.c && cc a.o -lz    -> объектный файл, потом программа с /lib/libz.a
+ *   cc a.c -lm                 -> то же с /lib/libm.so или /lib/libm.a
  *
  * Заголовки (#include <myos.h>, <gfx.h>) берутся из /include. Библиотеки —
  * /lib/libgfx.a и /lib/libc.a; если их нет, вместе с программой компилируются

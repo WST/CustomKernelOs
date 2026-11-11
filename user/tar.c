@@ -1,13 +1,14 @@
 /* tar — распаковка ustar и чтение оглавления.
  * Флаги как у GNU tar: tar xf a.tar, tar xzf a.tar.gz, -C, -v, -k,
  * --strip-components, длинные имена GNU и заголовки pax (path, linkpath, size).
- * .tar.gz разжимается на диск потоком: в памяти только окно deflate в 32 КиБ.
+ * .tar.gz разжимается на диск потоком через libz: наружу уходит кусками, окно держит библиотека.
  * Обычный tar читается потоком. Жёстких ссылок нет: содержимое копируется.
  * Устройства и FIFO пропускаются с сообщением. */
 #include "myos.h"
 #include "stdio.h"
 #include "stdlib.h"
 #include "sys/stat.h"
+#include "zlib.h"
 
 #define NAME_CAP    1024
 #define PAX_MAX     (64 * 1024)
@@ -19,19 +20,22 @@ static int opt_nmem;
 
 /* ------------------------------------------------------- gzip (inflate) */
 
-/* Сжатый поток читается кусками. pre — уже прочитанное начало файла. */
+/* Сжатый поток читается кусками. pre — уже прочитанное начало файла.
+ * hold — байты, которые inflate взял сверх конца блока. */
 struct gz_br {
     int fd;
     unsigned char pre[512];
     int pre_len, pre_pos;
     unsigned char buf[4096];
-    int len, pos, bits, err, eof;
-    unsigned acc;
+    int len, pos, err, eof;
+    unsigned char hold[4096];
+    int hold_len, hold_pos;
 };
 
 static int gz_byte(struct gz_br *b, int *iseof) {
     if (iseof) *iseof = 0;
     if (b->err) return -1;
+    if (b->hold_pos < b->hold_len) return b->hold[b->hold_pos++];
     if (b->pre_pos < b->pre_len) return b->pre[b->pre_pos++];
     if (b->pos >= b->len) {
         int r = read(b->fd, b->buf, sizeof b->buf);
@@ -43,82 +47,14 @@ static int gz_byte(struct gz_br *b, int *iseof) {
     return b->buf[b->pos++];
 }
 
-static int gz_getbits(struct gz_br *b, int n) {
-    unsigned v;
-    if (b->err || n < 0 || n > 16) { b->err = 1; return 0; }
-    while (b->bits < n) {
-        int c = gz_byte(b, NULL);
-        if (c < 0) { b->err = 1; return 0; }
-        b->acc |= (unsigned)c << b->bits;
-        b->bits += 8;
-    }
-    v = b->acc & ((1u << n) - 1u);
-    b->acc >>= n;
-    b->bits -= n;
-    return (int)v;
+static void gz_unread(struct gz_br *b, const unsigned char *p, int n) {
+    if (n <= 0) return;
+    if (b->hold_pos != b->hold_len || n > (int)sizeof b->hold) { b->err = 1; return; }
+    memcpy(b->hold, p, (size_t)n);
+    b->hold_len = n;
+    b->hold_pos = 0;
 }
 
-static void gz_align(struct gz_br *b) {
-    int rem = b->bits & 7;
-    if (rem) gz_getbits(b, rem);
-}
-
-static int gz_construct(short *count, short *symbol, const unsigned char *length, int n) {
-    int len, sym, left;
-    short offs[16];
-    for (len = 0; len <= 15; len++) count[len] = 0;
-    for (sym = 0; sym < n; sym++) {
-        if (length[sym] > 15) return -1;
-        count[length[sym]]++;
-    }
-    if (count[0] == n) return 0;
-    left = 1;
-    for (len = 1; len <= 15; len++) {
-        left <<= 1;
-        left -= count[len];
-        if (left < 0) return -1;
-    }
-    offs[1] = 0;
-    for (len = 1; len < 15; len++) offs[len + 1] = (short)(offs[len] + count[len]);
-    for (sym = 0; sym < n; sym++)
-        if (length[sym]) symbol[offs[length[sym]]++] = (short)sym;
-    return left;
-}
-
-static int gz_decode(struct gz_br *b, const short *count, const short *symbol) {
-    int len, code = 0, first = 0, index = 0;
-    for (len = 1; len <= 15; len++) {
-        int count_len;
-        code |= gz_getbits(b, 1);
-        if (b->err) return -1;
-        count_len = count[len];
-        if (code - count_len < first) return symbol[index + (code - first)];
-        index += count_len;
-        first += count_len;
-        first <<= 1;
-        code <<= 1;
-    }
-    return -1;
-}
-
-#define GZ_WIN 32768
-
-static unsigned gz_crc_table[256];
-static int gz_crc_ready;
-static unsigned char gz_win[GZ_WIN];
-
-static void gz_crc_init(void) {
-    int i, bit;
-    if (gz_crc_ready) return;
-    for (i = 0; i < 256; i++) {
-        unsigned c = (unsigned)i;
-        for (bit = 0; bit < 8; bit++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        gz_crc_table[i] = c;
-    }
-    gz_crc_ready = 1;
-}
-
-/* Окно deflate — последние 32 КиБ. Остальной результат сразу пишется в файл. */
 struct gz_out {
     int fd;
     unsigned char chunk[4096];
@@ -139,149 +75,60 @@ static int gz_flush(struct gz_out *o) {
     return 0;
 }
 
-static int gz_put(struct gz_out *o, unsigned char c) {
-    if (o->err) return -1;
-    gz_win[o->member & (GZ_WIN - 1)] = c;
-    o->crc = gz_crc_table[(o->crc ^ c) & 255] ^ (o->crc >> 8);
-    o->member++;
-    if (opt_verbose && (o->member & ((4u << 20) - 1)) == 0)
+static int gz_write(struct gz_out *o, const unsigned char *p, int n) {
+    int i;
+    unsigned before;
+    if (o->err || n < 0) return -1;
+    if (!n) return 0;
+    before = o->member;
+    o->crc = (unsigned)crc32(o->crc, p, (uInt)n);
+    o->member += (unsigned)n;
+    if (opt_verbose && (before >> 22) != (o->member >> 22))
         fprintf(stderr, "tar: decompressed %u MiB\n", o->member >> 20);
-    o->chunk[o->chunk_n++] = c;
-    if (o->chunk_n == (int)sizeof o->chunk) return gz_flush(o);
+    for (i = 0; i < n; i++) {
+        o->chunk[o->chunk_n++] = p[i];
+        if (o->chunk_n == (int)sizeof o->chunk && gz_flush(o) < 0) return -1;
+    }
     return 0;
 }
 
-static const unsigned short gz_len_base[29] = {
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
-    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258
-};
-static const unsigned char gz_len_extra[29] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
-    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
-};
-static const unsigned short gz_dist_base[30] = {
-    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
-    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
-};
-static const unsigned char gz_dist_extra[30] = {
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
-    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
-};
-static const unsigned char gz_clen_order[19] = {
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
-};
-
-static int gz_block(struct gz_br *b, struct gz_out *o, int *final) {
-    int type, len, nlen, sym, i;
-    short lcount[16], lsym[288], dcount[16], dsym[32];
-    unsigned char llen[288], dlen[32], clen[19];
-    *final = gz_getbits(b, 1);
-    type = gz_getbits(b, 2);
-    if (b->err || type == 3) return -1;
-    if (type == 0) {
-        gz_align(b);
-        b->acc = 0;
-        b->bits = 0;
-        len = gz_getbits(b, 16);
-        nlen = gz_getbits(b, 16);
-        if (b->err || nlen != (len ^ 0xFFFF)) return -1;
-        b->acc = 0;
-        b->bits = 0;
-        while (len-- > 0) {
-            int c = gz_byte(b, NULL);
-            if (c < 0 || gz_put(o, (unsigned char)c) < 0) return -1;
-        }
-        return 0;
+static int gz_pull(struct gz_br *b, unsigned char *dst, int cap) {
+    int n = 0;
+    while (n < cap) {
+        int c = gz_byte(b, NULL);
+        if (c < 0) break;
+        dst[n++] = (unsigned char)c;
     }
-    if (type == 1) {
-        static short fcount[16], fsym[288], fdcount[16], fdsym[32];
-        static int ready;
-        if (!ready) {
-            unsigned char fl[288], fd[32];
-            for (i = 0; i < 144; i++) fl[i] = 8;
-            for (; i < 256; i++) fl[i] = 9;
-            for (; i < 280; i++) fl[i] = 7;
-            for (; i < 288; i++) fl[i] = 8;
-            for (i = 0; i < 32; i++) fd[i] = 5;
-            if (gz_construct(fcount, fsym, fl, 288) < 0) return -1;
-            if (gz_construct(fdcount, fdsym, fd, 32) < 0) return -1;
-            ready = 1;
-        }
-        memcpy(lcount, fcount, sizeof lcount);
-        memcpy(lsym, fsym, sizeof lsym);
-        memcpy(dcount, fdcount, sizeof dcount);
-        memcpy(dsym, fdsym, sizeof dsym);
-    } else {
-        int nlit, ndist, nclen, nlen_tot;
-        memset(clen, 0, sizeof clen);
-        memset(llen, 0, sizeof llen);
-        memset(dlen, 0, sizeof dlen);
-        nlit = gz_getbits(b, 5) + 257;
-        ndist = gz_getbits(b, 5) + 1;
-        nclen = gz_getbits(b, 4) + 4;
-        if (b->err || nlit > 286 || ndist > 32 || nclen > 19) return -1;
-        for (i = 0; i < nclen; i++) clen[gz_clen_order[i]] = (unsigned char)gz_getbits(b, 3);
-        if (b->err || gz_construct(lcount, lsym, clen, 19) < 0) return -1;
-        nlen_tot = nlit + ndist;
-        i = 0;
-        while (i < nlen_tot) {
-            int rep, what;
-            sym = gz_decode(b, lcount, lsym);
-            if (sym < 0 || sym > 18) return -1;
-            if (sym < 16) {
-                if (i < nlit) llen[i] = (unsigned char)sym;
-                else dlen[i - nlit] = (unsigned char)sym;
-                i++;
-                continue;
-            }
-            if (sym == 16) {
-                if (i == 0) return -1;
-                what = i <= nlit ? llen[i - 1] : dlen[i - nlit - 1];
-                rep = 3 + gz_getbits(b, 2);
-            } else if (sym == 17) {
-                what = 0;
-                rep = 3 + gz_getbits(b, 3);
-            } else {
-                what = 0;
-                rep = 11 + gz_getbits(b, 7);
-            }
-            if (b->err || i + rep > nlen_tot) return -1;
-            while (rep--) {
-                if (i < nlit) llen[i] = (unsigned char)what;
-                else dlen[i - nlit] = (unsigned char)what;
-                i++;
-            }
-        }
-        if (gz_construct(lcount, lsym, llen, nlit) < 0) return -1;
-        if (gz_construct(dcount, dsym, dlen, ndist) < 0) return -1;
-    }
-    for (;;) {
-        int length, ds, dist, j;
-        sym = gz_decode(b, lcount, lsym);
-        if (sym < 0 || sym > 285) return -1;
-        if (sym < 256) {
-            if (gz_put(o, (unsigned char)sym) < 0) return -1;
-            continue;
-        }
-        if (sym == 256) return 0;
-        length = gz_len_base[sym - 257] + gz_getbits(b, gz_len_extra[sym - 257]);
-        ds = gz_decode(b, dcount, dsym);
-        if (ds < 0 || ds > 29 || b->err) return -1;
-        dist = gz_dist_base[ds] + gz_getbits(b, gz_dist_extra[ds]);
-        if (b->err || dist < 1 || dist > GZ_WIN || (unsigned)dist > o->member || length < 3) return -1;
-        for (j = 0; j < length; j++) {
-            unsigned char c = gz_win[(o->member - (unsigned)dist) & (GZ_WIN - 1)];
-            if (gz_put(o, c) < 0) return -1;
-        }
-    }
+    return n;
 }
 
-static int gz_inflate(struct gz_br *b, struct gz_out *o) {
-    int final = 0;
-    while (!final) if (gz_block(b, o, &final) < 0) return -1;
-    b->acc = 0;
-    b->bits = 0;
-    return o->err ? -1 : 0;
+static int gz_inflate(struct gz_br *in, struct gz_out *o) {
+    z_stream s;
+    unsigned char inbuf[4096], outbuf[8192];
+    int ret;
+    memset(&s, 0, sizeof s);
+    if (inflateInit2(&s, -15) != Z_OK) return -1;
+    for (;;) {
+        int produced;
+        if (!s.avail_in) {
+            int n = gz_pull(in, inbuf, (int)sizeof inbuf);
+            if (in->err || n <= 0) { inflateEnd(&s); return -1; }
+            s.next_in = inbuf;
+            s.avail_in = (uInt)n;
+        }
+        s.next_out = outbuf;
+        s.avail_out = (uInt)sizeof outbuf;
+        ret = inflate(&s, Z_NO_FLUSH);
+        produced = (int)sizeof outbuf - (int)s.avail_out;
+        if (produced && gz_write(o, outbuf, produced) < 0) { inflateEnd(&s); return -1; }
+        if (ret == Z_STREAM_END) {
+            gz_unread(in, s.next_in, (int)s.avail_in);
+            inflateEnd(&s);
+            return o->err ? -1 : 0;
+        }
+        if (ret != Z_OK && ret != Z_BUF_ERROR) { inflateEnd(&s); return -1; }
+        if (!produced && ret == Z_BUF_ERROR && !s.avail_in && in->eof) { inflateEnd(&s); return -1; }
+    }
 }
 
 static int gz_u32(struct gz_br *b, unsigned *out) {
@@ -298,7 +145,6 @@ static int gz_u32(struct gz_br *b, unsigned *out) {
 static int gunzip_stream(struct gz_br *in, int outfd, const char **err) {
     struct gz_out o;
     int members = 0;
-    gz_crc_init();
     memset(&o, 0, sizeof o);
     o.fd = outfd;
     for (;;) {
@@ -339,13 +185,13 @@ static int gunzip_stream(struct gz_br *in, int outfd, const char **err) {
             if (gz_byte(in, NULL) < 0 || gz_byte(in, NULL) < 0) { *err = "unexpected end of file"; return -1; }
         }
         o.member = 0;
-        o.crc = 0xFFFFFFFFu;
+        o.crc = 0;
         if (gz_inflate(in, &o) < 0) {
             *err = o.err ? "cannot write temporary file" : in->err ? "unexpected end of file" : "invalid compressed data";
             return -1;
         }
         if (gz_u32(in, &want) < 0 || gz_u32(in, &isize) < 0) { *err = "unexpected end of file"; return -1; }
-        if (want != ~o.crc) { *err = "crc error"; return -1; }
+        if (want != o.crc) { *err = "crc error"; return -1; }
         if (isize != o.member) { *err = "length error"; return -1; }
         members++;
     }
