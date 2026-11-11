@@ -19,7 +19,7 @@
 
 #define MAX_LINE 256
 #define MAX_TOK  48
-#define MAX_ARGS 32
+#define MAX_ARGS 48          /* столько же, сколько слов в строке; ядро принимает до 64 */
 #define HISTORY  32
 #define MAX_CMDS 8
 
@@ -631,10 +631,16 @@ int main(int argc, char **argv) {
 
         snprintf(status_str, sizeof(status_str), "%d", last_status);
         int ntok = tokenize(line);
-        if (ntok < 0) { dprintf(STDERR, "sh: line too complex\n"); if (once) break; continue; }
+        if (ntok < 0) {
+            dprintf(STDERR, "sh: line too complex\n");
+            last_status = 1;
+            if (once) break;
+            continue;
+        }
         bool bg;
         int n = parse(ntok, cmds, &bg);
-        if (n > 0) run(cmds, n, bg);
+        if (n < 0) last_status = 1;
+        else if (n > 0) run(cmds, n, bg);
         if (once) break;
     }
     if (interactive) printf("exit\n");

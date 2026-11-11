@@ -167,7 +167,7 @@ ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(filter-out ldso,$(basename $(notdir $(wildcard user/*.c)))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
-ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
+ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
 ULIB := $(BUILD)/user/libmyos.a
 
 $(ULIB): $(ULIB_OBJS)
@@ -177,6 +177,9 @@ $(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/lib/math.c user/incl
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/setjmp.o: user/lib/setjmp.S | $(BUILD)/user
+	$(CC) -m32 -c $< -o $@
+
+$(BUILD)/user/alloca.o: user/lib/alloca.S | $(BUILD)/user
 	$(CC) -m32 -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
@@ -207,8 +210,8 @@ DYNLDFLAGS := -m elf_i386 -nostdlib -s --gc-sections -dynamic-linker /lib/ld.so 
 $(BUILD)/user/crt0.o: user/lib/crt0.asm | $(BUILD)/user
 	$(NASM) -f elf32 $< -o $@
 
-$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
-	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ user/lib/libc.c user/lib/setjmp.S
+$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S
 
 $(BUILD)/user/pic/%.o: user/lib/%.c user/lib/myos.h | $(BUILD)/user/pic
 	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
@@ -322,11 +325,11 @@ $(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
 
 $(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c user/lib/math.c
 
-$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/user/setjmp.o
+$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
 	rm -f $@ && $(AR) rcs $@ $^
 $(CCROOT)/lib/libgfx.a: $(patsubst %,$(BUILD)/libobj-linux/%.o,$(GFX_PARTS))
 	rm -f $@ && $(AR) rcs $@ $^
-$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/user/setjmp.o
+$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
 $(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))

@@ -258,7 +258,26 @@ int   setfg(int pgid)                            { return syscall3(SYS_SETFG, pg
 int   pipe(int fds[2])                           { return syscall3(SYS_PIPE, (int)fds, 0, 0); }
 int   dup2(int oldfd, int newfd)                 { return syscall3(SYS_DUP2, oldfd, newfd, 0); }
 int   chdir(const char *path)                    { return syscall3(SYS_CHDIR, (int)path, 0, 0); }
-int   getcwd(char *buf, size_t len)              { return syscall3(SYS_GETCWD, (int)buf, len, 0); }
+/* POSIX: успех — указатель на путь, не 0. getcwd(NULL, 0) выделяет строку:
+ * bash так узнаёт текущий каталог и считает нулевой результат ошибкой. */
+char *getcwd(char *buf, size_t len) {
+    char tmp[1024];
+    int heap = 0;
+    if (!buf) {
+        if (len == 0 || len > sizeof tmp) len = sizeof tmp;
+        buf = tmp;
+        heap = 1;
+    } else if (len == 0) {
+        errno = EINVAL;
+        return NULL;
+    }
+    int r = syscall3(SYS_GETCWD, (int)buf, len, 0);
+    if (r < 0) { errno = -r; return NULL; }
+    if (!heap) return buf;
+    buf = strdup(tmp);
+    if (!buf) errno = ENOMEM;
+    return buf;
+}
 int   dirread(const char *p, int i, struct dirent_info *o) { return syscall3(SYS_READDIR, (int)p, i, (int)o); }
 int   mkdir(const char *path, ...)             { return syscall3(SYS_MKDIR, (int)path, 0, 0); }
 int   unlink(const char *path)                   { return syscall3(SYS_UNLINK, (int)path, 0, 0); }
@@ -1232,6 +1251,11 @@ void *calloc(size_t n, size_t size) {
     return p;
 }
 
+void *reallocarray(void *p, size_t n, size_t size) {
+    if (n && size > (size_t)-1 / n) { errno = ENOMEM; return NULL; }
+    return realloc(p, n * size);
+}
+
 void *realloc(void *p, size_t n) {
     if (!p) return malloc(n);
     struct hdr *h = (struct hdr *)p - 1;
@@ -1602,9 +1626,9 @@ int __libc_start(int argc, char **argv) {
         while (*s) { if (*s == '/') b = s + 1; s++; }
         __progname = b;
     }
-    /* main бывает и main(void): зовём через указатель, лишние аргументы просто лежат на стеке */
-    int (*entry)(int, char **) = (int (*)(int, char **))main;
-    exit(entry(argc, argv));
+    /* main бывает и main(void), и main(argc, argv, env). Лишние аргументы просто лежат на стеке. */
+    int (*entry)(int, char **, char **) = (int (*)(int, char **, char **))main;
+    exit(entry(argc, argv, environ));
 }
 
 static FILE *file_new(int fd, int flags) {
@@ -2117,6 +2141,45 @@ char *setlocale(int category, const char *locale) {
     return (char *)"C";
 }
 
+/* j_strsignal в уже собранном bash индексирует эту таблицу: без HAVE_STRSIGNAL
+ * его strsignal — это макрос sys_siglist[sig]. Ноль значит «Signal N». */
+char *sys_siglist[NSIG] = {
+    "Unknown signal",
+    "Hangup",
+    "Interrupt",
+    "Quit",
+    "Illegal instruction",
+    "Trace/breakpoint trap",
+    "Aborted",
+    "Bus error",
+    "Floating point exception",
+    "Killed",
+    "User signal 1",
+    "Segmentation fault",
+    "User signal 2",
+    "Broken pipe",
+    "Alarm clock",
+    "Terminated",
+    0,
+    "Child exited",
+    "Continued",
+    "Stopped (signal)",
+    "Stopped",
+    "Stopped (tty input)",
+    "Stopped (tty output)",
+    0, 0, 0, 0, 0,
+    "Window changed",
+};
+
+char *strsignal(int sig) {
+    if (sig < 0 || sig >= NSIG) return NULL;
+    return sys_siglist[sig];
+}
+
+/* Уже собранный sig.c зовёт это, когда HAVE_STRSIGNAL ещё не было.
+ * Имена сигналов уже лежат в sys_siglist, затирать их нечем. */
+void initialize_siglist(void) {}
+
 struct lconv *localeconv(void) {
     static struct lconv lc;
     static int ready;
@@ -2379,6 +2442,14 @@ unsigned long long strtoull(const char *nptr, char **end, int base) {
     return acc;
 }
 
+intmax_t strtoimax(const char *nptr, char **end, int base) {
+    return (intmax_t)strtoll(nptr, end, base);
+}
+
+uintmax_t strtoumax(const char *nptr, char **end, int base) {
+    return (uintmax_t)strtoull(nptr, end, base);
+}
+
 unsigned long strtoul(const char *nptr, char **end, int base) {
     int neg, ovf, saved = errno;
     unsigned long long acc;
@@ -2480,7 +2551,18 @@ void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const voi
     }
 }
 
-char *getenv(const char *name) { (void)name; return NULL; }
+static char *empty_environ[] = { NULL };
+char **environ = empty_environ;
+
+char *getenv(const char *name) {
+    size_t n;
+    char **e;
+    if (!name || !environ) return NULL;
+    n = strlen(name);
+    for (e = environ; *e; e++)
+        if (!strncmp(*e, name, n) && (*e)[n] == '=') return *e + n + 1;
+    return NULL;
+}
 
 int setvbuf(FILE *f, char *buf, int mode, size_t size) {
     (void)f; (void)buf; (void)mode; (void)size;

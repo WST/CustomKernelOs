@@ -93,8 +93,10 @@ int ata_unit_write(int u,u32 lba,const void *buf) {
     }
     if(setup(u,lba,0x30)<0) return -1;
     const u16 *p=buf; for(int i=0;i<256;i++) outw(units[u].base,p[i]);
-    delay(u); if(wait(u,false)<0) return -1;
-    outb(units[u].base+7,0xe7); delay(u); return wait(u,false);
+    /* Сектор принят, когда команда записи сняла BSY. FLUSH CACHE здесь не
+     * посылаем: QEMU выполняет её через fsync образа, и опрос статуса держит
+     * процессор занятым всё время большой записи. */
+    delay(u); return wait(u,false);
 }
 int ata_read(u32 lba,void *buf) { return ata_unit_read(0,lba,buf); }
 int ata_write(u32 lba,const void *buf) { return ata_unit_write(0,lba,buf); }

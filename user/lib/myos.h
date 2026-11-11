@@ -197,7 +197,7 @@ int   setfg(int pgid);                    /* кого убьёт Ctrl+C (0 — �
 int   pipe(int fds[2]);                   /* fds[0] — читать, fds[1] — писать */
 int   dup2(int oldfd, int newfd);
 int   chdir(const char *path);
-int   getcwd(char *buf, size_t len);
+char *getcwd(char *buf, size_t len);   /* буфер или NULL; NULL, 0 — выделить строку */
 int   dirread(const char *path, int index, struct dirent_info *out);  /* 1 есть, 0 конец */
 int   mkdir(const char *path, ...);   /* второй аргумент — права, MyFS их не хранит */
 int   unlink(const char *path);
@@ -299,6 +299,7 @@ int  readln(int fd, char *buf, int max);  /* строка из любого fd (
 void *malloc(size_t n);
 void *calloc(size_t n, size_t size);
 void *realloc(void *p, size_t n);
+void *reallocarray(void *p, size_t n, size_t size);
 void  free(void *p);
 
 /* ---- сеть ----

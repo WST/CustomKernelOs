@@ -24,8 +24,8 @@
  *   rm <путь>               удалить файл
  * # до конца строки — комментарий.
  * fetch вызывает /bin/download. Без -r повторов два.
- * Поставленный пакет отмечается в /ext/installed/<имя>. Запрошенный пакет
- * ставится снова, зависимость с отметкой пропускается. Цикл — ошибка.
+ * Поставленный пакет отмечается в /ext/installed/<имя>. Пакет с отметкой
+ * пропускается и при прямом запросе, и как зависимость. Цикл — ошибка.
  * Отметка снимается только после успешного uninstall.inst.
  */
 #include "myos.h"
@@ -133,7 +133,7 @@ static int cmd_tool(const char *path, int argc, char **argv) {
     return run_prog(path, argv);
 }
 
-static int install_name(const char *dir, const char *name, int as_dep);
+static int install_name(const char *dir, const char *name);
 static int cmd_copy(const char *pkg, int argc, char **argv);
 static int cmd_patch(const char *pkg, int argc, char **argv);
 static int cmd_rm(int argc, char **argv);
@@ -144,7 +144,7 @@ static int exec_args(const char *root, const char *pkg, int argc, char **argv) {
     if (!strcmp(argv[0], "name") || !strcmp(argv[0], "descr")) return 0;
     if (!strcmp(argv[0], "depend")) {
         if (argc != 2) { dprintf(STDERR, "ext: depend needs one package\n"); return 1; }
-        return install_name(root, argv[1], 1);
+        return install_name(root, argv[1]);
     }
     if (!strcmp(argv[0], "workdir")) {
         if (argc != 2) { dprintf(STDERR, "ext: workdir needs one path\n"); return 1; }
@@ -724,7 +724,7 @@ static int write_stamp(const char *dir, const char *name) {
     return 0;
 }
 
-static int install_name(const char *dir, const char *name, int as_dep) {
+static int install_name(const char *dir, const char *name) {
     char path[160], pkg[160];
     FILE *sf;
     int i, rc, n;
@@ -739,7 +739,7 @@ static int install_name(const char *dir, const char *name, int as_dep) {
             dprintf(STDERR, " %s\n", name);
             return 1;
         }
-    if (as_dep && stamp_exists(dir, name)) {
+    if (stamp_exists(dir, name)) {
         printf("already installed %s\n", name);
         return 0;
     }
@@ -843,13 +843,13 @@ static int selftest(void) {
         || strcmp(name, "demo") || strcmp(descr, "hello there")) {
         printf("FAIL meta '%s' '%s'\n", name, descr); fails++;
     }
-    if (install_name("/tmp/myos-ext-test/instructions", "demo", 0) != 0) { printf("FAIL install\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "demo") != 0) { printf("FAIL install\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/demo/nested", &st) != 0 || st.type != 2) { printf("FAIL nested\n"); fails++; }
     mkdir_p("/tmp/myos-ext-test/instructions/bad");
     f = fopen("/tmp/myos-ext-test/instructions/bad/setup.inst", "w");
     if (f) { fputs("name bad\ndescr x\ngit clone x\n", f); fclose(f); }
-    if (install_name("/tmp/myos-ext-test/instructions", "bad", 0) == 0) { printf("FAIL unknown accepted\n"); fails++; }
-    if (install_name("/tmp/myos-ext-test/instructions", "missing", 0) == 0) { printf("FAIL missing accepted\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "bad") == 0) { printf("FAIL unknown accepted\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "missing") == 0) { printf("FAIL missing accepted\n"); fails++; }
 
     unlink("/tmp/myos-ext-test/base.log");
     unlink("/tmp/myos-ext-test/installed/base");
@@ -876,9 +876,15 @@ static int selftest(void) {
     mkdir_p("/tmp/myos-ext-test/instructions/top");
     f = fopen("/tmp/myos-ext-test/instructions/top/setup.inst", "w");
     if (!f) { printf("FAIL top inst\n"); return 1; }
-    fputs("name top\ndescr top\ndepend mid\nworkdir /tmp/myos-ext-test/top\nmkdir topdir\n", f);
+    fputs("name top\ndescr top\ndepend mid\nworkdir /tmp/myos-ext-test/top\nmkdir topdir\nmake\n", f);
     fclose(f);
-    if (install_name("/tmp/myos-ext-test/instructions", "top", 0) != 0) { printf("FAIL chain\n"); fails++; }
+    unlink("/tmp/myos-ext-test/top.log");
+    mkdir_p("/tmp/myos-ext-test/top");
+    f = fopen("/tmp/myos-ext-test/top/Makefile", "w");
+    if (!f) { printf("FAIL top makefile\n"); return 1; }
+    fputs("all:\n\techo top >> /tmp/myos-ext-test/top.log\n", f);
+    fclose(f);
+    if (install_name("/tmp/myos-ext-test/instructions", "top") != 0) { printf("FAIL chain\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/mid/middir", &st) != 0 || st.type != 2) { printf("FAIL middir\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/top/topdir", &st) != 0 || st.type != 2) { printf("FAIL topdir\n"); fails++; }
     {
@@ -893,7 +899,7 @@ static int selftest(void) {
             if (strcmp(got, "base\n")) { printf("FAIL base log '%s'\n", got); fails++; }
         }
     }
-    if (install_name("/tmp/myos-ext-test/instructions", "top", 0) != 0) { printf("FAIL chain again\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "top") != 0) { printf("FAIL chain again\n"); fails++; }
     {
         char got[64];
         FILE *lf = fopen("/tmp/myos-ext-test/base.log", "r");
@@ -904,6 +910,15 @@ static int selftest(void) {
             got[n] = 0;
             fclose(lf);
             if (strcmp(got, "base\n")) { printf("FAIL dep rebuilt '%s'\n", got); fails++; }
+        }
+        lf = fopen("/tmp/myos-ext-test/top.log", "r");
+        n = 0;
+        if (!lf) { printf("FAIL top log after skip\n"); fails++; }
+        else {
+            while ((c = fgetc(lf)) != EOF && n < (int)sizeof got - 1) got[n++] = (char)c;
+            got[n] = 0;
+            fclose(lf);
+            if (strcmp(got, "top\n")) { printf("FAIL top rebuilt '%s'\n", got); fails++; }
         }
     }
 
@@ -926,7 +941,7 @@ static int selftest(void) {
         if (!f) { printf("FAIL untar inst\n"); return 1; }
         fputs("name untar\ndescr u\nworkdir /tmp/myos-ext-test/untar\ntar xf /tmp/myos-ext-test/hello.tar.gz\n", f);
         fclose(f);
-        if (install_name("/tmp/myos-ext-test/instructions", "untar", 0) != 0) { printf("FAIL untar\n"); fails++; }
+        if (install_name("/tmp/myos-ext-test/instructions", "untar") != 0) { printf("FAIL untar\n"); fails++; }
         hf = fopen("/tmp/myos-ext-test/untar/hello.txt", "r");
         if (!hf) { printf("FAIL hello missing\n"); fails++; }
         else {
@@ -943,7 +958,7 @@ static int selftest(void) {
     mkdir_p("/tmp/myos-ext-test/instructions/c2");
     f = fopen("/tmp/myos-ext-test/instructions/c2/setup.inst", "w");
     if (f) { fputs("name c2\ndescr c\ndepend c1\n", f); fclose(f); }
-    if (install_name("/tmp/myos-ext-test/instructions", "c1", 0) == 0) { printf("FAIL cycle accepted\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "c1") == 0) { printf("FAIL cycle accepted\n"); fails++; }
     if (stamp_exists("/tmp/myos-ext-test/instructions", "c1") || stamp_exists("/tmp/myos-ext-test/instructions", "c2")) {
         printf("FAIL cycle stamp\n"); fails++;
     }
@@ -973,7 +988,7 @@ static int selftest(void) {
     if (!f) { printf("FAIL boxed uninstall\n"); return 1; }
     fputs("rm /tmp/myos-ext-test/boxed/note.txt\nrm /tmp/myos-ext-test/boxed/base.txt\n", f);
     fclose(f);
-    if (install_name("/tmp/myos-ext-test/instructions", "boxed", 0) != 0) { printf("FAIL boxed\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "boxed") != 0) { printf("FAIL boxed\n"); fails++; }
     if (!file_is("/tmp/myos-ext-test/boxed/note.txt", "hi\n")) { printf("FAIL copied note\n"); fails++; }
     if (!file_is("/tmp/myos-ext-test/boxed/base.txt", "world\n")) { printf("FAIL patched base\n"); fails++; }
     if (uninstall_name("/tmp/myos-ext-test/instructions", "boxed") != 0) { printf("FAIL uninstall\n"); fails++; }
@@ -994,14 +1009,14 @@ static int selftest(void) {
               "copy base.txt base.txt\npatch wrong.diff\n", f);
         fclose(f);
     }
-    if (install_name("/tmp/myos-ext-test/instructions", "badpatch", 0) == 0) { printf("FAIL bad patch accepted\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "badpatch") == 0) { printf("FAIL bad patch accepted\n"); fails++; }
     if (!file_is("/tmp/myos-ext-test/badpatch/base.txt", "hello\n")) { printf("FAIL bad patch wrote\n"); fails++; }
     if (stamp_exists("/tmp/myos-ext-test/instructions", "badpatch")) { printf("FAIL bad patch stamp\n"); fails++; }
 
     mkdir_p("/tmp/myos-ext-test/instructions/noscript");
     f = fopen("/tmp/myos-ext-test/instructions/noscript/setup.inst", "w");
     if (f) { fputs("name noscript\ndescr n\nworkdir /tmp/myos-ext-test/noscript\nmkdir kept\n", f); fclose(f); }
-    if (install_name("/tmp/myos-ext-test/instructions", "noscript", 0) != 0) { printf("FAIL noscript\n"); fails++; }
+    if (install_name("/tmp/myos-ext-test/instructions", "noscript") != 0) { printf("FAIL noscript\n"); fails++; }
     if (uninstall_name("/tmp/myos-ext-test/instructions", "noscript") == 0) { printf("FAIL missing uninstall\n"); fails++; }
     if (!stamp_exists("/tmp/myos-ext-test/instructions", "noscript")) { printf("FAIL noscript stamp\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/noscript/kept", &st) != 0 || st.type != 2) { printf("FAIL kept\n"); fails++; }
@@ -1014,7 +1029,7 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--selftest")) return selftest();
 #endif
     if (argc == 2 && !strcmp(argv[1], "list")) return list_dir(INST_DIR);
-    if (argc == 3 && !strcmp(argv[1], "install")) return install_name(INST_DIR, argv[2], 0);
+    if (argc == 3 && !strcmp(argv[1], "install")) return install_name(INST_DIR, argv[2]);
     if (argc == 3 && !strcmp(argv[1], "uninstall")) return uninstall_name(INST_DIR, argv[2]);
     usage();
     return 2;
