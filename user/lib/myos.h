@@ -14,6 +14,9 @@ struct klog_cursor { unsigned lo,hi,dropped,flags; };
  * OLDEST starts at retained history; END skips history. Flags reset on read.
  * dropped reports overwritten bytes since the previous call. */
 int klog_read(void *buffer,unsigned capacity,struct klog_cursor *cursor);
+#define RB_POWEROFF 0
+#define RB_REBOOT   1
+int reboot(int how);            /* при успехе не возвращается */
 
 
 typedef unsigned int   size_t;
@@ -61,7 +64,8 @@ enum {
     SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
     SYS_SYMLINK, SYS_READLINK, SYS_LSTAT,
     SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
-    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ
+    SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
+    SYS_REBOOT
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");

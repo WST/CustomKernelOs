@@ -34,6 +34,7 @@
 #include "block.h"
 #include "account.h"
 #include "services.h"
+#include "reboot.h"
 
 #define SBRK_LIMIT INTERP_BASE      /* выше кучи — загрузчик, общая память и стек */
 #define PATH_MAX   FS_PATH_MAX      /* 1023 символа пути и завершающий нуль */
@@ -1136,6 +1137,9 @@ void syscall_dispatch(struct regs *r) {
     case SYS_SOCKCTL:     { struct sock *s = get_sock(a); ret = s ? sock_ctl(s, (int)b, c) : -EBADF; break; }
     case SYS_CLIPBOARD: ret = sys_clipboard(a, b, c); break;
     case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
+    case SYS_REBOOT:
+        if (a != RB_POWEROFF && a != RB_REBOOT) { ret = -EINVAL; break; }
+        machine_reset((int)a);
     }
     r->eax = (u32)ret;
 
