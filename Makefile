@@ -346,7 +346,7 @@ $(DISK):
 	$(call padto,$@,$$(( $(DISK_MB) * 1048576 )))
 
 # Установить программы в /bin (остальные файлы на диске не трогаются).
-# Сторонние утилиты ставятся в /ext/bin командой ext, по файлам /ext/instructions.
+# Сторонние утилиты ставятся в /ext/bin командой ext, по каталогам /ext/instructions/<имя>.
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
@@ -363,7 +363,19 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@$(BUILD)/myfs $(DISK) rm /ext/bin/ls || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/bin/grep || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/ls.inst || exit 1
-	@for f in ext/instructions/*.inst; do $(BUILD)/myfs $(DISK) put $$f /ext/instructions/$$(basename $$f) || exit 1; done
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/grep.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/lua.inst || exit 1
+	@for d in ext/instructions/*; do \
+	  test -d $$d || continue; \
+	  name=$$(basename $$d); \
+	  $(BUILD)/myfs $(DISK) mkdir /ext/instructions/$$name >/dev/null || exit 1; \
+	  for f in $$d/*; do \
+	    test -f $$f || continue; \
+	    $(BUILD)/myfs $(DISK) put $$f /ext/instructions/$$name/$$(basename $$f) || exit 1; \
+	  done; \
+	done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
 	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /usr/share/applications /mnt /media /proc /sys /run /ext /ext/bin /ext/instructions; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1

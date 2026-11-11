@@ -8,6 +8,7 @@
 #include "vga.h"
 #include "string.h"
 #include "fb.h"
+#include "heap.h"
 
 #define MAX_W   (FB_MAX_W / FONT_W)     /* 320 */
 #define MAX_H   (FB_MAX_H / FONT_H)     /* 100 */
@@ -139,18 +140,32 @@ void vga_switch_to_fb(void) {
 }
 
 /* Разрешение сменилось: новая сетка ячеек. Текст переносим как есть (лишние
- * столбцы обрезаются); если строк стало меньше — сохраняем нижние, где курсор. */
+ * столбцы обрезаются); если строк стало меньше — сохраняем нижние, где курсор.
+ * Вторая сетка живёт в куче: постоянная копия на 64 КБ не влезает перед
+ * загрузочным стеком 0x9b000. */
 void vga_resize(void) {
     if (!fbmode) return;
-    static u16 tmp[MAX_W * MAX_H];
+    u16 *tmp = kmalloc(sizeof(shadow));
     u32 f = irq_save();
     fb_dims();
     int nw = PW / FONT_W, nh = PH / FONT_H;
+    int n = nw * nh;
     int off = row + 1 > nh ? row + 1 - nh : 0;
-    for (int i = 0; i < nw * nh; i++) tmp[i] = (u16)' ' | ((u16)default_attr << 8);
-    for (int y = 0; y < nh && y + off < H; y++)
-        for (int x = 0; x < nw && x < W; x++) tmp[y * nw + x] = shadow[(y + off) * W + x];
-    memcpy(shadow, tmp, nw * nh * 2);
+    if (n <= 0 || n > MAX_W * MAX_H) {
+        kfree(tmp);
+        irq_restore(f);
+        return;
+    }
+    if (tmp) {
+        for (int i = 0; i < n; i++) tmp[i] = (u16)' ' | ((u16)default_attr << 8);
+        for (int y = 0; y < nh && y + off < H; y++)
+            for (int x = 0; x < nw && x < W; x++) tmp[y * nw + x] = shadow[(y + off) * W + x];
+        memcpy(shadow, tmp, (size_t)n * 2);
+        kfree(tmp);
+    } else {
+        for (int i = 0; i < n; i++) shadow[i] = (u16)' ' | ((u16)default_attr << 8);
+        off = row;
+    }
     W = nw; H = nh;
     row -= off;
     if (col >= W) col = W - 1;

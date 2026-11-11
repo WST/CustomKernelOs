@@ -2,8 +2,14 @@
  *
  *   ext list
  *   ext install <имя>
+ *   ext uninstall <имя>
  *
- * Декларация /ext/instructions/<имя>.inst, одна команда на строку:
+ * Пакет — каталог /ext/instructions/<имя>/. Имя каталога и есть имя пакета.
+ *   setup.inst              установка
+ *   uninstall.inst          снятие; ext uninstall не трогает зависимости
+ *   остальные файлы         патчи и заготовки вроде config.h
+ *
+ * Команды, одна на строку:
  *   name <id>
  *   descr <текст>
  *   workdir <путь>          создать каталог и перейти в него
@@ -13,10 +19,14 @@
  *   tar <аргументы tar>     /bin/tar, в том числе xzf для tar.gz
  *   make [аргументы]        /bin/make
  *   cc <аргументы cc>
+ *   copy <файл> <куда>      файл из каталога пакета в дерево сборки
+ *   patch [-p N] <файл>     unified diff из каталога пакета, по умолчанию -p1
+ *   rm <путь>               удалить файл
  * # до конца строки — комментарий.
  * fetch вызывает /bin/download. Без -r повторов два.
  * Поставленный пакет отмечается в /ext/installed/<имя>. Запрошенный пакет
  * ставится снова, зависимость с отметкой пропускается. Цикл — ошибка.
+ * Отметка снимается только после успешного uninstall.inst.
  */
 #include "myos.h"
 #include "stdio.h"
@@ -124,14 +134,17 @@ static int cmd_tool(const char *path, int argc, char **argv) {
 }
 
 static int install_name(const char *dir, const char *name, int as_dep);
+static int cmd_copy(const char *pkg, int argc, char **argv);
+static int cmd_patch(const char *pkg, int argc, char **argv);
+static int cmd_rm(int argc, char **argv);
 
-static int exec_args(const char *dir, int argc, char **argv) {
+static int exec_args(const char *root, const char *pkg, int argc, char **argv) {
     int r;
     if (argc < 1) return 0;
     if (!strcmp(argv[0], "name") || !strcmp(argv[0], "descr")) return 0;
     if (!strcmp(argv[0], "depend")) {
         if (argc != 2) { dprintf(STDERR, "ext: depend needs one package\n"); return 1; }
-        return install_name(dir, argv[1], 1);
+        return install_name(root, argv[1], 1);
     }
     if (!strcmp(argv[0], "workdir")) {
         if (argc != 2) { dprintf(STDERR, "ext: workdir needs one path\n"); return 1; }
@@ -154,6 +167,9 @@ static int exec_args(const char *dir, int argc, char **argv) {
     }
     if (!strcmp(argv[0], "make")) return cmd_tool("/bin/make", argc, argv);
     if (!strcmp(argv[0], "cc")) return cmd_cc(argc, argv);
+    if (!strcmp(argv[0], "copy")) return cmd_copy(pkg, argc, argv);
+    if (!strcmp(argv[0], "patch")) return cmd_patch(pkg, argc, argv);
+    if (!strcmp(argv[0], "rm")) return cmd_rm(argc, argv);
     dprintf(STDERR, "ext: unknown command '%s'\n", argv[0]);
     return 1;
 }
@@ -171,7 +187,7 @@ static int read_line(FILE *f, char *buf, int max) {
     return 1;
 }
 
-static int run_file(const char *dir, const char *path) {
+static int run_file(const char *root, const char *pkg, const char *path) {
     FILE *f = fopen(path, "r");
     char buf[1024];
     int line = 0, rc;
@@ -183,7 +199,7 @@ static int run_file(const char *dir, const char *path) {
         if (rc < 0) { dprintf(STDERR, "ext: %s:%d: line too long\n", path, line); fclose(f); return 1; }
         n = split_line(buf, av);
         if (n < 0) { dprintf(STDERR, "ext: %s:%d: too many words\n", path, line); fclose(f); return 1; }
-        if (exec_args(dir, n, av) != 0) { fclose(f); return 1; }
+        if (exec_args(root, pkg, n, av) != 0) { fclose(f); return 1; }
     }
     fclose(f);
     return 0;
@@ -224,10 +240,7 @@ struct pkg {
     char descr[80];
 };
 
-static int ends_inst(const char *s) {
-    int n = (int)strlen(s);
-    return n > 5 && !strcmp(s + n - 5, ".inst");
-}
+static int valid_pkg(const char *name);
 
 static int list_dir(const char *dir) {
     DIR *d = opendir(dir);
@@ -236,12 +249,19 @@ static int list_dir(const char *dir) {
     if (!d) { dprintf(STDERR, "ext: %s: %s\n", dir, strerror(errno)); return 1; }
     for (;;) {
         struct dirent *e = readdir(d);
-        char path[160];
+        char path[256], ignore[32];
+        FILE *f;
         if (!e) break;
-        if (!ends_inst(e->d_name) || n == MAX_PKG) continue;
-        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        if (read_meta(path, pk[n].name, (int)sizeof pk[n].name, pk[n].descr, (int)sizeof pk[n].descr) == 0)
-            n++;
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (!valid_pkg(e->d_name) || n == MAX_PKG) continue;
+        snprintf(path, sizeof path, "%s/%s/setup.inst", dir, e->d_name);
+        f = fopen(path, "r");
+        if (!f) continue;
+        fclose(f);
+        memcpy(pk[n].name, e->d_name, strlen(e->d_name) + 1);
+        pk[n].descr[0] = 0;
+        read_meta(path, ignore, (int)sizeof ignore, pk[n].descr, (int)sizeof pk[n].descr);
+        n++;
     }
     closedir(d);
     for (i = 0; i < n; i++)
@@ -258,28 +278,10 @@ static int list_dir(const char *dir) {
     return 0;
 }
 
-static int inst_path(const char *dir, const char *name, char *out, int max) {
-    DIR *d;
-    FILE *f;
-    snprintf(out, (size_t)max, "%s/%s.inst", dir, name);
-    f = fopen(out, "r");
-    if (f) { fclose(f); return 0; }
-    d = opendir(dir);
-    if (!d) return -1;
-    for (;;) {
-        struct dirent *e = readdir(d);
-        char path[160], got[32], descr[8];
-        if (!e) break;
-        if (!ends_inst(e->d_name)) continue;
-        snprintf(path, sizeof path, "%s/%s", dir, e->d_name);
-        if (read_meta(path, got, (int)sizeof got, descr, (int)sizeof descr) == 0 && !strcmp(got, name)) {
-            snprintf(out, (size_t)max, "%s", path);
-            closedir(d);
-            return 0;
-        }
-    }
-    closedir(d);
-    return -1;
+static int script_path(const char *dir, const char *name, const char *file, char *out, int max) {
+    int n = snprintf(out, (size_t)max, "%s/%s/%s", dir, name, file);
+    if (n < 0 || n >= max) return -1;
+    return 0;
 }
 
 #define MAX_DEPTH 32
@@ -289,6 +291,7 @@ static int dep_depth;
 static int valid_pkg(const char *name) {
     int i;
     if (!name || !name[0] || strlen(name) >= 32) return 0;
+    if (!strcmp(name, ".") || !strcmp(name, "..")) return 0;
     for (i = 0; name[i]; i++) {
         char c = name[i];
         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
@@ -313,6 +316,380 @@ static int parent_dir(const char *path, char *out, int max) {
     if (n >= max) return -1;
     memcpy(out, path, (size_t)(n - 1));
     out[n - 1] = 0;
+    return 0;
+}
+
+#define PATCH_MAX (256 * 1024)
+#define FILE_MAX  (1024 * 1024)
+
+/* Относительный путь без абсолютного корня и без компонентов . и .. */
+static int safe_rel(const char *rel) {
+    const char *p;
+    if (!rel || !rel[0] || rel[0] == '/') return 0;
+    p = rel;
+    while (*p) {
+        if (p[0] == '.' && (p[1] == '/' || p[1] == 0)) return 0;
+        if (p[0] == '.' && p[1] == '.' && (p[2] == '/' || p[2] == 0)) return 0;
+        while (*p && *p != '/') p++;
+        if (*p == '/') p++;
+    }
+    return 1;
+}
+
+static int copy_bytes(const char *src, const char *dst) {
+    FILE *in = fopen(src, "r");
+    FILE *out;
+    char buf[512];
+    int n;
+    if (!in) { dprintf(STDERR, "ext: copy: %s: %s\n", src, strerror(errno)); return 1; }
+    out = fopen(dst, "w");
+    if (!out) { dprintf(STDERR, "ext: copy: %s: %s\n", dst, strerror(errno)); fclose(in); return 1; }
+    while ((n = (int)fread(buf, 1, sizeof buf, in)) > 0) {
+        if ((int)fwrite(buf, 1, (size_t)n, out) != n) {
+            dprintf(STDERR, "ext: copy: %s: %s\n", dst, strerror(errno));
+            fclose(in);
+            fclose(out);
+            return 1;
+        }
+    }
+    if (ferror(in)) {
+        dprintf(STDERR, "ext: copy: %s: %s\n", src, strerror(errno));
+        fclose(in);
+        fclose(out);
+        return 1;
+    }
+    fclose(in);
+    fclose(out);
+    return 0;
+}
+
+static char *read_all(const char *path, int *len, int max) {
+    FILE *f = fopen(path, "r");
+    char *buf, *nb;
+    int n = 0, cap = 256, c;
+    if (!f) return NULL;
+    if (max < 2) { fclose(f); return NULL; }
+    buf = malloc((size_t)cap);
+    if (!buf) { fclose(f); return NULL; }
+    while ((c = fgetc(f)) != EOF) {
+        if (n + 1 >= max) { free(buf); fclose(f); return NULL; }
+        if (n + 1 >= cap) {
+            cap *= 2;
+            if (cap > max) cap = max;
+            nb = realloc(buf, (size_t)cap);
+            if (!nb) { free(buf); fclose(f); return NULL; }
+            buf = nb;
+        }
+        buf[n++] = (char)c;
+    }
+    buf[n] = 0;
+    *len = n;
+    fclose(f);
+    return buf;
+}
+
+static int split_lines(char *buf, int n, char ***out, int *nout) {
+    int cap = 32, count = 0, i = 0;
+    char **lines = malloc((size_t)cap * sizeof(char *));
+    if (!lines) return -1;
+    while (i < n) {
+        int start = i, end;
+        char **nl;
+        while (i < n && buf[i] != '\n') i++;
+        end = i;
+        if (i < n) buf[i++] = 0;
+        if (end > start && buf[end - 1] == '\r') buf[end - 1] = 0;
+        if (count >= cap) {
+            cap *= 2;
+            nl = realloc(lines, (size_t)cap * sizeof(char *));
+            if (!nl) { free(lines); return -1; }
+            lines = nl;
+        }
+        lines[count++] = buf + start;
+    }
+    *out = lines;
+    *nout = count;
+    return 0;
+}
+
+static int header_path(char *line, char *out, int max) {
+    char *p = line;
+    int n = 0;
+    while (*p && *p != ' ' && *p != '\t') p++;
+    while (*p == ' ' || *p == '\t') p++;
+    if (!*p) return -1;
+    while (p[n] && p[n] != '\t' && n < max - 1) {
+        out[n] = p[n];
+        n++;
+    }
+    out[n] = 0;
+    return n ? 0 : -1;
+}
+
+static const char *strip_components(const char *path, int n) {
+    while (n > 0 && *path) {
+        const char *sl = strchr(path, '/');
+        if (!sl) return path + strlen(path);
+        path = sl + 1;
+        n--;
+    }
+    return path;
+}
+
+static int parse_num(const char **ps, int *v) {
+    const char *s = *ps;
+    int x = 0;
+    if (*s < '0' || *s > '9') return -1;
+    while (*s >= '0' && *s <= '9') {
+        x = x * 10 + (*s - '0');
+        s++;
+    }
+    *v = x;
+    *ps = s;
+    return 0;
+}
+
+static int parse_hunk(const char *s, int *os, int *oc, int *ns, int *nc) {
+    if (strncmp(s, "@@ -", 4)) return -1;
+    s += 4;
+    if (parse_num(&s, os) < 0) return -1;
+    if (*s == ',') {
+        s++;
+        if (parse_num(&s, oc) < 0) return -1;
+    } else *oc = 1;
+    if (*s != ' ' || s[1] != '+') return -1;
+    s += 2;
+    if (parse_num(&s, ns) < 0) return -1;
+    if (*s == ',') {
+        s++;
+        if (parse_num(&s, nc) < 0) return -1;
+    } else *nc = 1;
+    return 0;
+}
+
+static int push_line(char ***v, int *n, int *cap, char *s) {
+    if (*n >= *cap) {
+        int nc = *cap ? *cap * 2 : 16;
+        char **nv = realloc(*v, (size_t)nc * sizeof(char *));
+        if (!nv) { dprintf(STDERR, "ext: out of memory\n"); return -1; }
+        *v = nv;
+        *cap = nc;
+    }
+    (*v)[(*n)++] = s;
+    return 0;
+}
+
+static int write_lines(const char *path, char **lines, int n) {
+    FILE *f;
+    char parent[128];
+    int i, r;
+    if (strchr(path, '/')) {
+        if (parent_dir(path, parent, (int)sizeof parent) == 0) {
+            r = mkdir_p(parent);
+            if (r < 0) return -1;
+        }
+    }
+    f = fopen(path, "w");
+    if (!f) return -1;
+    for (i = 0; i < n; i++) {
+        if (fputs(lines[i], f) < 0 || fputc('\n', f) < 0) { fclose(f); return -1; }
+    }
+    if (fclose(f) != 0) return -1;
+    return 0;
+}
+
+static int apply_section(char **plines, int nlines, int *index, int strip) {
+    char oldp[160], newp[160];
+    char *filebuf = NULL, **oldlines = NULL, **out = NULL, *s;
+    const char *target, *raw;
+    int oldn = 0, filelen = 0, outn = 0, outcap = 0, in_i, i, rc;
+    int creating, deleting, os, oc, ns, nc, got_old, got_new, u;
+    char kind;
+
+    i = *index;
+    if (header_path(plines[i], oldp, (int)sizeof oldp) < 0) return -1;
+    i++;
+    if (i >= nlines || strncmp(plines[i], "+++ ", 4) != 0) {
+        dprintf(STDERR, "ext: patch: missing +++\n");
+        return -1;
+    }
+    if (header_path(plines[i], newp, (int)sizeof newp) < 0) return -1;
+    i++;
+    creating = !strcmp(oldp, "/dev/null");
+    deleting = !strcmp(newp, "/dev/null");
+    if (creating && deleting) {
+        dprintf(STDERR, "ext: patch: empty file header\n");
+        return -1;
+    }
+    raw = deleting ? oldp : newp;
+    target = strip_components(raw, strip);
+    if (!safe_rel(target)) {
+        dprintf(STDERR, "ext: patch: bad path %s\n", target[0] ? target : raw);
+        return -1;
+    }
+    if (creating) {
+        filebuf = malloc(1);
+        if (!filebuf) { dprintf(STDERR, "ext: out of memory\n"); return -1; }
+        filebuf[0] = 0;
+        filelen = 0;
+    } else {
+        filebuf = read_all(target, &filelen, FILE_MAX);
+        if (!filebuf) {
+            dprintf(STDERR, "ext: patch: %s: cannot read\n", target);
+            return -1;
+        }
+    }
+    if (split_lines(filebuf, filelen, &oldlines, &oldn) < 0) {
+        free(filebuf);
+        dprintf(STDERR, "ext: out of memory\n");
+        return -1;
+    }
+    in_i = 0;
+    rc = 0;
+    while (i < nlines && strncmp(plines[i], "@@ ", 3) == 0) {
+        if (parse_hunk(plines[i], &os, &oc, &ns, &nc) < 0) {
+            dprintf(STDERR, "ext: patch: bad hunk\n");
+            rc = -1;
+            goto done;
+        }
+        (void)ns;
+        i++;
+        while (in_i < os - 1) {
+            if (in_i >= oldn) {
+                dprintf(STDERR, "ext: patch: %s: hunk does not match\n", target);
+                rc = -1;
+                goto done;
+            }
+            if (push_line(&out, &outn, &outcap, oldlines[in_i]) < 0) { rc = -1; goto done; }
+            in_i++;
+        }
+        got_old = 0;
+        got_new = 0;
+        while (got_old < oc || got_new < nc) {
+            if (i >= nlines) {
+                dprintf(STDERR, "ext: patch: %s: short hunk\n", target);
+                rc = -1;
+                goto done;
+            }
+            s = plines[i];
+            if (s[0] == '\\') { i++; continue; }
+            kind = s[0];
+            if (kind != ' ' && kind != '+' && kind != '-') {
+                dprintf(STDERR, "ext: patch: %s: hunk does not match\n", target);
+                rc = -1;
+                goto done;
+            }
+            i++;
+            if (kind == ' ' || kind == '-') {
+                if (in_i >= oldn || strcmp(oldlines[in_i], s + 1) != 0) {
+                    dprintf(STDERR, "ext: patch: %s: hunk does not match\n", target);
+                    rc = -1;
+                    goto done;
+                }
+                if (kind == ' ') {
+                    if (push_line(&out, &outn, &outcap, oldlines[in_i]) < 0) { rc = -1; goto done; }
+                    got_new++;
+                }
+                in_i++;
+                got_old++;
+            } else {
+                if (push_line(&out, &outn, &outcap, s + 1) < 0) { rc = -1; goto done; }
+                got_new++;
+            }
+        }
+    }
+    while (in_i < oldn) {
+        if (push_line(&out, &outn, &outcap, oldlines[in_i]) < 0) { rc = -1; goto done; }
+        in_i++;
+    }
+    if (deleting) {
+        u = unlink(target);
+        if (u < 0) {
+            dprintf(STDERR, "ext: patch: %s: %s\n", target, strerror(-u));
+            rc = -1;
+            goto done;
+        }
+    } else if (write_lines(target, out, outn) < 0) {
+        dprintf(STDERR, "ext: patch: %s: %s\n", target, strerror(errno));
+        rc = -1;
+        goto done;
+    }
+    *index = i;
+done:
+    free(out);
+    free(oldlines);
+    free(filebuf);
+    return rc;
+}
+
+static int apply_patch(const char *path, int strip) {
+    char *buf, **lines = NULL;
+    int len = 0, nlines = 0, i = 0, files = 0, rc = 0;
+    buf = read_all(path, &len, PATCH_MAX);
+    if (!buf) { dprintf(STDERR, "ext: patch: %s: cannot read\n", path); return 1; }
+    if (split_lines(buf, len, &lines, &nlines) < 0) {
+        free(buf);
+        dprintf(STDERR, "ext: out of memory\n");
+        return 1;
+    }
+    while (i < nlines) {
+        if (strncmp(lines[i], "--- ", 4) != 0) { i++; continue; }
+        files++;
+        if (apply_section(lines, nlines, &i, strip) < 0) { rc = 1; break; }
+    }
+    if (!rc && files == 0) { dprintf(STDERR, "ext: patch: no files in %s\n", path); rc = 1; }
+    free(lines);
+    free(buf);
+    return rc;
+}
+
+static int cmd_copy(const char *pkg, int argc, char **argv) {
+    char src[256], parent[128];
+    int n, r;
+    if (argc != 3) { dprintf(STDERR, "ext: copy needs a source and a destination\n"); return 1; }
+    if (!safe_rel(argv[1])) { dprintf(STDERR, "ext: copy: bad source %s\n", argv[1]); return 1; }
+    n = snprintf(src, sizeof src, "%s/%s", pkg, argv[1]);
+    if (n < 0 || n >= (int)sizeof src) { dprintf(STDERR, "ext: copy: path too long\n"); return 1; }
+    if (strchr(argv[2], '/')) {
+        if (parent_dir(argv[2], parent, (int)sizeof parent) == 0) {
+            r = mkdir_p(parent);
+            if (r < 0) { dprintf(STDERR, "ext: %s: %s\n", parent, strerror(-r)); return 1; }
+        }
+    }
+    return copy_bytes(src, argv[2]);
+}
+
+static int cmd_patch(const char *pkg, int argc, char **argv) {
+    char src[256];
+    const char *num;
+    int argi = 1, strip = 1, n;
+    if (argi < argc && strncmp(argv[argi], "-p", 2) == 0) {
+        if (argv[argi][2]) num = argv[argi] + 2;
+        else {
+            if (argi + 1 >= argc) { dprintf(STDERR, "ext: patch: -p needs a number\n"); return 1; }
+            num = argv[++argi];
+        }
+        argi++;
+        strip = 0;
+        if (!num[0]) { dprintf(STDERR, "ext: patch: -p needs a number\n"); return 1; }
+        while (*num) {
+            if (*num < '0' || *num > '9') { dprintf(STDERR, "ext: patch: -p needs a number\n"); return 1; }
+            strip = strip * 10 + (*num - '0');
+            num++;
+        }
+    }
+    if (argi + 1 != argc) { dprintf(STDERR, "ext: patch needs one file\n"); return 1; }
+    if (!safe_rel(argv[argi])) { dprintf(STDERR, "ext: patch: bad source %s\n", argv[argi]); return 1; }
+    n = snprintf(src, sizeof src, "%s/%s", pkg, argv[argi]);
+    if (n < 0 || n >= (int)sizeof src) { dprintf(STDERR, "ext: patch: path too long\n"); return 1; }
+    return apply_patch(src, strip);
+}
+
+static int cmd_rm(int argc, char **argv) {
+    int r;
+    if (argc != 2) { dprintf(STDERR, "ext: rm needs one path\n"); return 1; }
+    r = unlink(argv[1]);
+    if (r < 0) { dprintf(STDERR, "ext: rm: %s: %s\n", argv[1], strerror(-r)); return 1; }
     return 0;
 }
 
@@ -348,8 +725,9 @@ static int write_stamp(const char *dir, const char *name) {
 }
 
 static int install_name(const char *dir, const char *name, int as_dep) {
-    char path[160];
-    int i, rc;
+    char path[160], pkg[160];
+    FILE *sf;
+    int i, rc, n;
     if (!valid_pkg(name)) {
         dprintf(STDERR, "ext: %s: bad package name\n", name ? name : "");
         return 1;
@@ -369,13 +747,20 @@ static int install_name(const char *dir, const char *name, int as_dep) {
         dprintf(STDERR, "ext: dependency chain is too long\n");
         return 1;
     }
-    if (inst_path(dir, name, path, (int)sizeof path) < 0) {
+    n = snprintf(pkg, sizeof pkg, "%s/%s", dir, name);
+    if (n < 0 || n >= (int)sizeof pkg || script_path(dir, name, "setup.inst", path, (int)sizeof path) < 0) {
+        dprintf(STDERR, "ext: %s: path too long\n", name);
+        return 1;
+    }
+    sf = fopen(path, "r");
+    if (!sf) {
         dprintf(STDERR, "ext: %s: no instruction in %s\n", name, dir);
         return 1;
     }
+    fclose(sf);
     memcpy(dep_stack[dep_depth], name, strlen(name) + 1);
     dep_depth++;
-    rc = run_file(dir, path);
+    rc = run_file(dir, pkg, path);
     dep_depth--;
     if (rc != 0) return 1;
     if (write_stamp(dir, name) != 0) {
@@ -386,11 +771,54 @@ static int install_name(const char *dir, const char *name, int as_dep) {
     return 0;
 }
 
+static int uninstall_name(const char *dir, const char *name) {
+    char path[160], pkg[160], stamp[160];
+    FILE *sf;
+    int n, r;
+    if (!valid_pkg(name)) {
+        dprintf(STDERR, "ext: %s: bad package name\n", name ? name : "");
+        return 1;
+    }
+    if (!stamp_exists(dir, name)) {
+        dprintf(STDERR, "ext: %s: not installed\n", name);
+        return 1;
+    }
+    n = snprintf(pkg, sizeof pkg, "%s/%s", dir, name);
+    if (n < 0 || n >= (int)sizeof pkg || script_path(dir, name, "uninstall.inst", path, (int)sizeof path) < 0) {
+        dprintf(STDERR, "ext: %s: path too long\n", name);
+        return 1;
+    }
+    sf = fopen(path, "r");
+    if (!sf) {
+        dprintf(STDERR, "ext: %s: no uninstall script\n", name);
+        return 1;
+    }
+    fclose(sf);
+    if (run_file(dir, pkg, path) != 0) return 1;
+    if (stamp_path(dir, name, stamp, (int)sizeof stamp) < 0 || (r = unlink(stamp)) < 0) {
+        dprintf(STDERR, "ext: %s: cannot remove install record\n", name);
+        return 1;
+    }
+    printf("removed %s\n", name);
+    return 0;
+}
+
 static void usage(void) {
-    dprintf(STDERR, "usage: ext list | ext install <name>\n");
+    dprintf(STDERR, "usage: ext list | ext install <name> | ext uninstall <name>\n");
 }
 
 #if defined(__LINUX_TEST__)
+static int file_is(const char *path, const char *expect) {
+    char got[64];
+    FILE *f = fopen(path, "r");
+    int n = 0, c;
+    if (!f) return 0;
+    while ((c = fgetc(f)) != EOF && n < (int)sizeof got - 1) got[n++] = (char)c;
+    got[n] = 0;
+    fclose(f);
+    return strcmp(got, expect) == 0;
+}
+
 static int selftest(void) {
     int fails = 0;
     char *av[8];
@@ -406,18 +834,19 @@ static int selftest(void) {
     if (split_line(line, av) != 0) { printf("FAIL comment\n"); fails++; }
     if (mkdir_p("/tmp/myos-ext-test/work/sub") < 0) { printf("FAIL mkdir_p\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/work/sub", &st) != 0 || st.type != 2) { printf("FAIL dir type\n"); fails++; }
-    mkdir_p("/tmp/myos-ext-test/instructions");
-    f = fopen("/tmp/myos-ext-test/instructions/demo.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/demo");
+    f = fopen("/tmp/myos-ext-test/instructions/demo/setup.inst", "w");
     if (!f) { printf("FAIL write inst\n"); return 1; }
     fputs("name demo\ndescr hello there\nworkdir /tmp/myos-ext-test/demo\nmkdir nested\n", f);
     fclose(f);
-    if (read_meta("/tmp/myos-ext-test/instructions/demo.inst", name, 32, descr, 80) != 0
+    if (read_meta("/tmp/myos-ext-test/instructions/demo/setup.inst", name, 32, descr, 80) != 0
         || strcmp(name, "demo") || strcmp(descr, "hello there")) {
         printf("FAIL meta '%s' '%s'\n", name, descr); fails++;
     }
     if (install_name("/tmp/myos-ext-test/instructions", "demo", 0) != 0) { printf("FAIL install\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/demo/nested", &st) != 0 || st.type != 2) { printf("FAIL nested\n"); fails++; }
-    f = fopen("/tmp/myos-ext-test/instructions/bad.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/bad");
+    f = fopen("/tmp/myos-ext-test/instructions/bad/setup.inst", "w");
     if (f) { fputs("name bad\ndescr x\ngit clone x\n", f); fclose(f); }
     if (install_name("/tmp/myos-ext-test/instructions", "bad", 0) == 0) { printf("FAIL unknown accepted\n"); fails++; }
     if (install_name("/tmp/myos-ext-test/instructions", "missing", 0) == 0) { printf("FAIL missing accepted\n"); fails++; }
@@ -434,15 +863,18 @@ static int selftest(void) {
     if (!f) { printf("FAIL makefile\n"); return 1; }
     fputs("all:\n\techo base >> /tmp/myos-ext-test/base.log\n", f);
     fclose(f);
-    f = fopen("/tmp/myos-ext-test/instructions/base.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/base");
+    f = fopen("/tmp/myos-ext-test/instructions/base/setup.inst", "w");
     if (!f) { printf("FAIL base inst\n"); return 1; }
     fputs("name base\ndescr base\nworkdir /tmp/myos-ext-test/base\nmake\n", f);
     fclose(f);
-    f = fopen("/tmp/myos-ext-test/instructions/mid.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/mid");
+    f = fopen("/tmp/myos-ext-test/instructions/mid/setup.inst", "w");
     if (!f) { printf("FAIL mid inst\n"); return 1; }
     fputs("name mid\ndescr mid\ndepend base\nworkdir /tmp/myos-ext-test/mid\nmkdir middir\n", f);
     fclose(f);
-    f = fopen("/tmp/myos-ext-test/instructions/top.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/top");
+    f = fopen("/tmp/myos-ext-test/instructions/top/setup.inst", "w");
     if (!f) { printf("FAIL top inst\n"); return 1; }
     fputs("name top\ndescr top\ndepend mid\nworkdir /tmp/myos-ext-test/top\nmkdir topdir\n", f);
     fclose(f);
@@ -489,7 +921,8 @@ static int selftest(void) {
         if (!f) { printf("FAIL write gz\n"); return 1; }
         if (fwrite(hello_gz, 1, sizeof hello_gz, f) != sizeof hello_gz) { printf("FAIL short gz\n"); fclose(f); return 1; }
         fclose(f);
-        f = fopen("/tmp/myos-ext-test/instructions/untar.inst", "w");
+        mkdir_p("/tmp/myos-ext-test/instructions/untar");
+        f = fopen("/tmp/myos-ext-test/instructions/untar/setup.inst", "w");
         if (!f) { printf("FAIL untar inst\n"); return 1; }
         fputs("name untar\ndescr u\nworkdir /tmp/myos-ext-test/untar\ntar xf /tmp/myos-ext-test/hello.tar.gz\n", f);
         fclose(f);
@@ -504,14 +937,74 @@ static int selftest(void) {
         }
     }
 
-    f = fopen("/tmp/myos-ext-test/instructions/c1.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/c1");
+    f = fopen("/tmp/myos-ext-test/instructions/c1/setup.inst", "w");
     if (f) { fputs("name c1\ndescr c\ndepend c2\n", f); fclose(f); }
-    f = fopen("/tmp/myos-ext-test/instructions/c2.inst", "w");
+    mkdir_p("/tmp/myos-ext-test/instructions/c2");
+    f = fopen("/tmp/myos-ext-test/instructions/c2/setup.inst", "w");
     if (f) { fputs("name c2\ndescr c\ndepend c1\n", f); fclose(f); }
     if (install_name("/tmp/myos-ext-test/instructions", "c1", 0) == 0) { printf("FAIL cycle accepted\n"); fails++; }
     if (stamp_exists("/tmp/myos-ext-test/instructions", "c1") || stamp_exists("/tmp/myos-ext-test/instructions", "c2")) {
         printf("FAIL cycle stamp\n"); fails++;
     }
+
+    unlink("/tmp/myos-ext-test/installed/boxed");
+    unlink("/tmp/myos-ext-test/installed/badpatch");
+    unlink("/tmp/myos-ext-test/installed/noscript");
+    mkdir_p("/tmp/myos-ext-test/instructions/boxed");
+    f = fopen("/tmp/myos-ext-test/instructions/boxed/note.txt", "w");
+    if (!f) { printf("FAIL note\n"); return 1; }
+    fputs("hi\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/boxed/base.txt", "w");
+    if (!f) { printf("FAIL base file\n"); return 1; }
+    fputs("hello\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/boxed/fix.diff", "w");
+    if (!f) { printf("FAIL diff\n"); return 1; }
+    fputs("--- a/base.txt\n+++ b/base.txt\n@@ -1 +1 @@\n-hello\n+world\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/boxed/setup.inst", "w");
+    if (!f) { printf("FAIL boxed inst\n"); return 1; }
+    fputs("name boxed\ndescr box\nworkdir /tmp/myos-ext-test/boxed\n"
+          "copy note.txt note.txt\ncopy base.txt base.txt\npatch fix.diff\n", f);
+    fclose(f);
+    f = fopen("/tmp/myos-ext-test/instructions/boxed/uninstall.inst", "w");
+    if (!f) { printf("FAIL boxed uninstall\n"); return 1; }
+    fputs("rm /tmp/myos-ext-test/boxed/note.txt\nrm /tmp/myos-ext-test/boxed/base.txt\n", f);
+    fclose(f);
+    if (install_name("/tmp/myos-ext-test/instructions", "boxed", 0) != 0) { printf("FAIL boxed\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/boxed/note.txt", "hi\n")) { printf("FAIL copied note\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/boxed/base.txt", "world\n")) { printf("FAIL patched base\n"); fails++; }
+    if (uninstall_name("/tmp/myos-ext-test/instructions", "boxed") != 0) { printf("FAIL uninstall\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/boxed/note.txt", &st) == 0 || dirstat("/tmp/myos-ext-test/boxed/base.txt", &st) == 0) {
+        printf("FAIL files remain\n"); fails++;
+    }
+    if (stamp_exists("/tmp/myos-ext-test/instructions", "boxed")) { printf("FAIL stamp remains\n"); fails++; }
+    if (uninstall_name("/tmp/myos-ext-test/instructions", "boxed") == 0) { printf("FAIL second uninstall\n"); fails++; }
+
+    mkdir_p("/tmp/myos-ext-test/instructions/badpatch");
+    f = fopen("/tmp/myos-ext-test/instructions/badpatch/base.txt", "w");
+    if (f) { fputs("hello\n", f); fclose(f); }
+    f = fopen("/tmp/myos-ext-test/instructions/badpatch/wrong.diff", "w");
+    if (f) { fputs("--- a/base.txt\n+++ b/base.txt\n@@ -1 +1 @@\n-nope\n+world\n", f); fclose(f); }
+    f = fopen("/tmp/myos-ext-test/instructions/badpatch/setup.inst", "w");
+    if (f) {
+        fputs("name badpatch\ndescr bad\nworkdir /tmp/myos-ext-test/badpatch\n"
+              "copy base.txt base.txt\npatch wrong.diff\n", f);
+        fclose(f);
+    }
+    if (install_name("/tmp/myos-ext-test/instructions", "badpatch", 0) == 0) { printf("FAIL bad patch accepted\n"); fails++; }
+    if (!file_is("/tmp/myos-ext-test/badpatch/base.txt", "hello\n")) { printf("FAIL bad patch wrote\n"); fails++; }
+    if (stamp_exists("/tmp/myos-ext-test/instructions", "badpatch")) { printf("FAIL bad patch stamp\n"); fails++; }
+
+    mkdir_p("/tmp/myos-ext-test/instructions/noscript");
+    f = fopen("/tmp/myos-ext-test/instructions/noscript/setup.inst", "w");
+    if (f) { fputs("name noscript\ndescr n\nworkdir /tmp/myos-ext-test/noscript\nmkdir kept\n", f); fclose(f); }
+    if (install_name("/tmp/myos-ext-test/instructions", "noscript", 0) != 0) { printf("FAIL noscript\n"); fails++; }
+    if (uninstall_name("/tmp/myos-ext-test/instructions", "noscript") == 0) { printf("FAIL missing uninstall\n"); fails++; }
+    if (!stamp_exists("/tmp/myos-ext-test/instructions", "noscript")) { printf("FAIL noscript stamp\n"); fails++; }
+    if (dirstat("/tmp/myos-ext-test/noscript/kept", &st) != 0 || st.type != 2) { printf("FAIL kept\n"); fails++; }
     return fails != 0;
 }
 #endif
@@ -522,6 +1015,7 @@ int main(int argc, char **argv) {
 #endif
     if (argc == 2 && !strcmp(argv[1], "list")) return list_dir(INST_DIR);
     if (argc == 3 && !strcmp(argv[1], "install")) return install_name(INST_DIR, argv[2], 0);
+    if (argc == 3 && !strcmp(argv[1], "uninstall")) return uninstall_name(INST_DIR, argv[2]);
     usage();
     return 2;
 }

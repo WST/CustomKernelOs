@@ -8,12 +8,12 @@ if [ -z "$CC" ] || [ -z "$ROOT" ]; then
     exit 2
 fi
 
-inst=ext/instructions/lua.inst
+inst=ext/instructions/lua/setup.inst
 link=$(grep '^cc -o /ext/bin/lua ' "$inst")
 words=$(printf '%s\n' "$link" | wc -w)
 bytes=$(printf '%s' "$link" | wc -c)
 if [ "$words" -ge 64 ] || [ "$bytes" -ge 1024 ]; then
-    echo "lua.inst link line is too long: $words words, $bytes bytes" >&2
+    echo "lua setup.inst link line is too long: $words words, $bytes bytes" >&2
     exit 1
 fi
 
