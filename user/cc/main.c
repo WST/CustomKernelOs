@@ -7,6 +7,7 @@
  *   cc -c a.c && cc a.o -lz    -> объектный файл, потом программа с /lib/libz.a
  *   cc a.c -lm                 -> то же с /lib/libm.so или /lib/libm.a
  *   cc a.c -ldl                -> dlopen из /lib/libdl.so, состояние в ld.so
+ *   cc a.c -lpthread           -> pthread_create из /lib/libpthread.so
  *
  * Заголовки (#include <myos.h>, <gfx.h>) берутся из /include. Библиотеки —
  * /lib/libgfx.a и /lib/libc.a; если их нет, вместе с программой компилируются

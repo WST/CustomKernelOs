@@ -52,6 +52,10 @@ struct task {
     u32   pgid;                     /* группа процессов: Ctrl+C убивает всю группу */
     int   exit_code;
     bool  keep_zombie;              /* кто-то ждёт код выхода — не убирать раньше времени */
+    bool  detached;                 /* pthread_detach: слот и mmap-стек освобождаются без join */
+    u32   tcb;                      /* указатель программы: первое поле — её errno */
+    u32   user_stack;               /* база стека, который отдал thread_create */
+    u32   user_stack_len;
     bool  in_syscall;               /* сейчас выполняет системный вызов */
     bool  kill_pending;             /* убить при выходе из системного вызова */
     int   pending_code;             /* exit status, including zero; kill sets 137 */
@@ -74,8 +78,10 @@ bool  tasking_ready(void);
 struct task *task_current(void);
 struct task *task_process(struct task *t);
 bool task_has_threads(struct task *t);
-int task_thread_create(u32 entry, u32 fn, u32 arg, u32 sp);
+int task_thread_create(u32 entry, u32 fn, u32 arg, u32 sp, u32 stack, u32 stack_len);
 int task_thread_join(u32 tid, int *code);
+int task_thread_detach(u32 tid);
+int task_thread_set_stack(u32 tid, u32 base, u32 len);
 void task_set_pgid(struct task *p, u32 pgid);
 void task_exit_group(int code) __attribute__((noreturn));
 struct task *task_by_id(u32 id);
@@ -94,6 +100,7 @@ void  task_sleep_ticks(u32 ticks);
 void  task_wait(void *chan);        /* заснуть до task_wakeup(chan); вызывать с cli */
 bool  task_wait_timeout(void *chan, u32 ticks);   /* -> false, если вышло время */
 void  task_wakeup(void *chan);
+void  task_wake_one(void *chan);
 
 void  mutex_lock(struct mutex *m);
 void  mutex_unlock(struct mutex *m);

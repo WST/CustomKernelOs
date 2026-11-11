@@ -65,7 +65,21 @@ enum {
     SYS_SYMLINK, SYS_READLINK, SYS_LSTAT,
     SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
-    SYS_REBOOT
+    SYS_REBOOT,
+    SYS_THREAD_CTL
+};
+/* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
+#define TC_SET_TCB   0
+#define TC_GET_TCB   1
+#define TC_SET_STACK 2
+#define TC_DETACH    3
+#define TC_COND_WAIT 4
+#define TC_COND_WAKE 5
+#define THREAD_KEYS 128
+struct thread_key { void *val; unsigned gen; };
+struct thread_tcb {
+    int errno;
+    struct thread_key key[THREAD_KEYS];
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
@@ -80,12 +94,8 @@ _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes
 
 /* ошибки: системные вызовы возвращают -код (как в Linux); open/read/write/close/lseek/fstat
  * дополнительно приводят его к -1 и пишут сюда, как в POSIX. */
-#ifdef MYOS_HOST_LIBC
 int *__errno_location(void);
 #define errno (*__errno_location())
-#else
-extern int errno;
-#endif
 
 /* ошибки: системные вызовы возвращают -код (как в Linux) */
 #define EPERM 1
@@ -188,8 +198,9 @@ int   getpid(void);
 unsigned ticks(void);           /* миллисекунды с момента загрузки */
 void  yield(void);
 
-/* Native threads: caller owns the stack until successful join. Not POSIX pthreads.
- * Zero-initialize mutexes. Lock/unlock return 0 or negative errno. */
+/* Нативные потоки: стек принадлежит вызвавшему до успешного join. Это не POSIX.
+ * errno у каждого потока свой, как только libc записала thread_tcb.
+ * Мьютекс обнуляют. lock/unlock/trylock возвращают 0 или отрицательный errno. */
 typedef struct { unsigned owner; } thread_mutex_t;
 int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned stack_size);
 int thread_join(int tid, int *code);
@@ -197,6 +208,10 @@ void thread_exit(int code) __attribute__((noreturn));
 int gettid(void);
 int thread_mutex_lock(thread_mutex_t *m);
 int thread_mutex_unlock(thread_mutex_t *m);
+int thread_mutex_trylock(thread_mutex_t *m);
+int thread_ctl(int op, int a, int b, int c);
+int thread_set_tcb(struct thread_tcb *tcb);
+struct thread_tcb *thread_get_tcb(void);
 
 /* процессы в стиле Unix */
 int   spawn(const char *path, char **argv, int stdin_fd); /* -1 inherits stdin */

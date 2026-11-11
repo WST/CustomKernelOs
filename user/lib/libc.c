@@ -204,7 +204,27 @@ void exit(int code) {
     for (;;) ;
 }
 
+#undef errno
 int errno;
+static struct thread_tcb main_tcb;
+
+int thread_ctl(int op, int a, int b, int c) {
+    return syscall5(SYS_THREAD_CTL, op, a, b, c, 0);
+}
+int thread_set_tcb(struct thread_tcb *tcb) {
+    return thread_ctl(TC_SET_TCB, (int)tcb, 0, 0);
+}
+struct thread_tcb *thread_get_tcb(void) {
+    unsigned r = (unsigned)thread_ctl(TC_GET_TCB, 0, 0, 0);
+    if (r < 0x40000000u || r >= 0xfffff001u) return 0;
+    return (struct thread_tcb *)r;
+}
+int *__errno_location(void) {
+    struct thread_tcb *tcb = thread_get_tcb();
+    if (!tcb) return &errno;
+    return &tcb->errno;
+}
+#define errno (*__errno_location())
 
 /* POSIX: -1 и errno. Остальные вызовы по-прежнему возвращают -код. */
 static int ioerr(int r) {
@@ -236,7 +256,11 @@ unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0,
 void  yield(void)                                { syscall3(SYS_YIELD, 0, 0, 0); }
 int   spawn(const char *path, char **argv, int stdin_fd) { return syscall3(SYS_SPAWN, (int)path, (int)argv, stdin_fd); }
 static void thread_entry(void (*fn)(void *), void *arg) {
-    fn(arg); thread_exit(0);
+    struct thread_tcb tcb;
+    memset(&tcb, 0, sizeof tcb);
+    thread_set_tcb(&tcb);
+    fn(arg);
+    thread_exit(0);
 }
 int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned size) {
     return syscall5(SYS_THREAD_CREATE,(int)thread_entry,(int)fn,(int)arg,(int)stack,size);
@@ -246,6 +270,7 @@ void thread_exit(int code) { syscall3(SYS_THREAD_EXIT,code,0,0); for (;;) {} }
 int gettid(void) { return syscall3(SYS_GETTID,0,0,0); }
 int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,0,0); }
 int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
+int thread_mutex_trylock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,2,0); }
 int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
 int   exec(const char *path, char **argv)        { return syscall3(SYS_EXEC, (int)path, (int)argv, 0); }
 int   execve(const char *path, char *const argv[], char *const envp[]) {
@@ -1625,6 +1650,7 @@ void __libc_init(void) {
 }
 
 int __libc_start(int argc, char **argv) {
+    thread_set_tcb(&main_tcb);
     __libc_init();
     if (argc > 0 && argv && argv[0]) {
         char *s = argv[0], *b = s;

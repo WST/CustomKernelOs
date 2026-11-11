@@ -254,6 +254,11 @@ $(BUILD)/user/pic/libdl.o: user/lib/libdl.c user/include/dlfcn.h | $(BUILD)/user
 $(BUILD)/user/libdl.so: $(BUILD)/user/pic/libdl.o
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libdl.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/libdl.o
 
+$(BUILD)/user/pic/libpthread.o: user/lib/libpthread.c user/include/pthread.h user/lib/myos.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
+$(BUILD)/user/libpthread.so: $(BUILD)/user/pic/libpthread.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libpthread.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/libpthread.o -L$(BUILD)/user -lc
+
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -387,9 +392,15 @@ $(CCROOT)/lib/libdl.a: $(BUILD)/libobj-linux/libdl.o
 $(BUILD)/mlib/libdl.a: $(BUILD)/libobj-myos/libdl.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/libobj-linux/libpthread.o $(BUILD)/libobj-myos/libpthread.o: user/include/pthread.h user/lib/myos.h
+$(CCROOT)/lib/libpthread.a: $(BUILD)/libobj-linux/libpthread.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libpthread.a: $(BUILD)/libobj-myos/libpthread.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -407,7 +418,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -450,6 +461,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libz.so /lib/libz.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libm.so /lib/libm.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libdl.so /lib/libdl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libpthread.so /lib/libpthread.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -638,6 +650,12 @@ luatest: $(BUILD)/cc-host $(CCROOT_READY)
 exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/ext
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
+
+# libpthread: cc принимает pthread.h, -lpthread находит .so. Сами потоки — только в госте.
+pthreadtest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libpthread.so $(BUILD)/mlib/libpthread.a
+	@$(BUILD)/cc-host -B $(CCROOT) -c tests/pthread_test.c -o $(BUILD)/pthread-test.o
+	@$(BUILD)/cc-host -B $(CCROOT) -linux -L $(BUILD)/user tests/pthread_test.c -lpthread -o $(BUILD)/pthread-link
+	@readelf -d $(BUILD)/pthread-link | grep -q libpthread.so
 
 # libdl: -ldl находит библиотеку. Без загрузчика dlopen возвращает ошибку.
 dltest: $(BUILD)/cc-host $(CCROOT_READY)
