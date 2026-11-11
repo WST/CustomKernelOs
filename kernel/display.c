@@ -11,7 +11,10 @@ int display_set_mode(u32 w, u32 h) {
     if (!fb_ready()) return -1;
     struct fb_info fi;
     fb_get_info(&fi);
-    if (fi.width == w && fi.height == h) return 0;
+    if (fi.width == w && fi.height == h) {
+        mouse_set_bounds(fi.width,fi.height);
+        return 0;
+    }
     if (fb_set_mode(w, h) < 0) return -1;
     vga_resize();
     mouse_set_bounds(w, h);

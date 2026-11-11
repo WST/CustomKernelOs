@@ -541,8 +541,10 @@ static int sys_gfx_blit(u32 ubuf, u32 urect) {
     return 0;
 }
 
-static int sys_gfx_mode(u32 w, u32 h) {
+static int sys_gfx_mode(u32 w, u32 h, u32 check_only) {
     if (!fb_ready()) return -ENODEV;
+    if (check_only==1) return fb_mode_ok(w,h)?0:-EINVAL;
+    if (check_only) return -EINVAL;
     return display_set_mode(w, h) < 0 ? -EINVAL : 0;
 }
 
@@ -1127,7 +1129,7 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_SERVICE:     ret = sys_service(a, b); break;
     case SYS_TIME:        ret = sys_time(a); break;
-    case SYS_GFX_MODE:    ret = sys_gfx_mode(a, b); break;
+    case SYS_GFX_MODE:    ret = sys_gfx_mode(a, b, c); break;
     case SYS_GFX_INFO2:   ret = sys_gfx_info2(a); break;
     case SYS_GFX_ACCEL:   ret = sys_gfx_accel(a, b); break;
     case SYS_GFX_CURSOR:  ret = sys_gfx_cursor(a, b); break;

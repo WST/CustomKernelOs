@@ -1,0 +1,6 @@
+Upstream: https://github.com/wfeldt/libx86emu
+Pinned revision: ce81129c57fdfbf690bebc210a8db97d926cc5e7
+License: see LICENSE and LICENSE_INFO, retained verbatim.
+MyOS changes: freestanding integer types and include routing; disable host iopl; replace the floating-point debug ratio with an integer counter.
+Only the hardware kernel links this interpreter. All device access is routed
+through the kernel video BIOS callback, not the default VM I/O backend.

@@ -52,6 +52,7 @@ struct gfx_info2 {
 #define GFX_CAP_GPU       8         /* копирование/заливку умеет сама видеокарта */
 #define GFX_CAP_GPU_ON    16        /* ...и сейчас она это делает */
 #define GFX_CAP_CURSOR_ON 32
+#define GFX_CAP_FIXED_MODE 512 /* only the boot framebuffer is available */
 #define GFX_CAP_COMPOSITOR 256  /* retained textures and alpha blending on GPU */
 #define GFX_CAP_BUFFERED 128    /* frame end switches a completed GPU render target */
 #define GFX_CAP_ALPHA_CURSOR 64      /* аппаратный курсор с прозрачностью */

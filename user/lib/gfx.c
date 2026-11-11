@@ -11,14 +11,15 @@ struct gfx_info { unsigned width, height, bpp, pitch; };
 struct gfx_rect { int x, y, w, h; };
 
 #ifdef __MYOS_CC__
-static int sc(int n, int a, int b) { return __syscall(n, a, b, 0); }
+static int sc_flags(int n,int a,int b,int c) { return __syscall(n,a,b,c); }
 #else
-static inline int sc(int n, int a, int b) {
+static inline int sc_flags(int n, int a, int b,int c) {
     int r;
-    __asm__ volatile ("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b), "d"(0) : "memory");
+    __asm__ volatile ("int $0x80" : "=a"(r) : "a"(n), "b"(a), "c"(b), "d"(c) : "memory");
     return r;
 }
 #endif
+static inline int sc(int n,int a,int b) {return sc_flags(n,a,b,0);}
 
 int gfx_load_font(void) { return sc(SYS_GFX_FONT, (int)gfx_font, 0); }
 
@@ -114,7 +115,7 @@ int gfx_modes(struct gfx_mode *out, int max) {
     for (int i = 0; i < (int)(sizeof(std_modes) / sizeof(std_modes[0])) && n < max; i++) {
         int w = std_modes[i][0], h = std_modes[i][1];
         out[n].w = w; out[n].h = h;
-        out[n].ok = w <= (int)gi.max_w && h <= (int)gi.max_h && (unsigned)(w * h / 256) <= gi.vram_kb;
+        out[n].ok = sc_flags(SYS_GFX_MODE,w,h,1)==0;
         n++;
     }
     return n;

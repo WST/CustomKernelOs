@@ -91,7 +91,7 @@ bool mouse_init(void) {
     return true;
 }
 
-void mouse_usb_report(u32 buttons, i32 dx, i32 dy) {
+void mouse_usb_report(u32 buttons, i32 dx, i32 dy, i32 wheel) {
     if (absolute) return;
     u32 flags=irq_save();
     st.x+=dx; st.y+=dy;
@@ -99,7 +99,7 @@ void mouse_usb_report(u32 buttons, i32 dx, i32 dy) {
     if (st.y<0) st.y=0;
     if (st.x>max_x) st.x=max_x;
     if (st.y>max_y) st.y=max_y;
-    st.buttons=buttons&7; st.events++;
+    st.buttons=buttons&7; st.wheel+=(u32)wheel; st.events++;
     fb_input_notify();
     fb_cursor_move(st.x,st.y);
     irq_restore(flags);
@@ -121,7 +121,7 @@ void mouse_absolute_report(u32 buttons, u32 x, u32 y, i32 wheel) {
 
 void mouse_set_bounds(i32 w, i32 h) {
     u32 f = irq_save();
-    max_x = w - 1; max_y = h - 1;
+    max_x = w>0?w-1:0; max_y = h>0?h-1:0;
     if (absolute) {
         st.x = absolute_x * (u32)max_x / 32767;
         st.y = absolute_y * (u32)max_y / 32767;

@@ -34,6 +34,7 @@
 
 #define FB_CAP_BUFFERED 128    /* hidden GPU render target, scanout switch at frame end */
 
+#define FB_CAP_FIXED_MODE 512 /* firmware runtime unavailable; boot mode only */
 #define FB_CAP_COMPOSITOR 256  /* retained GPU textures with source-over alpha composition */
 
 struct fb_info {

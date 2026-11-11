@@ -13,6 +13,7 @@
 #include "vga.h"
 #include "keyboard.h"
 #include "mouse.h"
+#include "hid_mouse.h"
 
 #ifdef MYOS_HARDWARE
 
@@ -34,7 +35,9 @@ struct usbdev {
 struct hid {
     struct usbdev *dev;
     struct ring ring;
-    unsigned dci,protocol,packet,interface;
+    unsigned dci,protocol,packet,interface,descriptor_bytes;
+    struct hid_mouse_layout mouse;
+    bool report_protocol;
     u8 *report;
     u8 previous[8];
     u32 pending;
@@ -167,7 +170,11 @@ static void pump(void) {
                     unsigned transferred=h->packet-(e.status&0xffffff);
                     if ((code==1 || code==13) && transferred>=(h->protocol==1?8u:3u)) {
                         if (h->protocol==1) keyboard_report(h);
-                        else mouse_usb_report(h->report[0]&7,(i8)h->report[1],(i8)h->report[2]);
+                        else if(h->report_protocol) {
+                            u32 buttons;i32 dx,dy,wheel;
+                            if(hid_mouse_decode(&h->mouse,h->report,transferred,&buttons,&dx,&dy,&wheel))
+                                mouse_usb_report(buttons,dx,dy,wheel);
+                        } else mouse_usb_report(h->report[0]&7,(i8)h->report[1],(i8)h->report[2],0);
                     }
                     if (code==1 || code==13) arm(h);
                     else { h->active=false; kprintf("USB HID slot %u stopped: completion %u\n",h->dev->slot,code); }
@@ -208,7 +215,7 @@ static bool command(u32 lo,u32 ctl) {
     return code==1;
 }
 static bool control(struct usbdev *d,u8 request_type,u8 request,u16 value,u16 index,u16 length) {
-    if (poisoned || length>512) return false;
+    if (poisoned || length>1024) return false;
     bool input=request_type&0x80;
     enqueue(&d->control,request_type|((u32)request<<8)|((u32)value<<16),
             index|((u32)length<<16),8,TYPE(2)|(1<<6)|((length?(input?3:2):0)<<16));
@@ -252,20 +259,24 @@ static bool configure(struct usbdev *d) {
     unsigned total=d->buffer[2]|d->buffer[3]<<8,config=d->buffer[5];
     if (total<9 || total>512 || !control(d,0x80,6,0x200,0,total)) return false;
     u8 descriptors[512]; memcpy(descriptors,d->buffer,total);
-    unsigned first=nhid,protocol=0,iface=0,maxdci=1;
+    unsigned first=nhid,protocol=0,iface=0,maxdci=1,report_bytes=0;
     copy_slot(d); d->input[1]=1;
     for (unsigned pos=0;pos+2<=total;) {
         u8 *p=descriptors+pos; unsigned len=p[0];
         if (len<2 || pos+len>total) break;
         if (p[1]==4 && len>=9) {
             protocol=(p[3]==0 && p[5]==3 && p[6]==1 && (p[7]==1 || p[7]==2))?p[7]:0;
-            iface=p[2];
+            iface=p[2];report_bytes=0;
+        } else if(p[1]==0x21 && protocol && len>=6) {
+            for(u32 i=0;i<p[5] && 6+i*3+3<=len;i++)
+                if(p[6+i*3]==0x22)report_bytes=p[7+i*3]|((u32)p[8+i*3]<<8);
         } else if (p[1]==5 && len>=7 && protocol && (p[2]&0x80) && (p[3]&3)==3 && nhid<NHID) {
             unsigned dci=(p[2]&15)*2+1,packet=(p[4]|p[5]<<8)&0x7ff;
             if (dci<3 || packet<(protocol==1?8u:3u) || packet>64 || (d->input[1]&(1u<<dci))) { pos+=len; continue; }
             struct hid *h=&hids[nhid];
             memset(h,0,sizeof(*h));
             h->dev=d; h->dci=dci; h->protocol=protocol; h->packet=packet; h->interface=iface;
+            h->descriptor_bytes=report_bytes;
             h->report=page();
             if (!h->report || !ring_init(&h->ring)) return false;
             u32 *ep=ctx(d->input,dci+1);
@@ -285,7 +296,15 @@ static bool configure(struct usbdev *d) {
     if (!control(d,0,9,config,0,0)) return false;
     for (unsigned i=first;i<nhid;i++) {
         struct hid *h=&hids[i];
-        if (!control(d,0x21,11,0,h->interface,0)) continue; /* SET_PROTOCOL(boot) */
+        if(h->protocol==2 && h->descriptor_bytes && h->descriptor_bytes<=1024 &&
+           control(d,0x81,6,0x2200,h->interface,h->descriptor_bytes) &&
+           hid_mouse_parse(d->buffer,h->descriptor_bytes,&h->mouse) &&
+           (h->mouse.bits+7u)/8+(h->mouse.numbered?1u:0u)<=h->packet &&
+           control(d,0x21,11,1,h->interface,0)) {
+            h->report_protocol=true;
+            kprintf("USB mouse report protocol: id=%u, wheel=%s, axes=%u/%u bits\n",
+                    h->mouse.id,h->mouse.wheel.size?"yes":"no",h->mouse.x.size,h->mouse.y.size);
+        } else if (!control(d,0x21,11,0,h->interface,0)) continue; /* Boot fallback */
         /* SET_IDLE is optional; some devices stall it. No dependence on it. */
         h->active=true; arm(h);
         kprintf("USB HID %s: port %u, slot %u, endpoint %u\n",h->protocol==1?"keyboard":"mouse",d->port,d->slot,h->dci);

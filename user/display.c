@@ -119,7 +119,9 @@ int main(void) {
     struct gfx_info2 gi;
     gfx_info2(&gi);
     hw_cursor = gi.hw_cursor;
-    snprintf(status, sizeof(status), "Click a resolution to switch to it.");
+    snprintf(status, sizeof(status), (gi.caps&GFX_CAP_FIXED_MODE)?
+             "Mode switching unavailable. Run: dmesg | grep VBE":
+             "Click a resolution to switch to it.");
     draw();
     struct event e;
     unsigned last = ticks();
