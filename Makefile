@@ -569,6 +569,11 @@ tartest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -o $(BUILD)/tar-linux
 	@sh tests/tar.sh $(BUILD)/tar-linux
 
+# Небольшой make: правила, шаблоны, переменные. Тот же cc, что внутри системы.
+maketest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/make.c -o $(BUILD)/make-linux
+	@sh tests/make.sh $(BUILD)/make-linux
+
 cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
 	@sh tests/cp.sh $(BUILD)/cp-linux
@@ -626,7 +631,7 @@ ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUIL
 	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
 	python3 tests/ldso_smoke.py
 
-.PHONY: all run debug clean cleandisk test programs install cctest luatest jstest gfxtest vfstest largetest exttest gztest tartest cptest ldsotest dynsystest
+.PHONY: all run debug clean cleandisk test programs install cctest luatest jstest gfxtest vfstest largetest exttest gztest tartest maketest cptest ldsotest dynsystest
 .SECONDARY:
 
 
