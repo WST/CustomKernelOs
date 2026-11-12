@@ -18,7 +18,7 @@ struct unit {
     struct unit_info info;
     char command[COMMAND_MAX];
     unsigned restart, next_start;
-    bool wanted, valid, console, stopping;
+    bool wanted, valid, console, stopping, root_user;
 };
 static struct unit units[UNIT_MAX];
 static unsigned count;
@@ -43,7 +43,12 @@ static char *trim(char *s) {
     while (n && (s[n-1] == ' ' || s[n-1] == '\t' || s[n-1] == '\r')) s[--n] = 0;
     return s;
 }
-static int config(struct unit *u) {
+static bool root_owned(const char *path,u32 type) {
+    u32 ino;struct fs_stat st;
+    return !fs_resolve(FS_ROOT,path,&ino) && !fs_stat(ino,&st) &&
+           st.type==type && st.uid==0 && !(st.mode&0022);
+}
+static int config_locked(struct unit *u) {
     char path[80], text[CONFIG_MAX + 1]; u32 ino;
     struct fs_stat st;
     path_for(path, UNIT_DIR, u->info.name);
@@ -53,7 +58,7 @@ static int config(struct unit *u) {
     int n = fs_read(ino, 0, text, st.size);
     if (n < 0 || (unsigned)n != st.size) return -EIO;
     text[n] = 0;
-    u->command[0] = 0; u->restart = 0; u->console = false;
+    u->command[0] = 0; u->restart = 0; u->console = false; u->root_user = false;
     bool section = false;
     for (char *line = text; *line;) {
         char *next = line;
@@ -75,13 +80,25 @@ static int config(struct unit *u) {
             else if (!strcmp(value, "always")) u->restart = 1;
             else if (!strcmp(value, "on-failure")) u->restart = 2;
             else return -EINVAL;
+        } else if (!strcmp(s,"User")) {
+            if(strcmp(value,"root")) return -EINVAL;
+            u->root_user=true;
         } else if (!strcmp(s, "StandardInput")) {
             if (!strcmp(value, "tty")) u->console = true;
             else if (!strcmp(value, "null")) u->console = false;
             else return -EINVAL;
         } else if (strcmp(s, "Type") || strcmp(value, "simple")) return -EINVAL;
     }
+    if(u->root_user) {
+        /* Untrusted files/parents must never authorize a privileged boot task. */
+        if(!root_owned("/",FS_TYPE_DIR) || !root_owned("/etc",FS_TYPE_DIR) ||
+           !root_owned(UNIT_DIR,FS_TYPE_DIR) || !root_owned(ENABLE_DIR,FS_TYPE_DIR) ||
+           st.uid!=0 || (st.mode&0022)) return -EACCES;
+    }
     return u->command[0] ? 0 : -EINVAL;
+}
+static int config(struct unit *u) {
+    fs_namespace_lock();int ret=config_locked(u);fs_namespace_unlock();return ret;
 }
 /* Quotes and backslash, up to PROC_MAX_ARGS. No expansions or pipelines. */
 static int arguments(char *s, char **argv) {
@@ -143,11 +160,10 @@ static int start(struct unit *u) {
             else {
                 struct file *input = NULL;
                 if (!u->console && !fs_resolve(FS_ROOT, "/dev/null", &ino)) input = file_open_disk(ino, FMODE_READ, 0);
-                int pid = (!u->console && !input) ? PROC_ENOMEM : proc_spawn_service(argv[0], argc, argv, log, input);
+                int pid = (!u->console && !input) ? PROC_ENOMEM : proc_spawn_service(argv[0], argc, argv, log, input, u->root_user);
                 file_close(input);
                 if (pid > 0) {
-                    /* System services start without an authenticated login.
-                     * A terminal launched by desktop still asks for credentials. */
+                    /* Without explicit User=root, services retain an unauthenticated identity. */
                     u->info.pid = pid; u->info.state = UNIT_ACTIVE;
                     u->info.exit_code = 0; u->wanted = true;
                 } else r = pid == PROC_ENOENT ? -ENOENT : pid == PROC_ENOEXEC ? -ENOEXEC : -ENOMEM;

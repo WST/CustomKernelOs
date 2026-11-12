@@ -1,7 +1,7 @@
 """Boot a disposable disk twice; exercise the real manager and persistent enable."""
 import pathlib, re, subprocess, time
 b = pathlib.Path('build'); image = b/'services-test.img'
-with image.open('wb') as f: f.truncate(4 * 1024 * 1024)
+with image.open('wb') as f: f.truncate(128 * 1024 * 1024)
 subprocess.run(['make', '-j4', 'build/os.img', 'build/user/servicecheck', 'install', 'DISK='+str(image)], check=True)
 subprocess.run(['build/myfs', str(image), 'put', 'build/user/servicecheck', '/bin/servicecheck'], check=True)
 def boot(first):
@@ -40,6 +40,10 @@ def boot(first):
         except subprocess.TimeoutExpired: p.kill(); p.wait()
 boot(True)
 boot(False)
+for name,marker in [('root','ROOT SERVICE PASS'),('anonymous','DEFAULT SERVICE PASS')]:
+    result=subprocess.run(['build/myfs',str(image),'cat',f'/var/log/{name}.service'],capture_output=True,text=True,check=True)
+    assert result.stdout.count(marker)>=2 and 'FAILED' not in result.stdout,result.stdout
+print('Explicit root identity, unprivileged default and trusted-unit checks: PASS')
 
 # Verify graphical autostart and return to the console after stopping desktop.
 for name, text in {

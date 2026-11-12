@@ -24,6 +24,9 @@ if not resume:
   put(recipe,'/ext/instructions/openssh/setup.inst')
  else:
   for f in bins.iterdir():put(f,'/ext/bin/'+f.name)
+  fixture=b/'openssh-service-fixture.inst';fixture.write_text('name openssh\nworkdir /tmp/ext/openssh-native-fixture\ncopy service-test.mk Makefile\nmake\n')
+  make_fixture=b/'openssh-service-fixture.mk';make_fixture.write_text('all:\n\t/ext/bin/openssh-setup\n')
+  put(fixture,'/ext/instructions/openssh/setup.inst');put(make_fixture,'/ext/instructions/openssh/service-test.mk')
  put(b/'openssh-native/sshcheck','/bin/sshcheck')
  config=b/'openssh-test.conf';config.write_text('''Port 22
  AddressFamily inet
@@ -54,10 +57,13 @@ else:
  recipe.write_text('\n'.join('# verified source already extracted' if line.startswith(('fetch ','tar ','patch ')) else line for line in (ROOT/'ext/instructions/openssh/setup.inst').read_text().splitlines())+'\n')
  run(b/'myfs',image,'put',recipe,'/ext/instructions/openssh/setup.inst')
 log=image.with_suffix('.log') if ext_mode else b/'openssh-test.log' ;log.write_text('')
-q=subprocess.Popen(['qemu-system-i386','-cpu','max','-m','512M','-display','none','-no-reboot',
+def boot_vm():
+ log.write_text('')
+ return subprocess.Popen(['qemu-system-i386','-cpu','max','-m','512M','-display','none','-no-reboot',
  '-drive',f'cache=unsafe,format=raw,file={boot},index=0','-drive',f'cache=unsafe,format=raw,file={image},index=1',
  '-nic',f'user,model=e1000,hostfwd=tcp:127.0.0.1:{port}-:22', '-serial',f'file:{log}','-monitor','stdio'],
  stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
+q=boot_vm()
 last_text=''
 def text():
  global last_text
@@ -78,6 +84,7 @@ def send(s,marker,timeout=40):
   if c.isupper():key='shift-'+c.lower()
   q.stdin.write(f'sendkey {key} 10\n');q.stdin.flush();time.sleep(.03)
  wait(marker,start,timeout)
+ return text()[start:]
 try:
  if not resume:
   wait('New password:');send('review123','Confirm password:');send('review123','Login [root]:')
@@ -86,14 +93,20 @@ try:
  send('useradd sshuser','New password:')
  send('user123','Confirm password:');send('user123','root:/')
  send('sshcheck','SSH ABI PASS')
- if ext_mode:send('ext install openssh','OpenSSH installed.',7200)
+ send('ext install openssh','OpenSSH installed.',7200 if ext_mode else 120)
  send('ssh -V','OpenSSH_10.6p2')
- if not ext_mode:send('ssh-keygen -q -t ed25519 -N "" -f /etc/ssh/ssh_host_ed25519_key','\nroot:/root$ ',120)
  send('/ext/bin/sshd -t','\nroot:/root$ ')
- send('/ext/bin/sshd -D -e','Server listening on',60)
+ status=send('systemctl status sshd','enabled')
+ assert re.search(r'enabled\s+active',status),status
+ first_pid=re.search(r'pid=(\d+)',status).group(1)
+ send('/ext/bin/openssh-setup','OpenSSH installed.',120)
+ status=send('systemctl status sshd','enabled')
+ assert re.search(r'pid='+first_pid+r'\b',status),status
+ print('ext install registers/enables/starts sshd; repeated setup keeps one daemon: PASS',flush=True)
  print('Native OpenSSH ABI, key generation and daemon startup: PASS',flush=True)
  result=subprocess.run(['ssh-keyscan','-t','ed25519','-T','30','-p',port,'127.0.0.1'],capture_output=True,text=True,timeout=40)
  assert 'ssh-ed25519' in result.stdout,result.stderr+'\n'+text()[-5000:]
+ original_host_key=next(line.split(' ssh-ed25519 ',1)[1] for line in result.stdout.splitlines() if ' ssh-ed25519 ' in line)
  print('OpenSSH host key exchange: PASS',flush=True)
  options=['-F','/dev/null','-p',port,'-o','StrictHostKeyChecking=no','-o','UserKnownHostsFile=/dev/null','-o','ConnectTimeout=15']
  keyopts=options+['-i',str(identity),'-o','BatchMode=yes']
@@ -155,7 +168,38 @@ try:
  assert download.read_bytes()==payload.read_bytes()
  result=ssh('stat /tmp/openssh-upload.bin');assert result.returncode==0 and 'mode=0600 uid=0 gid=0' in result.stdout,(result.stdout,result.stderr)
  print('SFTP upload/download and persistent chmod metadata: PASS',flush=True)
+ # Restart the same persistent test disk; do not log into the local console.
+ q.terminate()
+ try:q.wait(timeout=3)
+ except subprocess.TimeoutExpired:q.kill();q.wait()
+ last_text='';q=boot_vm();wait('Login [root]:')
+ # Type=simple publishes a PID before the daemon has opened its listener.
+ deadline=time.monotonic()+45
+ while True:
+  result=ssh('echo SSH_BOOT_AUTOSTART_PASS')
+  if result.returncode==0 and 'SSH_BOOT_AUTOSTART_PASS' in result.stdout:break
+  if time.monotonic()>=deadline:raise AssertionError(result.stderr+'\n'+text()[-5000:])
+  time.sleep(.25)
+ result=ssh('systemctl status sshd')
+ assert result.returncode==0 and re.search(r'enabled\s+active',result.stdout),result.stdout+result.stderr
+ result=subprocess.run(['ssh-keyscan','-t','ed25519','-T','30','-p',port,'127.0.0.1'],capture_output=True,text=True,timeout=40)
+ restored_host_key=next(line.split(' ssh-ed25519 ',1)[1] for line in result.stdout.splitlines() if ' ssh-ed25519 ' in line)
+ assert restored_host_key==original_host_key,'Host key changed across setup/reboot'
+ print('sshd autostarts as root before local login after reboot; host key preserved: PASS',flush=True)
+ send('','Password:');send('review123','root:/')
+ send('ext uninstall openssh','removed openssh',120)
+ result=ssh('echo SHOULD_NOT_RUN')
+ assert result.returncode!=0,result.stdout
+ print('ext uninstall stops/disables/removes sshd service and closes the listener: PASS',flush=True)
+
 finally:
  q.terminate()
  try:q.wait(timeout=3)
  except subprocess.TimeoutExpired:q.kill();q.wait()
+
+for path in ['/etc/services/sshd.service','/etc/services/enabled/sshd.service','/ext/installed/openssh']:
+ result=subprocess.run([str(b/'myfs'),str(image),'stat',path],capture_output=True,text=True)
+ assert result.returncode!=0,path+' survived uninstall'
+for path in ['/etc/ssh/sshd_config','/etc/ssh/ssh_host_ed25519_key']:
+ result=subprocess.run([str(b/'myfs'),str(image),'stat',path],capture_output=True,text=True,check=True)
+print('Uninstall removes unit/enable/package markers and preserves SSH settings/keys: PASS',flush=True)

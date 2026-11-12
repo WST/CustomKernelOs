@@ -8,12 +8,17 @@ sftp-server in /ext/bin, then runs /ext/bin/openssh-setup.
 Settings: /etc/ssh/ssh_config and /etc/ssh/sshd_config.
 Host key: /etc/ssh/ssh_host_ed25519_key.
 Existing configuration and host keys survive reinstall and uninstall.
-The server is not started during installation.
-Start from an authenticated root shell: /ext/bin/sshd -D -e
-Background: /ext/bin/sshd -D -E /var/log/sshd.log &
-Stop the PID in /run/sshd.pid with kill before ext uninstall openssh.
-Privileged service-manager autostart is not part of this port.
-Foreground debugging: /ext/bin/sshd -D -e -ddd
+Installation validates sshd -t, creates /etc/services/sshd.service with
+User=root, enables boot autostart and starts the service immediately.
+On subsequent boots it starts before anyone logs into the local console.
+Use systemctl status|start|stop|restart sshd and systemctl disable --now sshd.
+Logs: /var/log/sshd.service. ext uninstall openssh stops/disables the service
+and removes its unit and programs, keeping configuration and host keys.
+Repeated /ext/bin/openssh-setup preserves existing settings and does not
+start a duplicate daemon. Already-installed ext packages are skipped; run
+openssh-setup as root after updating the installer to register the service.
+An updated kernel with User=root service support is required.
+Foreground debugging: systemctl stop sshd, then /ext/bin/sshd -D -e -ddd
 sshd needs an absolute executable path because it re-executes helper programs.
 
 Clients: ssh user@host; scp file user@host:/path; sftp user@host.

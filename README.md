@@ -10,6 +10,7 @@
 `chmod`, `chown`, `stat` и `ls -l`. [Настройка и миграция MyFS](docs/permissions.md).
 
 **OpenSSH через ext** — клиент и сервер, установка `ext install openssh`.
+Установщик включает и запускает `sshd.service`; управление через `systemctl`.
 [Профиль порта, настройка и ограничения](docs/openssh.md).
 
 **Запуск оконных приложений**: рабочий стол использует прямой `spawn`,
