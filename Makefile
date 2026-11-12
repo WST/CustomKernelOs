@@ -271,6 +271,15 @@ $(BUILD)/user/pic/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/
 $(BUILD)/user/libexpat.so: $(EXPAT_PIC) $(BUILD)/user/libc.so $(BUILD)/user/libm.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libexpat.so -Wl,--hash-style=sysv -o $@ $(EXPAT_PIC) -L$(BUILD)/user -lm -lc
 
+# libsqlite3.so — SQLite 3.54.1. Своего VFS нет в исходнике, его даёт os_myos.c.
+SQL_FLAGS := -DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_OMIT_WAL=1 -DSQLITE_OMIT_SHARED_CACHE=1 -DSQLITE_DISABLE_LFS
+SQL_PARTS := sqlite3 os_myos
+SQL_PIC := $(patsubst %,$(BUILD)/user/pic/s_%.o,$(SQL_PARTS))
+$(BUILD)/user/pic/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include/stdint.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC $(SQL_FLAGS) -c $< -o $@
+$(BUILD)/user/libsqlite3.so: $(SQL_PIC) $(BUILD)/user/libc.so $(BUILD)/user/libm.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libsqlite3.so -Wl,--hash-style=sysv -o $@ $(SQL_PIC) -L$(BUILD)/user -lm -lc
+
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -431,9 +440,22 @@ $(CCROOT)/lib/libexpat.a: $(EXPAT_LINUX)
 $(BUILD)/mlib/libexpat.a: $(EXPAT_MYOS)
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+SQL_LINUX := $(patsubst %,$(BUILD)/libobj-linux/s_%.o,$(SQL_PARTS))
+SQL_MYOS  := $(patsubst %,$(BUILD)/libobj-myos/s_%.o,$(SQL_PARTS))
+$(BUILD)/libobj-linux/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux $(SQL_FLAGS) -c $< -o $@
+$(BUILD)/libobj-myos/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) $(SQL_FLAGS) -c $< -o $@
+$(CCROOT)/lib/libsqlite3.a: $(SQL_LINUX)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libsqlite3.a: $(SQL_MYOS)
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a $(CCROOT)/lib/libexpat.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libexpat.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a $(CCROOT)/lib/libexpat.a $(CCROOT)/lib/libsqlite3.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libexpat.a $(BUILD)/mlib/libsqlite3.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -451,7 +473,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -497,6 +519,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libdl.so /lib/libdl.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libpthread.so /lib/libpthread.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libexpat.so /lib/libexpat.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libsqlite3.so /lib/libsqlite3.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -709,6 +732,12 @@ expattest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libexpat.so
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/expat.c -lexpat -o $(BUILD)/expat-test
 	@./$(BUILD)/expat-test
 	@readelf -d $(BUILD)/user/libexpat.so | grep -q libexpat.so
+
+# libsqlite3: строка переживает закрытие базы и читается снова.
+sqlitetest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libsqlite3.so
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/sqlite.c -lsqlite3 -o $(BUILD)/sqlite-test
+	@./$(BUILD)/sqlite-test
+	@readelf -d $(BUILD)/user/libsqlite3.so | grep -q libsqlite3.so
 
 # libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)
