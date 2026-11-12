@@ -101,7 +101,12 @@ int inflateInit_(z_streamp strm, const char *version, int stream_size);
 int inflateInit2_(z_streamp strm, int windowBits, const char *version, int stream_size);
 int inflate(z_streamp strm, int flush);
 int inflateEnd(z_streamp strm);
+#ifndef z_const
+#define z_const const
+#endif
+
 int inflateReset(z_streamp strm);
+int inflateReset2(z_streamp strm, int windowBits);
 
 int compress(Bytef *dest, uLongf *destLen, const Bytef *source, uLong sourceLen);
 int compress2(Bytef *dest, uLongf *destLen, const Bytef *source, uLong sourceLen, int level);

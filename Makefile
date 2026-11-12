@@ -291,15 +291,16 @@ $(BUILD)/user/pic/f_sysv.o: user/lib/ffi/sysv.S user/lib/ffi/fficonfig.h user/in
 $(BUILD)/user/libffi.so: $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libffi.so -Wl,--hash-style=sysv -o $@ $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o -L$(BUILD)/user -lc
 
-# OpenSSL 3.6.5. Собирает gcc хоста, без ассемблера и без сокетов: cc эти объекты
-# не линкует (R_386_GOT32X). Общую библиотеку собираем сами, на нашу libc.so.
+# OpenSSL 3.6.5. Собирает gcc хоста, без ассемблера: cc эти объекты не линкует
+# (R_386_GOT32X). Сокеты включены — libcurl вешает на них HTTPS. Общую
+# библиотеку собираем сами, на нашу libc.so.
 OSSL_SRC := user/lib/openssl
 OSSL_BLD := $(BUILD)/openssl
-OSSL_FLAGS := linux-x86 no-asm no-threads no-thread-pool no-sock no-dgram no-dso no-module \
+OSSL_FLAGS := linux-x86 no-asm no-threads no-thread-pool no-dgram no-dso no-module \
 	no-apps no-docs no-tests no-engine no-quic no-comp no-afalgeng no-devcryptoeng \
 	no-pinshared no-sse2 no-shared no-ui-console --with-rand-seed=devrandom \
 	-std=gnu11 -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx \
-	-DNO_SYSLOG -DMYOS_HOST_LIBC -D__STDC_NO_ATOMICS__ -DRIO_POLL_METHOD=3 \
+	-DNO_SYSLOG -DMYOS_HOST_LIBC -D__STDC_NO_ATOMICS__ \
 	-I$(abspath user/include) -I$(abspath user/lib) \
 	--prefix=$(abspath $(OSSL_BLD))/prefix
 $(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
@@ -314,6 +315,58 @@ $(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
 $(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libssl.so -Wl,--hash-style=sysv -Wl,-z,defs \
 		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libssl.a -Wl,--no-whole-archive -L$(BUILD)/user -lcrypto -lc
+
+# curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста.
+# Объекты с R_386_GOT32X, поэтому cc их не линкует. .so собираем сами.
+CURL_SRC := user/lib/curl
+CURL_BLD := $(BUILD)/curl
+CURL_DEPS := $(BUILD)/curl-deps
+# CCROOT ниже по файлу, поэтому путь пишем через BUILD. Архивы — order-only:
+# на чистой сборке они должны появиться раньше configure, но правка libc
+# не должна заново конфигурировать весь curl.
+$(CURL_BLD)/.built: $(CURL_SRC)/configure $(OSSL_BLD)/.built | $(BUILD)/ccroot/lib/libc.a $(BUILD)/ccroot/lib/libz.a
+	rm -rf $(CURL_BLD) $(CURL_DEPS)
+	mkdir -p $(CURL_DEPS)/include/openssl $(CURL_DEPS)/lib $(CURL_BLD)
+	cp $(OSSL_SRC)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
+	cp $(OSSL_BLD)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
+	ln -s $(abspath $(OSSL_BLD))/libssl.a $(CURL_DEPS)/lib/libssl.a
+	ln -s $(abspath $(OSSL_BLD))/libcrypto.a $(CURL_DEPS)/lib/libcrypto.a
+	ln -s $(abspath user/include/zlib.h) $(CURL_DEPS)/include/zlib.h
+	ln -s $(abspath $(CCROOT)/lib/libz.a) $(CURL_DEPS)/lib/libz.a
+	echo 'void exit(int); int main(void); void _start(void) { exit(main()); }' > $(BUILD)/curl-crt.c
+	$(CC) -m32 -c -nostdinc -Iuser/include -o $(BUILD)/curl-crt.o $(BUILD)/curl-crt.c
+	printf '%s\n' '#!/bin/bash' \
+	  'root=$(abspath .)' \
+	  'link=1' 'args=()' \
+	  'for a in "$$@"; do' \
+	  '  case "$$a" in -c|-E|-S|-M) link=0 ;; -lc|-lpthread|-ldl|-lrt|-lm|-lresolv) continue ;; esac' \
+	  '  args+=("$$a")' \
+	  'done' \
+	  'for a in "$${args[@]}"; do' \
+	  '  if [[ $$a == -lz ]]; then args+=(-Wl,--defsym=gzread=0); break; fi' \
+	  'done' \
+	  'base=(gcc -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx -D_POSIX_C_SOURCE=200809L -I"$$root/user/include" -I"$$root/user/lib")' \
+	  'if [[ $$link -eq 1 ]]; then exec "$${base[@]}" "$${args[@]}" -nostdlib "$$root/build/curl-crt.o" "$$root/build/ccroot/lib/libc.a"; fi' \
+	  'exec "$${base[@]}" "$${args[@]}"' > $(BUILD)/curl-cc
+	chmod +x $(BUILD)/curl-cc
+	cd $(CURL_BLD) && PKG_CONFIG=/bin/false $(abspath $(CURL_SRC))/configure --host=i686-pc-linux-gnu \
+	  CC=$(abspath $(BUILD)/curl-cc) --disable-shared --enable-static \
+	  --disable-ftp --disable-file --disable-ipfs --disable-ldap --disable-ldaps \
+	  --disable-rtsp --disable-dict --disable-telnet --disable-tftp --disable-pop3 \
+	  --disable-imap --disable-smtp --disable-gopher --disable-mqtt \
+	  --disable-manual --disable-docs --disable-ipv6 --disable-threaded-resolver \
+	  --disable-unix-sockets --disable-alt-svc --disable-hsts --disable-ares \
+	  --without-libpsl --without-brotli --without-zstd --without-nghttp2 \
+	  --without-libidn2 --without-nghttp3 --without-ngtcp2 --without-quiche \
+	  --without-libssh2 --without-libssh --without-gnutls --without-mbedtls \
+	  --without-wolfssl --without-rustls \
+	  --with-openssl=$(abspath $(CURL_DEPS)) --with-zlib=$(abspath $(CURL_DEPS))
+	$(MAKE) -C $(CURL_BLD)/lib -j$(shell nproc)
+	touch $@
+$(BUILD)/user/libcurl.so: $(CURL_BLD)/.built $(BUILD)/user/libssl.so $(BUILD)/user/libz.so $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libcurl.so -Wl,--hash-style=sysv -Wl,-z,defs \
+		-o $@ -Wl,--whole-archive $(CURL_BLD)/lib/.libs/libcurl.a -Wl,--no-whole-archive \
+		-L$(BUILD)/user -lssl -lcrypto -lz -lc
 
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
@@ -396,14 +449,16 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
+CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
+	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
 	@cp $(CC_LIBSRC) $(CCROOT)/lib/
 	@touch $@
 
@@ -523,7 +578,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -559,6 +614,10 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/netinet >/dev/null 2>&1 || true
+	@for f in user/include/netinet/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/netinet/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/arpa >/dev/null 2>&1 || true
+	@for f in user/include/arpa/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/arpa/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in libc.c regex.c zlib.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
@@ -573,8 +632,11 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libffi.so /lib/libffi.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcrypto.so /lib/libcrypto.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libssl.so /lib/libssl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcurl.so /lib/libcurl.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) mkdir /include/openssl >/dev/null 2>&1 || true
 	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; $(BUILD)/myfs $(DISK) put $$f /include/openssl/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/curl >/dev/null 2>&1 || true
+	@for f in $(CURL_SRC)/include/curl/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/curl/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -808,6 +870,21 @@ ossltest: $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(CCROOT)/lib/libc.
 	@./$(BUILD)/sha256-test
 	@readelf -d $(BUILD)/user/libcrypto.so | grep -q libcrypto.so
 	@readelf -d $(BUILD)/user/libssl.so | grep -q libssl.so
+
+# GET http://127.0.0.1 и https://127.0.0.1. Это не гостевой httpd: его нет, пока виртуальная машина держит диск.
+curltest: $(BUILD)/user/libcurl.so $(CCROOT)/lib/libc.a $(CCROOT)/lib/libz.a
+	@$(CC) -m32 -nostdlib -nostdinc -no-pie -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-mmx -std=gnu11 \
+		-D_POSIX_C_SOURCE=200809L -I$(CURL_SRC)/include -Iuser/include -Iuser/lib \
+		tests/curlget.c $(CURL_BLD)/lib/.libs/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
+		$(CCROOT)/lib/libz.a $(CCROOT)/lib/libc.a -o $(BUILD)/curlget-test
+	@openssl req -x509 -newkey rsa:2048 -keyout $(BUILD)/curl-test.key -out $(BUILD)/curl-test.crt -days 1 -nodes -subj /CN=127.0.0.1 >/dev/null 2>&1
+	@fuser -k 18765/tcp 18766/tcp >/dev/null 2>&1 || true; \
+	 python3 tests/curlserve.py 18765 >/dev/null 2>&1 & echo $$! > $(BUILD)/curl-http.pid; \
+	 python3 tests/curlserve.py 18766 $(BUILD)/curl-test.crt $(BUILD)/curl-test.key >/dev/null 2>&1 & echo $$! > $(BUILD)/curl-https.pid; \
+	 sleep 0.4; ./$(BUILD)/curlget-test; s=$$?; \
+	 kill $$(cat $(BUILD)/curl-http.pid) $$(cat $(BUILD)/curl-https.pid) 2>/dev/null; \
+	 rm -f $(BUILD)/curl-http.pid $(BUILD)/curl-https.pid; \
+	 readelf -d $(BUILD)/user/libcurl.so | grep -q libcurl.so || s=1; exit $$s
 
 # libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)

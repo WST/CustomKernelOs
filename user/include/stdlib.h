@@ -19,6 +19,7 @@ uintmax_t strtoumax(const char *nptr, char **endptr, int base);
 char *strdup(const char *s);
 char *strndup(const char *s, size_t n);
 void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
+void *bsearch(const void *key, const void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
 char *getenv(const char *name);
 char *mktemp(char *template);
 long long strtonum(const char *nptr, long long minval, long long maxval, const char **errstr);

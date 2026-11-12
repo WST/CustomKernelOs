@@ -138,6 +138,14 @@ int *__errno_location(void);
 #define ETIMEDOUT 110
 #define ECONNREFUSED 111
 #define EHOSTUNREACH 113
+#define ENOSYS 38
+#define ENOPROTOOPT 92
+#define EPROTONOSUPPORT 93
+#define EOPNOTSUPP 95
+#define EAFNOSUPPORT 97
+#define EADDRNOTAVAIL 99
+#define EINPROGRESS 115
+#define EWOULDBLOCK EAGAIN
 
 #define WNOHANG 1
 
@@ -343,23 +351,16 @@ void  free(void *p);
 
 /* ---- сеть ----
  * Сокет — обычный дескриптор: read/write/close работают, его можно отдать
- * программе через dup2. IP-адрес — число: 10.0.2.2 = IP(10,0,2,2). */
+ * программе через dup2. POSIX-вызовы socket/connect/bind живут в sys/socket.h.
+ * IP-адрес — число: 10.0.2.2 = IP(10,0,2,2). */
 #define SOCK_TCP 1
 #define SOCK_UDP 2
 #define IP(a, b, c, d) (((unsigned)(a) << 24) | ((unsigned)(b) << 16) | ((unsigned)(c) << 8) | (unsigned)(d))
-struct sockaddr { unsigned ip, port; };
 struct net_info {
     unsigned char mac[6], up, dhcp;
     unsigned ip, mask, gw, dns, lease;
     unsigned rx_packets, tx_packets, rx_bytes, tx_bytes;
 };
-int  socket(int type);                                  /* -> fd */
-int  connect(int fd, unsigned ip, int port);            /* TCP: установить соединение */
-int  bind(int fd, int port);
-int  listen(int fd, int backlog);
-int  accept(int fd, struct sockaddr *from);             /* -> fd нового соединения */
-int  sendto(int fd, const void *buf, size_t len, unsigned ip, int port);        /* UDP */
-int  recvfrom(int fd, void *buf, size_t len, struct sockaddr *from, unsigned timeout_ms); /* 0 мс — вечно */
 int  netinfo(struct net_info *out);
 int  ping(unsigned ip, int seq, unsigned timeout_ms);  /* -> время ответа в мс или -errno */
 int  set_dns(unsigned ip);

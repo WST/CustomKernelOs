@@ -15,6 +15,12 @@
 #include "fcntl.h"
 #include "poll.h"
 #include "pwd.h"
+#include "sys/socket.h"
+#include "netinet/in.h"
+#include "netinet/tcp.h"
+#include "arpa/inet.h"
+#include "netdb.h"
+#include "sys/select.h"
 #include "sys/ioctl.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
@@ -126,6 +132,7 @@ static int syscall3(int n, int a, int b, int c) {
         static char *envp[] = { 0 };
         return __syscall(11, a, b, (int)envp);
     }
+    case SYS_PIPE: return __syscall(42, a);
     case SYS_WAITPID: {
         int st = 0, r = __syscall(7, a, (int)&st, c);
         if (r < 0) return r;
@@ -1324,16 +1331,337 @@ int partctl(const char *device,unsigned op,unsigned slot,unsigned start,unsigned
 }
 int mountinfo(unsigned index,char device[128],char target[128]) { return syscall3(SYS_MOUNTINFO,index,(int)device,(int)target); }
 int blockinfo(unsigned index,struct block_info *info) { return syscall3(SYS_BLOCKINFO,index,(int)info,0); }
-int socket(int type)                       { return syscall3(SYS_SOCKET, type, 0, 0); }
-int connect(int fd, unsigned ip, int port) { return syscall3(SYS_CONNECT, fd, (int)ip, port); }
-int bind(int fd, int port)                 { return syscall3(SYS_BIND, fd, port, 0); }
-int listen(int fd, int backlog)            { return syscall3(SYS_LISTEN, fd, backlog, 0); }
-int accept(int fd, struct sockaddr *from)  { return syscall3(SYS_ACCEPT, fd, (int)from, 0); }
-int sendto(int fd, const void *buf, size_t len, unsigned ip, int port) {
-    return syscall5(SYS_SENDTO, fd, (int)buf, (int)len, (int)ip, port);
+int socket(int domain, int type, int protocol) {
+    (void)protocol;
+    if (domain != AF_INET) { errno = EAFNOSUPPORT; return -1; }
+    if (type != SOCK_STREAM && type != SOCK_DGRAM) { errno = EPROTONOSUPPORT; return -1; }
+#if defined(__LINUX_TEST__)
+    { unsigned long a[3]; a[0] = domain; a[1] = type; a[2] = protocol; return ioerr(__syscall(102, 1, (int)a, 0)); }
+#else
+    return ioerr(syscall3(SYS_SOCKET, type, 0, 0));
+#endif
 }
-int recvfrom(int fd, void *buf, size_t len, struct sockaddr *from, unsigned timeout_ms) {
-    return syscall5(SYS_RECVFROM, fd, (int)buf, (int)len, (int)from, (int)timeout_ms);
+
+static void sockaddr_from_kernel(struct sockaddr *out, socklen_t *len, unsigned ip, unsigned port) {
+    struct sockaddr_in in;
+    socklen_t n;
+    memset(&in, 0, sizeof(in));
+    in.sin_family = AF_INET;
+    in.sin_addr.s_addr = htonl(ip);
+    in.sin_port = htons((unsigned short)port);
+    n = sizeof(in);
+    if (out && len) {
+        if (*len < n) n = *len;
+        memcpy(out, &in, n);
+        *len = sizeof(in);
+    }
+}
+
+static int sockaddr_to_kernel(const struct sockaddr *addr, socklen_t len, unsigned *ip, unsigned *port) {
+    const struct sockaddr_in *in;
+    if (!addr || len < sizeof(struct sockaddr_in) || addr->sa_family != AF_INET) {
+        errno = EAFNOSUPPORT;
+        return -1;
+    }
+    in = (const struct sockaddr_in *)addr;
+    *ip = ntohl(in->sin_addr.s_addr);
+    *port = ntohs(in->sin_port);
+    return 0;
+}
+
+int connect(int fd, const struct sockaddr *addr, socklen_t len) {
+    unsigned ip, port;
+    if (sockaddr_to_kernel(addr, len, &ip, &port) < 0) return -1;
+#if defined(__LINUX_TEST__)
+    { unsigned long a[3]; a[0] = fd; a[1] = (unsigned long)addr; a[2] = len; return ioerr(__syscall(102, 3, (int)a, 0)); }
+#else
+    return ioerr(syscall3(SYS_CONNECT, fd, (int)ip, (int)port));
+#endif
+}
+
+int bind(int fd, const struct sockaddr *addr, socklen_t len) {
+    unsigned ip, port;
+    if (sockaddr_to_kernel(addr, len, &ip, &port) < 0) return -1;
+#if defined(__LINUX_TEST__)
+    { unsigned long a[3]; a[0] = fd; a[1] = (unsigned long)addr; a[2] = len; return ioerr(__syscall(102, 2, (int)a, 0)); }
+#else
+    if (ip != 0) { errno = EADDRNOTAVAIL; return -1; }
+    return ioerr(syscall3(SYS_BIND, fd, (int)port, 0));
+#endif
+}
+
+int listen(int fd, int backlog) {
+#if defined(__LINUX_TEST__)
+    { unsigned long a[2]; a[0] = fd; a[1] = backlog; return ioerr(__syscall(102, 4, (int)a, 0)); }
+#else
+    return ioerr(syscall3(SYS_LISTEN, fd, backlog, 0));
+#endif
+}
+
+int accept(int fd, struct sockaddr *addr, socklen_t *len) {
+#if defined(__LINUX_TEST__)
+    unsigned long a[3];
+    a[0] = fd; a[1] = (unsigned long)addr; a[2] = (unsigned long)len;
+    return ioerr(__syscall(102, 5, (int)a, 0));
+#else
+    struct { unsigned ip, port; } raw;
+    int r = ioerr(syscall3(SYS_ACCEPT, fd, (int)&raw, 0));
+    if (r >= 0) sockaddr_from_kernel(addr, len, raw.ip, raw.port);
+    return r;
+#endif
+}
+
+static int socknames(int fd, struct sockaddr *addr, socklen_t *len, int peer) {
+#if defined(__LINUX_TEST__)
+    unsigned long a[3];
+    a[0] = fd; a[1] = (unsigned long)addr; a[2] = (unsigned long)len;
+    return ioerr(__syscall(102, peer ? 7 : 6, (int)a, 0));
+#else
+    unsigned v[4];
+    int r = ioerr(syscall3(SYS_SSHCTL, 5, fd, (int)v));
+    if (r < 0) return -1;
+    sockaddr_from_kernel(addr, len, peer ? v[2] : v[0], peer ? v[3] : v[1]);
+    return 0;
+#endif
+}
+
+int getsockname(int fd, struct sockaddr *addr, socklen_t *len) { return socknames(fd, addr, len, 0); }
+int getpeername(int fd, struct sockaddr *addr, socklen_t *len) { return socknames(fd, addr, len, 1); }
+
+int shutdown(int fd, int how) {
+#if defined(__LINUX_TEST__)
+    unsigned long a[2];
+    a[0] = fd; a[1] = how;
+    return ioerr(__syscall(102, 13, (int)a, 0));
+#else
+    (void)how;
+    return ioerr(syscall3(SYS_SSHCTL, 9, fd, 0));
+#endif
+}
+
+int setsockopt(int fd, int level, int opt, const void *val, socklen_t len) {
+#if defined(__LINUX_TEST__)
+    unsigned long a[5];
+    /* SO_NOSIGPIPE есть в наших заголовках для гостя, у Linux его нет. */
+    if (level == SOL_SOCKET && opt == SO_NOSIGPIPE) return 0;
+    a[0] = fd; a[1] = level; a[2] = opt; a[3] = (unsigned long)val; a[4] = len;
+    return ioerr(__syscall(102, 14, (int)a, 0));
+#else
+    (void)fd; (void)val; (void)len;
+    if ((level == SOL_SOCKET && (opt == SO_REUSEADDR || opt == SO_KEEPALIVE || opt == SO_LINGER ||
+                                 opt == SO_RCVTIMEO || opt == SO_SNDTIMEO || opt == SO_NOSIGPIPE)) ||
+        (level == IPPROTO_TCP && opt == TCP_NODELAY))
+        return 0;
+    errno = ENOPROTOOPT;
+    return -1;
+#endif
+}
+
+int getsockopt(int fd, int level, int opt, void *val, socklen_t *len) {
+#if defined(__LINUX_TEST__)
+    unsigned long a[5];
+    a[0] = fd; a[1] = level; a[2] = opt; a[3] = (unsigned long)val; a[4] = (unsigned long)len;
+    return ioerr(__syscall(102, 15, (int)a, 0));
+#else
+    if (!len || *len < sizeof(int)) { errno = EINVAL; return -1; }
+    if (level == SOL_SOCKET && opt == SO_ERROR) { *(int *)val = 0; *len = sizeof(int); return 0; }
+    if (level == SOL_SOCKET && opt == SO_RCVBUF) { *(int *)val = 32768; *len = sizeof(int); return 0; }
+    if (level == SOL_SOCKET && opt == SO_SNDBUF) { *(int *)val = 16384; *len = sizeof(int); return 0; }
+    if (level == SOL_SOCKET && opt == SO_TYPE) { *(int *)val = SOCK_STREAM; *len = sizeof(int); return 0; }
+    (void)fd;
+    errno = ENOPROTOOPT;
+    return -1;
+#endif
+}
+
+ssize_t send(int fd, const void *buf, size_t len, int flags) {
+    if (flags & ~MSG_NOSIGNAL) { errno = EOPNOTSUPP; return -1; }
+    return write(fd, buf, len);
+}
+
+ssize_t recv(int fd, void *buf, size_t len, int flags) {
+    if (flags) { errno = EOPNOTSUPP; return -1; }
+    return read(fd, buf, len);
+}
+
+ssize_t sendto(int fd, const void *buf, size_t len, int flags, const struct sockaddr *to, socklen_t tolen) {
+    unsigned ip, port;
+    if (flags & ~MSG_NOSIGNAL) { errno = EOPNOTSUPP; return -1; }
+    if (!to) return send(fd, buf, len, 0);
+    if (sockaddr_to_kernel(to, tolen, &ip, &port) < 0) return -1;
+#if defined(__LINUX_TEST__)
+    { unsigned long a[6]; a[0] = fd; a[1] = (unsigned long)buf; a[2] = len; a[3] = flags & ~MSG_NOSIGNAL;
+      a[4] = (unsigned long)to; a[5] = tolen; return ioerr(__syscall(102, 11, (int)a, 0)); }
+#else
+    return ioerr(syscall5(SYS_SENDTO, fd, (int)buf, (int)len, (int)ip, (int)port));
+#endif
+}
+
+ssize_t recvfrom(int fd, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen) {
+    if (flags) { errno = EOPNOTSUPP; return -1; }
+#if defined(__LINUX_TEST__)
+    { unsigned long a[6]; a[0] = fd; a[1] = (unsigned long)buf; a[2] = len; a[3] = 0;
+      a[4] = (unsigned long)from; a[5] = (unsigned long)fromlen; return ioerr(__syscall(102, 12, (int)a, 0)); }
+#else
+    struct { unsigned ip, port; } raw;
+    int r = ioerr(syscall5(SYS_RECVFROM, fd, (int)buf, (int)len, (int)&raw, 0));
+    if (r >= 0 && from && fromlen) sockaddr_from_kernel(from, fromlen, raw.ip, raw.port);
+    return r;
+#endif
+}
+
+unsigned short htons(unsigned short v) { return (unsigned short)((v << 8) | (v >> 8)); }
+unsigned short ntohs(unsigned short v) { return htons(v); }
+unsigned htonl(unsigned v) { return (v << 24) | ((v << 8) & 0xff0000) | ((v >> 8) & 0xff00) | (v >> 24); }
+unsigned ntohl(unsigned v) { return htonl(v); }
+
+int inet_pton(int af, const char *s, void *dst) {
+    unsigned ip;
+    if (af != AF_INET) { errno = EAFNOSUPPORT; return -1; }
+    if (!ip_parse(s, &ip)) return 0;
+    ((struct in_addr *)dst)->s_addr = htonl(ip);
+    return 1;
+}
+
+const char *inet_ntop(int af, const void *src, char *dst, socklen_t n) {
+    char tmp[16];
+    if (af != AF_INET) { errno = EAFNOSUPPORT; return 0; }
+    ip_str(ntohl(((const struct in_addr *)src)->s_addr), tmp);
+    if (strlen(tmp) >= n) { errno = ENOSPC; return 0; }
+    strcpy(dst, tmp);
+    return dst;
+}
+
+int getaddrinfo(const char *node, const char *service, const struct addrinfo *hints, struct addrinfo **res) {
+    unsigned ip, port;
+    char *end;
+    unsigned long v;
+    struct addrinfo *ai;
+    struct sockaddr_in *in;
+    *res = 0;
+    if (hints && hints->ai_family != AF_UNSPEC && hints->ai_family != AF_INET) return EAI_FAMILY;
+    port = 0;
+    if (service && *service) {
+        v = strtoul(service, &end, 10);
+        if (*end || v > 65535) return EAI_SERVICE;
+        port = (unsigned)v;
+    }
+    if (!node) ip = (hints && (hints->ai_flags & AI_PASSIVE)) ? 0 : 0x7f000001u;
+    else if (resolve(node, &ip) < 0) return EAI_NONAME;
+    ai = calloc(1, sizeof(*ai));
+    in = calloc(1, sizeof(*in));
+    if (!ai || !in) { free(ai); free(in); return EAI_MEMORY; }
+    in->sin_family = AF_INET;
+    in->sin_port = htons((unsigned short)port);
+    in->sin_addr.s_addr = htonl(ip);
+    ai->ai_family = AF_INET;
+    ai->ai_socktype = hints && hints->ai_socktype ? hints->ai_socktype : SOCK_STREAM;
+    ai->ai_protocol = IPPROTO_TCP;
+    ai->ai_addr = (struct sockaddr *)in;
+    ai->ai_addrlen = sizeof(*in);
+    if (node && hints && (hints->ai_flags & AI_CANONNAME)) ai->ai_canonname = strdup(node);
+    *res = ai;
+    return 0;
+}
+
+void freeaddrinfo(struct addrinfo *ai) {
+    while (ai) {
+        struct addrinfo *next = ai->ai_next;
+        free(ai->ai_addr);
+        free(ai->ai_canonname);
+        free(ai);
+        ai = next;
+    }
+}
+
+const char *gai_strerror(int err) { (void)err; return "address lookup failed"; }
+
+int h_errno;
+
+char *inet_ntoa(struct in_addr in) {
+    static char buf[16];
+    ip_str(ntohl(in.s_addr), buf);
+    return buf;
+}
+
+int getnameinfo(const struct sockaddr *sa, socklen_t len, char *host, socklen_t hostlen,
+                char *serv, socklen_t servlen, int flags) {
+    const struct sockaddr_in *in;
+    char tmp[8];
+    (void)flags;
+    if (!sa || sa->sa_family != AF_INET || len < sizeof(*in)) return EAI_FAMILY;
+    in = (const struct sockaddr_in *)sa;
+    if (host && hostlen && !inet_ntop(AF_INET, &in->sin_addr, host, hostlen)) return EAI_FAIL;
+    if (serv && servlen) {
+        snprintf(tmp, sizeof(tmp), "%u", ntohs(in->sin_port));
+        if (strlen(tmp) >= servlen) return EAI_FAIL;
+        strcpy(serv, tmp);
+    }
+    return 0;
+}
+
+struct hostent *gethostbyname(const char *name) {
+    static struct hostent he;
+    static char *aliases[1];
+    static unsigned char addr[4];
+    static char *list[2];
+    unsigned ip;
+    if (resolve(name, &ip) < 0) { h_errno = 1; return 0; }
+    addr[0] = (char)(ip >> 24);
+    addr[1] = (char)(ip >> 16);
+    addr[2] = (char)(ip >> 8);
+    addr[3] = (char)ip;
+    list[0] = (char *)addr;
+    list[1] = 0;
+    he.h_name = (char *)name;
+    he.h_aliases = aliases;
+    he.h_addrtype = AF_INET;
+    he.h_length = 4;
+    he.h_addr_list = list;
+    return &he;
+}
+
+struct servent *getservbyname(const char *name, const char *proto) {
+    static struct servent se;
+    static char nbuf[8];
+    int port;
+    (void)proto;
+    if (!name) return 0;
+    if (!strcmp(name, "http")) port = 80;
+    else if (!strcmp(name, "https")) port = 443;
+    else return 0;
+    snprintf(nbuf, sizeof(nbuf), "%s", name);
+    se.s_name = nbuf;
+    se.s_aliases = 0;
+    se.s_port = htons((unsigned short)port);
+    se.s_proto = "tcp";
+    return &se;
+}
+
+int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv) {
+    struct pollfd p[FD_SETSIZE];
+    int i, n, count, timeout;
+    if (nfds < 0 || nfds > FD_SETSIZE) { errno = EINVAL; return -1; }
+    for (i = 0; i < nfds; i++) {
+        p[i].fd = i;
+        p[i].events = 0;
+        p[i].revents = 0;
+        if (r && FD_ISSET(i, r)) p[i].events |= POLLIN;
+        if (w && FD_ISSET(i, w)) p[i].events |= POLLOUT;
+        if (!p[i].events) p[i].fd = -1;
+    }
+    timeout = tv ? (int)(tv->tv_sec * 1000 + tv->tv_usec / 1000) : -1;
+    n = poll(p, (unsigned)nfds, timeout);
+    if (n <= 0) return n;
+    if (r) FD_ZERO(r);
+    if (w) FD_ZERO(w);
+    if (e) FD_ZERO(e);
+    count = 0;
+    for (i = 0; i < nfds; i++) {
+        if (r && (p[i].revents & (POLLIN | POLLHUP | POLLERR))) { FD_SET(i, r); count++; }
+        if (w && (p[i].revents & POLLOUT)) { FD_SET(i, w); count++; }
+    }
+    return count;
 }
 int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
 int cpuinfo(struct cpu_info *out, unsigned capacity) { return syscall3(SYS_CPUINFO, (int)out, capacity, 0); }
@@ -1435,16 +1763,16 @@ static int dns_resolve(const char *name, unsigned *ip) {
     q[pos++] = 0; q[pos++] = 1;                       /* тип A */
     q[pos++] = 0; q[pos++] = 1;                       /* класс IN */
 
-    int fd = socket(SOCK_UDP);
+    int fd = syscall3(SYS_SOCKET, SOCK_UDP, 0, 0);
     if (fd < 0) return fd;
     int err = -ETIMEDOUT;
     for (int attempt = 0; attempt < 2 && err == -ETIMEDOUT; attempt++) {
-        int r = sendto(fd, q, pos, ni.dns, 53);
+        int r = syscall5(SYS_SENDTO, fd, (int)q, pos, (int)ni.dns, 53);
         if (r < 0 && r != -EHOSTUNREACH) { err = r; break; }   /* ARP ещё не знает сервер — повторим */
         unsigned char a[512];
-        struct sockaddr from;
+        struct { unsigned ip, port; } from;
         for (;;) {
-            r = recvfrom(fd, a, sizeof(a), &from, 1500);
+            r = syscall5(SYS_RECVFROM, fd, (int)a, (int)sizeof(a), (int)&from, 1500);
             if (r < 0) { if (r != -ETIMEDOUT) err = r; break; }
             if (r < 12 || a[0] != q[0] || a[1] != q[1]) continue;   /* чужой ответ */
             if ((a[3] & 0x0F) == 3) { err = -ENOENT; break; }        /* NXDOMAIN: имени нет */
@@ -1475,13 +1803,20 @@ int tcp_connect(const char *host, int port) { return tcp_connect_timeout(host, p
 
 int tcp_connect_timeout(const char *host, int port, unsigned ms) {
     unsigned ip;
-    int r = resolve(host, &ip);
+    struct sockaddr_in in;
+    int fd, r;
+    r = resolve(host, &ip);
     if (r < 0) return r;
-    int fd = socket(SOCK_TCP);
-    if (fd < 0) return fd;
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return -errno;
     if (ms) sockctl(fd, SOCK_CONNTIMEO, ms);
+    memset(&in, 0, sizeof(in));
+    in.sin_family = AF_INET;
+    in.sin_port = htons((unsigned short)port);
+    in.sin_addr.s_addr = htonl(ip);
     for (int attempt = 0; ; attempt++) {
-        r = connect(fd, ip, port);
+        r = connect(fd, (struct sockaddr *)&in, sizeof(in));
+        if (r < 0) r = -errno;
         if (r != -EHOSTUNREACH || attempt == 2) break;   /* ARP ещё не ответил — чуть подождём */
         sleep_ms(200);
     }
@@ -1961,9 +2296,22 @@ char *ttyname(int fd) { (void)fd; return (char *)"/dev/tty"; }
  * F_GETFD/F_SETFD пока ничего не запоминают: close-on-exec нет. */
 int fcntl(int fd, int cmd, ...) {
     struct stat st;
+    va_list ap;
+    int arg = 0;
+    if (cmd == F_SETFD || cmd == F_SETFL || cmd == F_DUPFD) {
+        va_start(ap, cmd);
+        arg = va_arg(ap, int);
+        va_end(ap);
+    }
     if (cmd == F_GETFD || cmd == F_GETFL || cmd == F_SETFD || cmd == F_SETFL) {
-        if (fstat(fd, &st) < 0) return -1;
-        return 0;
+#if defined(__LINUX_TEST__)
+        return ioerr(__syscall(55, fd, cmd, arg));
+#else
+        int v[2];
+        v[0] = cmd;
+        v[1] = arg;
+        return ioerr(syscall3(SYS_SSHCTL, 7, fd, (int)v));
+#endif
     }
     if (cmd == F_DUPFD) {
         va_list ap;
@@ -2560,6 +2908,28 @@ void qsort(void *base, size_t n, size_t size, int (*cmp)(const void *, const voi
     }
 }
 
+void *bsearch(const void *key, const void *base, size_t n, size_t size, int (*cmp)(const void *, const void *)) {
+    const char *b = base;
+    size_t lo = 0, hi = n;
+    if (!base || !size || !cmp) return 0;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        const char *p = b + mid * size;
+        int c = cmp(key, p);
+        if (c == 0) return (void *)p;
+        if (c < 0) hi = mid;
+        else lo = mid + 1;
+    }
+    return 0;
+}
+
+/* gcc вызывает это вместо машинной инструкции popcnt, которой на i386 нет. */
+unsigned __popcountdi2(unsigned long long x) {
+    unsigned n = 0;
+    while (x) { n += (unsigned)(x & 1u); x >>= 1; }
+    return n;
+}
+
 static char *empty_environ[] = { NULL };
 char **environ = empty_environ;
 
@@ -2725,9 +3095,14 @@ int poll(struct pollfd *fds, unsigned nfds, int timeout) {
 #if defined(__LINUX_TEST__)
     return __syscall(168, (int)fds, (int)nfds, timeout);
 #else
-    (void)fds; (void)nfds; (void)timeout;
-    errno = 38;
-    return -1;
+    unsigned start = ticks();
+    for (;;) {
+        int r = syscall3(SYS_SSHCTL, 1, (int)nfds, (int)fds);
+        if (r < 0) { errno = -r; return -1; }
+        if (r || timeout == 0) return r;
+        if (timeout > 0 && ticks() - start >= (unsigned)timeout) return 0;
+        sleep_ms(10);
+    }
 #endif
 }
 

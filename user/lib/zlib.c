@@ -804,6 +804,14 @@ int inflateReset(z_streamp strm) {
     return Z_OK;
 }
 
+int inflateReset2(z_streamp strm, int windowBits) {
+    int wrap;
+    if (!strm || !strm->state || strm->state->kind != 2) return Z_STREAM_ERROR;
+    if (parse_window(windowBits, &wrap) < 0) return Z_STREAM_ERROR;
+    strm->state->wrap = wrap;
+    return inflateReset(strm);
+}
+
 /* ------------------------------------------------------- упаковка */
 
 static unsigned short lit_code[288];
