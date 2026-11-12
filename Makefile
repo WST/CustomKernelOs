@@ -263,6 +263,14 @@ $(BUILD)/user/pic/libpthread.o: user/lib/libpthread.c user/include/pthread.h use
 $(BUILD)/user/libpthread.so: $(BUILD)/user/pic/libpthread.o $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libpthread.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/libpthread.o -L$(BUILD)/user -lc
 
+# libexpat.so — Expat 2.10.0. isnan берётся из libm.
+EXPAT_PARTS := xmlparse xmltok xmlrole xcs
+EXPAT_PIC := $(patsubst %,$(BUILD)/user/pic/e_%.o,$(EXPAT_PARTS))
+$(BUILD)/user/pic/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/include/expat.h user/include/expat_external.h user/include/stdint.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -Iuser/lib/expat -c $< -o $@
+$(BUILD)/user/libexpat.so: $(EXPAT_PIC) $(BUILD)/user/libc.so $(BUILD)/user/libm.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libexpat.so -Wl,--hash-style=sysv -o $@ $(EXPAT_PIC) -L$(BUILD)/user -lm -lc
+
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -410,9 +418,22 @@ $(CCROOT)/lib/libpthread.a: $(BUILD)/libobj-linux/libpthread.o
 $(BUILD)/mlib/libpthread.a: $(BUILD)/libobj-myos/libpthread.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+EXPAT_LINUX := $(patsubst %,$(BUILD)/libobj-linux/e_%.o,$(EXPAT_PARTS))
+EXPAT_MYOS  := $(patsubst %,$(BUILD)/libobj-myos/e_%.o,$(EXPAT_PARTS))
+$(BUILD)/libobj-linux/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/include/expat.h user/include/expat_external.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -Iuser/lib/expat -c $< -o $@
+$(BUILD)/libobj-myos/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/include/expat.h user/include/expat_external.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -Iuser/lib/expat -c $< -o $@
+$(CCROOT)/lib/libexpat.a: $(EXPAT_LINUX)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libexpat.a: $(EXPAT_MYOS)
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a $(CCROOT)/lib/libexpat.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libexpat.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -430,7 +451,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -475,6 +496,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libm.so /lib/libm.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libdl.so /lib/libdl.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libpthread.so /lib/libpthread.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libexpat.so /lib/libexpat.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -681,6 +703,12 @@ pthreadtest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libpthread.so $(BUIL
 dltest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/dl_test.c -ldl -o $(BUILD)/dl-test
 	@./$(BUILD)/dl-test
+
+# libexpat: короткий документ разбирается, битый XML даёт ошибку.
+expattest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libexpat.so
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/expat.c -lexpat -o $(BUILD)/expat-test
+	@./$(BUILD)/expat-test
+	@readelf -d $(BUILD)/user/libexpat.so | grep -q libexpat.so
 
 # libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)
