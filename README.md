@@ -1,5 +1,8 @@
 # MyOS
 
+**Настройки сборки и запуска** — общий `.env` для Make, Live и netboot,
+включая Python-сервер в Windows. [Пример](.env.example), [правила и параметры](docs/environment.md).
+
 **Изоляция процессов и стеки** — проверка kill по UID, явные разрешения IPC,
 пространства имён служб и guard-страницы. [Устройство и проверки](docs/isolation.md).
 
@@ -1229,6 +1232,13 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 Это framebuffer без GPU-ускорения; runtime VBE позволяет менять разрешение
 внутри ОС через `mode` и Display, если видеобиос совместим с интерпретатором.
 [Поддержка NVIDIA, ограничения и проверка](docs/nvidia.md).
+
+## Обновление по сети
+
+`make netboot-image` публикует Live-образ, `make netboot-serve` раздаёт его по HTTP.
+`make netboot-usb NETBOOT_URL=http://IP:8080/boot.ipxe` создаёт маленький iPXE-USB:
+запишите его один раз, затем обновляйте ОС на сервере и перезагружайте тестовый ПК.
+[Настройка Windows/WSL, ограничения и проверки](docs/netboot.md).
 
 ## Загрузка с USB на реальном ПК (BIOS/CSM)
 

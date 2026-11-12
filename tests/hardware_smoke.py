@@ -27,7 +27,7 @@ def save_png(ppm,png):
                     chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
 
 class VM:
-    def __init__(self,name,usb=True,vga='std',memory=None,machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None):
+    def __init__(self,name,usb=True,vga='std',memory=None,machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None,netboot_url=None):
         self.temp=tempfile.TemporaryDirectory(prefix='myos-usb-')
         # Poll a native filesystem log: DrvFS can return ENODATA while a Windows
         # file is concurrently extended by QEMU.
@@ -41,7 +41,11 @@ class VM:
         args=['qemu-system-i386','-m',memory,'-cpu',cpu,'-smp',str(cpus),'-display','none','-vga',vga,
               '-serial','file:'+str(self.log),'-qmp','unix:'+self.sockpath+',server=on,wait=off',
               '-no-reboot','-nic','none']
-        if usb:
+        if netboot_url:
+            # No attached disk: successful boot must come from the HTTP server.
+            args+=['-netdev','user,id=netboot,bootfile='+netboot_url,
+                   '-device','e1000,netdev=netboot,bootindex=1','-boot','order=n']
+        elif usb:
             # No PS/2 controller: all injected keys must traverse the xHCI driver.
             args+=['-machine',machine+',i8042=off','-device','qemu-xhci,id=xhci',
                    '-drive',f'if=none,id=stick,format=raw,file={IMAGE},snapshot=on',

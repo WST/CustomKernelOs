@@ -1,4 +1,5 @@
 """Build a BIOS/CSM USB-HDD image without modifying disk.img or any device."""
+from env_config import settings
 import argparse
 import pathlib
 import subprocess
@@ -16,12 +17,13 @@ def live_limits():
     return tuple(value(name) for name in ('LIVE_ROOT_PHYS','LIVE_ROOT_MIN_MB','LIVE_ROOT_MAX_MB','LIVE_ROOT_RESERVE_MB'))
 
 def main():
+    config=settings()
     ap=argparse.ArgumentParser(description=__doc__)
     root_phys,root_min,root_max,reserve_mb=live_limits()
-    ap.add_argument('--root-mb',type=int,default=256,help=f'RAM filesystem size in MiB ({root_min}..{root_max}, default: 256)')
-    ap.add_argument('--nasm',default='nasm')
-    ap.add_argument('--nm',default='nm')
-    ap.add_argument('--video',default='auto',help='auto (EDID preferred) or WIDTHxHEIGHT')
+    ap.add_argument('--root-mb',type=int,default=config['USB_ROOT_MB'],help=f'RAM filesystem size in MiB ({root_min}..{root_max}; env: USB_ROOT_MB)')
+    ap.add_argument('--nasm',default=config['NASM'])
+    ap.add_argument('--nm',default=config['NM'])
+    ap.add_argument('--video',default=config['USB_VIDEO'],help='auto (EDID preferred) or WIDTHxHEIGHT')
     args=ap.parse_args()
     if not root_min<=args.root_mb<=root_max:
         ap.error(f'--root-mb must be between {root_min} and {root_max} MiB')

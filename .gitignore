@@ -4,3 +4,7 @@ disk.img
 *.img.bak
 *.img.new
 *.pyc
+
+.env
+.env.*
+!.env.example
