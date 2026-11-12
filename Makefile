@@ -613,6 +613,14 @@ cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
 	@sh tests/cp.sh $(BUILD)/cp-linux
 
+lstest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ls.c -o $(BUILD)/ls-linux
+	@sh tests/ls.sh $(BUILD)/ls-linux
+
+rmtest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/rm.c -o $(BUILD)/rm-linux
+	@sh tests/rm.sh $(BUILD)/rm-linux
+
 $(BUILD)/user/gpuscene.o: tests/gpu_scene.c user/desktop.c user/desktop_gpu.inc user/lib/gfx.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/gpuscene: $(BUILD)/user/gpuscene.o $(BUILD)/user/l_img.o $(ULIB) user/user.ld
@@ -671,7 +679,7 @@ ldsotest: $(BUILD)/ld.so $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/os.img $(BUIL
 	$(BUILD)/cc-host -B $(CCROOT) -nostdlib -o $(BUILD)/dynuse tests/ldso/main.c $(BUILD)/libadd.so $(BUILD)/ld.so
 	python3 tests/ldso_smoke.py
 
-.PHONY: all run debug clean cleandisk test programs install cctest luatest jstest gfxtest vfstest largetest exttest gztest tartest maketest cptest ldsotest dynsystest
+.PHONY: all run debug clean cleandisk test programs install cctest luatest jstest gfxtest vfstest largetest exttest gztest tartest maketest cptest lstest rmtest ldsotest dynsystest
 .SECONDARY:
 
 
