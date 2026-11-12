@@ -1,4 +1,6 @@
 #include "myos.h"
+#include "sys/stat.h"
+#include "unistd.h"
 static int failures;
 #define CHECK(x) do { if (!(x)) { printf("SERVICE FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)
 static void put(const char *path, const char *text) {
@@ -7,10 +9,17 @@ static void put(const char *path, const char *text) {
 }
 int main(int argc, char **argv) {
     struct unit_info u, v;
+    if(argc>1 && !strcmp(argv[1],"root")) {
+        CHECK(account(4,NULL,NULL)==0 && geteuid()==0 && getuid()==0 && getgid()==0);
+        char name[24];CHECK(account(5,name,NULL)==0 && !strcmp(name,"root"));
+        puts(failures?"ROOT SERVICE FAILED":"ROOT SERVICE PASS");return failures!=0;
+    }
+    if(argc>1 && !strcmp(argv[1],"anonymous")) {
+        CHECK(account(4,NULL,NULL)==-EPERM && geteuid()==65534);
+        puts(failures?"DEFAULT SERVICE FAILED":"DEFAULT SERVICE PASS");return failures!=0;
+    }
     if (argc > 1 && !strcmp(argv[1], "desktop")) {
-        unsigned deadline = ticks() + 10000;
-        while (!service_find("desktop") && (int)(ticks()-deadline)<0) sleep_ms(100);
-        CHECK(service_find("desktop") > 0);
+        /* An unauthenticated greeter is intentionally hidden from other IPC identities. */
         CHECK(unitctl(UNIT_STATUS, "desktop.service", &u, 0) == 0 && u.state == UNIT_ACTIVE);
         sleep_ms(5000); /* Host captures the graphical screen during this interval. */
         CHECK(account(1, "root", "review123") == 0);
@@ -28,6 +37,25 @@ int main(int argc, char **argv) {
     CHECK(unitctl(UNIT_START, "httpd.service", &u, 0) == -EPERM);
     CHECK(unitctl(UNIT_LIST, NULL, &u, 0) == 0);
     CHECK(account(1, "root", "review123") == 0);
+    put("/etc/services/root.service","[Service]\nUser=root\nExecStart=/bin/servicecheck root\n");
+    put("/etc/services/anonymous.service","[Service]\nExecStart=/bin/servicecheck anonymous\n");
+    put("/etc/services/baduser.service","[Service]\nUser=alice\nExecStart=/bin/sleep 1\n");
+    CHECK(unitctl(UNIT_RELOAD,NULL,NULL,0)==0);
+    CHECK(unitctl(UNIT_START,"baduser.service",NULL,0)==-EINVAL);
+    CHECK(chmod("/etc/services/root.service",0666)==0);
+    CHECK(unitctl(UNIT_START,"root.service",NULL,0)==-EACCES);
+    CHECK(chmod("/etc/services/root.service",0644)==0);
+    CHECK(chown("/etc/services/root.service",1001,1001)==0);
+    CHECK(unitctl(UNIT_START,"root.service",NULL,0)==-EACCES);
+    CHECK(chown("/etc/services/root.service",0,0)==0);
+    CHECK(chmod("/etc/services",0777)==0);
+    CHECK(unitctl(UNIT_START,"root.service",NULL,0)==-EACCES);
+    CHECK(chmod("/etc/services",0755)==0);
+    CHECK(unitctl(UNIT_START,"root.service",NULL,0)==0);
+    CHECK(unitctl(UNIT_START,"anonymous.service",NULL,0)==0);
+    sleep_ms(300);
+    CHECK(unitctl(UNIT_ENABLE,"root.service",NULL,0)==0);
+    CHECK(unitctl(UNIT_ENABLE,"anonymous.service",NULL,0)==0);
     put("/etc/services/test.service", "[Service]\nExecStart=/bin/sleep 60\nRestart=on-failure\n");
     put("/etc/services/bad.service", "[Service]\nExecStart=relative\n");
     put("/etc/services/quote.service", "[Service]\nExecStart=/bin/echo \"hello world\" 'two words' escaped\\ space\n");

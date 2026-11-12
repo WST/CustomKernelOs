@@ -25,7 +25,7 @@ static int receive(int type) {
         { int status=-1; waitpid(child,&status,WNOHANG); printf("WINDOW FAIL state=%u status=%d step=%d\n",p[i].state,status,type); }
     return -1;
 }
-int main(void) {
+static int check_terminal(void) {
     if (service_register("desktop")<0) return 1;
     child=fork();
     if (!child) { char *args[]={"terminal",NULL}; exec("/bin/terminal",args); return 2; }
@@ -54,13 +54,21 @@ int main(void) {
         msg_send(child,&key);sleep_ms(20);
         struct msg update; while(msg_recv(&update,0)==0) {}
     }
-    int fd=-1;
-    for(int j=0;j<30 && fd<0;j++) { sleep_ms(100); fd=open("/tmp/resize-alive",O_READ); }
-    char output[32]={0};
-    if(fd<0 || read(fd,output,sizeof(output))!=12 || memcmp(output,"resizealive\n",12)) return 6;
-    close(fd); unlink("/tmp/resize-alive");
+    int fd=-1,got=-1;char output[32]={0};
+    /* Redirection creates the file before echo writes it. Wait for the data,
+     * rather than treating the first successful open as command completion. */
+    for(int j=0;j<30;j++) {
+        sleep_ms(100);fd=open("/tmp/resize-alive",O_READ);
+        if(fd<0)continue;
+        memset(output,0,sizeof(output));got=read(fd,output,sizeof(output)-1);close(fd);
+        if(got==12 && !memcmp(output,"resizealive\n",12))break;
+    }
+    if(got!=12 || memcmp(output,"resizealive\n",12)){printf("WINDOW command output bytes=%d text=[%s]\n",got,output);return 6;}
+    unlink("/tmp/resize-alive");
     struct msg m={0};m.type=WM_CLOSE;m.a=0;msg_send(child,&m);
     int status=-1;
     if(waitpid(child,&status,0)!=child || status) return 5;
     puts("TERMINAL WINDOW PASS");return 0;
 }
+
+int main(void){int status=check_terminal();if(status)printf("TERMINAL WINDOW FAIL code=%d\n",status);return status;}

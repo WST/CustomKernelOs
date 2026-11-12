@@ -8,6 +8,7 @@
 #include "shell.h"
 #include "services.h"
 #include "ata.h"
+#include "ahci.h"
 #include "fs.h"
 #include "pmm.h"
 #include "paging.h"
@@ -141,8 +142,13 @@ void kmain(void) {
         fail("Network", "adapter unavailable; use dmesg");
 
     boot_stage("storage probe");
-    if (ata_init()) {
-        ok("ATA disk: %s, %u KB", ata_model(), ata_sectors() / 2);
+    bool ide = ata_init();
+    bool sata = ahci_init();
+    if (ide || sata) {
+        if (sata)
+            ok("AHCI disk: %s, %u KB", ahci_model(), ahci_sectors(0) / 2);
+        else
+            ok("ATA disk: %s, %u KB", ata_model(), ata_sectors() / 2);
         bool formatted;
         boot_stage("MyFS mount");
         int r = fs_init(&formatted);
@@ -162,7 +168,7 @@ void kmain(void) {
             fail("MyFS", fs_strerror(r));
         }
     } else {
-        fail("ATA disk", "not found - file commands disabled");
+        fail("Disk", "not found - file commands disabled");
     }
 
     vga_set_color(WHITE, BLACK);

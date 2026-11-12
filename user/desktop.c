@@ -14,9 +14,9 @@
  * Вся графика сглаженная: контуры и шрифты Ubuntu (gfx.h: vec.c и font.c).
  * Значки нарисованы кодом — векторно, поэтому любого размера.
  *
- * Видеокарта: перетаскиваемое окно не перерисовываем, а просим карту сдвинуть
- * его пиксели прямо на экране (gfx_hw_copy) — дорисовываем только открывшиеся
- * куски и тень. Разрешение может смениться в любой момент — тогда пересоздаём
+ * При перетаскивании используем аппаратное копирование, если оно доступно.
+ * На framebuffer сдвигаем пиксели в RAM и записываем результат на экран;
+ * заново рисуем только открывшиеся куски, скругления и тень. Разрешение может смениться в любой момент — тогда пересоздаём
  * обои и раскладку.
  *
  * Окна, которые это разрешили (win_set_resizable), можно растягивать за края
@@ -45,6 +45,7 @@ static int SW, SH;                      /* размер экрана */
 static color_t *wallpaper;              /* обои, нарисованные один раз */
 static color_t *back;                   /* сюда собираем кадр */
 static bool gpu_scene, gpu_wallpaper_ready;
+static bool screen_copy_accelerated;
 static bool hwcur;                      /* курсор рисует видеокарта */
 static int drag = -1;                   /* окно, которое тащим */
 static int capture = -1;                /* окно, где нажали кнопку */
@@ -272,9 +273,11 @@ static void motions_tick(void) {
     }
 }
 static int motion_wait(void) {
-    if(!motions_active())return 100;
+    /* Mouse state is polled after IPC waiting; mouse IRQs do not wake this
+     * receive. Keep input latency within one PIT tick even without animation. */
+    if(!motions_active())return 10;
     int left=(int)(motion_deadline-ticks());
-    return left>0?left:0;
+    return left>10?10:left>0?left:0;
 }
 static void dirty_head(struct win *w) { add_dirty(w->x - 2, w->y - 2, outer_w(w) + 4, HEAD_H + 2); }
 /* с запасом: у стрелки «горячая точка» в углу, у двойных стрелок — в центре */
@@ -1329,8 +1332,19 @@ static void dirty_minus(struct rect a, struct rect b) {
     if (in.x + in.w < a.x + a.w) add_dirty(in.x + in.w, in.y, a.x + a.w - in.x - in.w, in.h);
 }
 
-/* Сдвинуть перетаскиваемое окно. Окно — самое верхнее, поэтому на экране его
- * непрозрачную часть можно просто передвинуть видеокартой; заново собираем
+/* Move an overlapping rectangle in the compositor's cacheable RAM shadow.
+ * Firmware framebuffers may be write-combined or uncached: reading them to
+ * move a window is expensive. Upload the moved RAM pixels instead. */
+static void copy_window_pixels(struct rect dst,int dx,int dy) {
+    int first=dy>0?dst.h-1:0, end=dy>0?-1:dst.h, step=dy>0?-1:1;
+    for(int j=first;j!=end;j+=step)
+        memmove(back+(dst.y+j)*SW+dst.x,
+                back+(dst.y+j-dy)*SW+dst.x-dx,dst.w*sizeof(*back));
+    gfx_flip_rect(dst.x,dst.y,dst.w,dst.h);
+}
+
+/* Сдвинуть перетаскиваемое окно. Окно — самое верхнее: его непрозрачную
+ * часть копируем аппаратно либо через RAM-буфер; заново собираем
  * только тень, скруглённые углы и открывшиеся куски. */
 static void move_window(struct win *w, int nx, int ny) {
     if (nx == w->x && ny == w->y) return;
@@ -1343,7 +1357,11 @@ static void move_window(struct win *w, int nx, int ny) {
         struct rect moved = { src.x + dx, src.y + dy, src.w, src.h };
         if (intersect(moved, desk, &dst)) {
             flush();                                              /* на экране — актуальный кадр */
-            if (gfx_hw_copy(dst.x - dx, dst.y - dy, dst.x, dst.y, dst.w, dst.h) == 0) {
+            bool moved=false;
+            if(screen_copy_accelerated)
+                moved=gfx_hw_copy(dst.x-dx,dst.y-dy,dst.x,dst.y,dst.w,dst.h)==0;
+            else {copy_window_pixels(dst,dx,dy);moved=true;}
+            if (moved) {
                 copied = true;
                 w->x = nx; w->y = ny;
                 dirty_minus(old_full, dst);

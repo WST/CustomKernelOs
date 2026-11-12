@@ -1,5 +1,8 @@
 # MyOS
 
+**Настройки сборки и запуска** — общий `.env` для Make, Live и netboot,
+включая Python-сервер в Windows. [Пример](.env.example), [правила и параметры](docs/environment.md).
+
 **Изоляция процессов и стеки** — проверка kill по UID, явные разрешения IPC,
 пространства имён служб и guard-страницы. [Устройство и проверки](docs/isolation.md).
 
@@ -7,7 +10,11 @@
 `chmod`, `chown`, `stat` и `ls -l`. [Настройка и миграция MyFS](docs/permissions.md).
 
 **OpenSSH через ext** — клиент и сервер, установка `ext install openssh`.
+Установщик включает и запускает `sshd.service`; управление через `systemctl`.
 [Профиль порта, настройка и ограничения](docs/openssh.md).
+
+**GNU nano через ext** — терминальный редактор, `ext install nano`.
+UTF-8, поиск, отмена изменений и работа по SSH. [Установка и клавиши](docs/nano.md).
 
 **Запуск оконных приложений**: рабочий стол использует прямой `spawn`,
 без копирования своих графических буферов через `fork`.
@@ -1230,10 +1237,31 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 внутри ОС через `mode` и Display, если видеобиос совместим с интерпретатором.
 [Поддержка NVIDIA, ограничения и проверка](docs/nvidia.md).
 
+## Обновление по сети
+
+`make netboot-image` публикует Live-образ, `make netboot-serve` раздаёт его по HTTP.
+`make netboot-usb NETBOOT_URL=http://IP:8080/boot.ipxe` создаёт маленький iPXE-USB:
+запишите его один раз, затем обновляйте ОС на сервере и перезагружайте тестовый ПК.
+[Настройка Windows/WSL, ограничения и проверки](docs/netboot.md).
+
 ## Загрузка с USB на реальном ПК (BIOS/CSM)
 
 `make usb-image` создаёт отдельный `build/myos-usb.img`: загрузчик BIOS,
 VBE framebuffer, live-файловая система в RAM, USB HID клавиатура/мышь через xHCI.
 `make usbtest` проверяет загрузку с USB в QEMU. Обычный `make run` сохраняется.
+Размер Live-корня по умолчанию 256 МиБ; `make usb-image USB_ROOT_MB=512`
+выбирает 512 МиБ (допустимо 64–512). Для профиля 256 МиБ рекомендуется
+512 МиБ RAM, для 512 МиБ — 1 ГиБ RAM.
 Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
 Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).
+
+## Пакеты при загрузке
+
+`EXT_AUTOINSTALL_PACKAGES="openssh lua"` в `.env` задаёт список для нового Live-образа.
+Внутри MyOS: `ext auto add openssh`, `ext auto list`, `ext auto run`, `ext auto status`.
+Установка выполняется в фоне через `ext-autoinstall.service`.
+[Настройка и поведение](docs/ext-autoinstall.md).
+
+Для входа root по SSH задайте публичный Ed25519-ключ в `SSH_AUTHORIZED_KEY`
+или путь к `.pub` в `SSH_AUTHORIZED_KEY_FILE`: сборщик добавит его в
+`/root/.ssh/authorized_keys`. [Настройка ключей](docs/openssh.md#свой-публичный-ключ-в-образе).

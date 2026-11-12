@@ -109,6 +109,7 @@ void  task_wake_one(void *chan);
 
 void  mutex_lock(struct mutex *m);
 void  mutex_unlock(struct mutex *m);
+bool  mutex_trylock(struct mutex *m);   /* false: владелец другой, не засыпать */
 bool task_raw_device_busy(int disk);
 
 /* для idt.c */

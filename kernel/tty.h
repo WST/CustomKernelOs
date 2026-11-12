@@ -17,6 +17,7 @@ struct tty {
     bool resize_pending;            /* Wake raw input after a size change. */
     bool eof;                       /* Ctrl+D на пустой строке */
     u32  mode, mode_owner;          /* TTY_RAW... и кто его включил */
+    u32  oflags;                    /* Output processing, independent of raw keyboard input. */
     u32  cols, rows;
     u32  fg;                        /* группа переднего плана: её убивает Ctrl+C */
     u32  masters, slaves;           /* сколько открытых struct file у каждой стороны */
@@ -25,6 +26,11 @@ struct tty {
 #define TTYCTL_SETSIZE 1            /* arg = столбцы << 16 | строки */
 #define TTYCTL_GETSIZE 2
 #define TTYCTL_GETFG   3
+#define TTY_OPOST 1u
+#define TTY_ONLCR 4u
+#define TTY_OUTPUT_DEFAULT (TTY_OPOST|TTY_ONLCR)
+#define TTYCTL_GETOFLAGS 5
+#define TTYCTL_SETOFLAGS 6
 #define TTYCTL_GETMODE 4
 
 struct file;

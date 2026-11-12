@@ -16,18 +16,14 @@
 # На macOS (и вообще не на x86-Linux) системный gcc — это clang под arm64/x86_64-darwin,
 # он не умеет собирать 32-битный ELF. Нужен кросс-тулчейн:
 #   brew install i686-elf-gcc i686-elf-binutils nasm qemu
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-CROSS   ?= i686-elf-
+# CLI overrides > process environment > .env > defaults.
+# Parse .env as data, never as shell or Make code. Each configuration gets its
+# own immutable include so concurrent Make invocations cannot overwrite it.
+ENV_CONFIG_MK := $(shell python3 tools/env_config.py --make-file)
+ifeq ($(strip $(ENV_CONFIG_MK)),)
+$(error Cannot load .env configuration; see the diagnostic above)
 endif
-CROSS   ?=
-CC      := $(CROSS)gcc
-LD      := $(CROSS)ld
-AR      := $(CROSS)ar
-NASM    := nasm
-OBJCOPY := $(CROSS)objcopy
-QEMU    := qemu-system-i386
-HOSTCC  ?= cc
+include $(ENV_CONFIG_MK)
 
 # переносимые (GNU/BSD) размер файла и дополнение файла нулями до размера
 fsize   = $$(wc -c < $(1) | tr -d ' ')
@@ -41,12 +37,10 @@ LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
 
 BUILD   := build
 HWBUILD := $(BUILD)/hardware
-DISK    := disk.img
 # Новый disk.img, если файла ещё нет. Готовый образ сам не растёт:
 # build/myfs disk.img grow 8192  (прежний остаётся как disk.img.bak)
 # 4 ГБ — разреженный файл: место на компьютере занимает только записанное.
 # Потолок ФС — 8 ГБ (FS_MAX_BLOCKS). Версия 2 хранит файл любого размера в этих пределах.
-DISK_MB := 4096
 VIDEO_SRC := $(wildcard drivers/video/*.c)
 C_SRC   := $(wildcard kernel/*.c)
 OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC)) $(patsubst drivers/video/%.c,$(BUILD)/video/%.o,$(VIDEO_SRC))
@@ -370,8 +364,6 @@ $(BUILD)/user/libcurl.so: $(CURL_BLD)/.built $(BUILD)/user/libssl.so $(BUILD)/us
 
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
-$(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
-	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/tar.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 
 $(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
@@ -639,7 +631,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@for f in $(CURL_SRC)/include/curl/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/curl/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
-	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
+	@for f in user/*.c user/ext-auto.inc; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
 	@for f in fonts/*.ttf; do $(BUILD)/myfs $(DISK) put $$f /lib/fonts/$$(basename $$f) >/dev/null || exit 1; done
@@ -652,29 +644,27 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	  $(BUILD)/myfs $(DISK) cat /etc/services/$$(basename $$f) >/dev/null 2>&1 || \
 	  $(BUILD)/myfs $(DISK) put $$f /etc/services/$$(basename $$f) >/dev/null || exit 1; done
 
+	@python3 tools/configure_ext_auto.py --disk "$(DISK)"
+	@python3 tools/configure_ssh_keys.py --disk "$(DISK)"
+
 # ------------------------------------------------------------------ запуск
 
-# index=0 — primary master (загрузка), index=1 — primary slave (MyFS)
+# index=0 — primary master, с него BIOS грузит ядро. Системный том — AHCI port 0.
+# Второй диск DATA_DISK остаётся IDE secondary master (/dev/sdc).
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
-               -drive format=raw,file=$(DISK),index=1,media=disk
-QEMU_MEM ?= 256M
-QEMU_CPUS ?= 4
-QEMU_CPU ?=
+               -drive if=none,id=sysdisk,file=$(DISK),format=raw \
+               -device ich9-ahci,id=ahci \
+               -device ide-hd,drive=sysdisk,bus=ahci.0
 QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
-DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
 QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk
 endif
 # auto: verified hardware VirGL on Linux/WSL, portable software framebuffer on Mac.
 # GPU=on requires acceleration; GPU=off forces software; VGA=vmware/std overrides auto.
-VGA ?= auto
-GPU ?= auto
 QEMU_VIDEO = python3 tools/run_qemu.py --qemu "$(QEMU)" --gpu "$(GPU)" --vga "$(VGA)" --
 # сеть: карта e1000 за NAT QEMU; HOST_PORT хоста -> порт 80 MyOS (httpd)
 # Другой порт: make run HOST_PORT=8081
-HOST_PORT ?= 8080
-SSH_PORT ?=
 QEMU_SSH_FORWARD :=
 ifneq ($(SSH_PORT),)
 QEMU_SSH_FORWARD := ,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22
@@ -1055,9 +1045,8 @@ consoleloadtest: usb-image $(BUILD)/user/consoleload
 consoletest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/console_output.c -o $(BUILD)/console-output-test
 	./$(BUILD)/console-output-test
-USB_VIDEO ?= auto
 usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
-	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm --video "$(USB_VIDEO)"
+	python3 tools/make_usb_image.py --nasm $(NASM) --nm "$(NM)" --video "$(USB_VIDEO)" --root-mb "$(USB_ROOT_MB)"
 usbtest: usb-image
 	python3 tests/hardware_smoke.py
 
@@ -1203,3 +1192,101 @@ install-permissions: $(BUILD)/myfs
 .PHONY: isolationtest
 isolationtest:
 	python3 tests/isolation_smoke.py
+
+$(BUILD)/user/live-rootcheck.o: tests/live_rootcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/live-rootcheck: $(BUILD)/user/live-rootcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: liveroottest
+liveroottest: usb-image $(BUILD)/user/live-rootcheck
+	python3 tests/live_root_smoke.py
+
+# Network development boot: publish versioned images, then keep the HTTP server running.
+.PHONY: envtest netboot-image netboot-serve netboot-usb netboottest netbootsmoke netboot-usb-smoke
+netboot-image: usb-image
+	python3 tools/netboot.py publish
+netboot-serve:
+	python3 tools/netboot.py serve --bind "$(NETBOOT_BIND)" --port "$(NETBOOT_PORT)"
+netboot-usb:
+	python3 tools/build_ipxe.py --url "$(NETBOOT_URL)"
+netboottest:
+	python3 tests/netboot_test.py
+
+netbootsmoke: netboot-image
+	python3 tests/netboot_smoke.py
+
+netboot-usb-smoke:
+	python3 tests/netboot_smoke.py --bootstrap
+
+envtest:
+	python3 tests/env_config_test.py
+
+# Disk-cache eviction, close error propagation and AHCI DMA recovery.
+.PHONY: storage-recoverytest
+storage-recoverytest: | $(BUILD)
+	$(HOSTCC) -std=gnu17 -O1 -g -fno-builtin -DHOST_TEST -Ikernel tests/block_cache_test.c kernel/block.c kernel/string.c -o $(BUILD)/block-cache-test
+	./$(BUILD)/block-cache-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/close_flush_test.c -Wl,--gc-sections -o $(BUILD)/close-flush-test
+	./$(BUILD)/close-flush-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/ahci_recovery_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/ahci-recovery-test
+	./$(BUILD)/ahci-recovery-test
+
+$(BUILD)/user/storagecheck.o: tests/storagecheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/storagecheck: $(BUILD)/user/storagecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: storage-smoketest
+storage-smoketest: storage-recoverytest
+	python3 tests/storage_smoke.py
+
+.PHONY: desktopdragtest
+desktopdragtest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined -Iuser/include -Iuser/lib tests/desktop_drag_test.c -Wl,--gc-sections -o $(BUILD)/desktop-drag-test
+	./$(BUILD)/desktop-drag-test
+
+$(BUILD)/user/dragcheck.o: tests/desktop_dragcheck.c user/desktop.c user/desktop_gpu.inc user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/dragcheck: $(BUILD)/user/dragcheck.o $(BUILD)/user/l_img.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
+.PHONY: desktopdrag-smoke
+desktopdrag-smoke: usb-image $(BUILD)/os.img $(BUILD)/user/dragcheck
+	python3 tests/desktop_drag_smoke.py
+
+$(BUILD)/user/ext.o: user/ext-auto.inc
+
+$(BUILD)/user/extautolock.o: tests/ext_auto_lock.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/extautolock: $(BUILD)/user/extautolock.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: extautotest
+extautotest: $(BUILD)/myfs
+	python3 tests/ext_auto_config_test.py
+	python3 tests/ext_auto_smoke.py
+
+.PHONY: sshkeytest
+sshkeytest: $(BUILD)/myfs
+	python3 tests/ssh_key_config_test.py
+
+.PHONY: ptytest
+ptytest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined tests/pty_output.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/pty-output-test
+	./$(BUILD)/pty-output-test
+
+$(BUILD)/user/nanocheck.o: tests/nanocheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/nanocheck: $(BUILD)/user/nanocheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: nano-build nanotest
+nano-build: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/mlib/libc.a
+	python3 tests/nano_build.py
+nanotest: nano-build
+	python3 tests/nano_smoke.py
+
+.PHONY: nano-sshtest
+nano-sshtest: nano-build openssh-tests-ready
+	python3 tests/openssh_smoke.py --nano
+
+.PHONY: nano-networktest
+nano-networktest: nano-build
+	python3 tests/nano_smoke.py --network

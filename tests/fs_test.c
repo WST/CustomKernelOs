@@ -31,7 +31,7 @@ int main(){
   CHECK(fs_mkfs("sdb")==FS_EINVAL); /* table may not be overwritten by mkfs */
   CHECK(fs_mkfs("sdb4")==0);
   CHECK(fs_partition("sdb",2,4,0,0)==0 && block_find("sdb4")==-1);
-  memset(disk,0,sizeof(disk));
+  memset(disk,0,sizeof(disk)); block_cache_invalidate();
   bool f; CHECK(fs_init(&f)==0 && f);
   CHECK(fs_mkfs("sdb")==FS_EBUSY && fs_partition("sdb",0,0,0,0)==FS_EBUSY);
   struct fs_info fi0; fs_info(&fi0);
@@ -58,6 +58,41 @@ int main(){
   CHECK(fs_read(ino,past,rd,1)==1 && rd[0]=='Q');
   struct fs_info fi2; fs_info(&fi2); CHECK(fi2.free_blocks==fi.free_blocks);
   CHECK(fs_remove(1,"/big")==0); fs_info(&fi); CHECK(fi.free_blocks==fi0.free_blocks);
+  /* Меньше секторных операций: один большой write, много созданий, куски по 512. */
+  fs_format(); block_io_reset();
+  {
+    enum { BULK=256*1024 };
+    static u8 bulk[BULK], back[BULK];
+    for (int i=0;i<BULK;i++) bulk[i]=(u8)(i*3+1);
+    CHECK(fs_create(1,"/bulk",FS_TYPE_FILE,&ino)==0);
+    CHECK(fs_write(ino,0,bulk,BULK)==BULK);
+    unsigned rd_n, wr_n; block_io_stats(&rd_n,&wr_n);
+    printf("io bulk %u bytes: reads=%u writes=%u\n",BULK,rd_n,wr_n);
+    CHECK(wr_n>=BULK/512 && wr_n<BULK/512+80);
+    CHECK(rd_n<80);
+    CHECK(fs_read(ino,0,back,BULK)==BULK && !memcmp(bulk,back,BULK));
+    CHECK(fs_read(ino,100,back,3)==3 && !memcmp(bulk+100,back,3));
+    char tail[8]; memset(tail,0x5a,sizeof tail);
+    CHECK(fs_write(ino,10,tail,2)==2);
+    CHECK(fs_read(ino,0,back,16)==16 && back[9]==bulk[9] && back[10]==0x5a && back[12]==bulk[12]);
+    CHECK(fs_remove(1,"/bulk")==0);
+    block_io_reset();
+    for (int i=0;i<200;i++) {
+      char nm[16]; nm[0]='p'; nm[1]='0'+i/100; nm[2]='0'+(i/10)%10; nm[3]='0'+i%10; nm[4]=0;
+      CHECK(fs_create(1,nm,FS_TYPE_FILE,0)==0);
+    }
+    block_io_stats(&rd_n,&wr_n);
+    printf("io 200 creates: reads=%u writes=%u\n",rd_n,wr_n);
+    CHECK(rd_n<6000);
+    block_io_reset();
+    CHECK(fs_create(1,"/chunks",FS_TYPE_FILE,&ino)==0);
+    for (int i=0;i<128;i++) CHECK(fs_write(ino,i*512,bulk+i*512,512)==512);
+    block_io_stats(&rd_n,&wr_n);
+    printf("io 128x512: reads=%u writes=%u\n",rd_n,wr_n);
+    CHECK(rd_n<300 && wr_n<700);
+    CHECK(fs_read(ino,0,back,128*512)==128*512 && !memcmp(bulk,back,128*512));
+    fs_format();
+  }
   /* заполнение диска -> ENOSPC, затем освобождение */
   int k=0, r; char name[16];
   for(;;){ memcpy(name,"f00",4); name[1]='a'+k/10; name[2]='0'+k%10;
@@ -189,12 +224,12 @@ int main(){
   CHECK(fs_remove(1,"/dev")==FS_EBUSY);
   CHECK(fs_getpath(dev,p,sizeof(p))==0 && !strcmp(p,"/dev"));
   /* Unknown/corrupt metadata must never be reformatted. */
-  disk[0]^=1; memcpy(snapshot,disk,sizeof(disk));
-  CHECK(fs_init(&f)<0 && !memcmp(snapshot,disk,sizeof(disk))); disk[0]^=1;
-  disk[20]=0xff; memcpy(snapshot,disk,sizeof(disk));
+  disk[0]^=1; block_cache_invalidate(); memcpy(snapshot,disk,sizeof(disk));
+  CHECK(fs_init(&f)<0 && !memcmp(snapshot,disk,sizeof(disk))); disk[0]^=1; block_cache_invalidate();
+  disk[20]=0xff; block_cache_invalidate(); memcpy(snapshot,disk,sizeof(disk));
   CHECK(fs_init(&f)<0 && !memcmp(snapshot,disk,sizeof(disk)));
   /* Two primary MBR partitions with independent MyFS instances. */
-  memset(disk,0,sizeof(disk)); disk[510]=0x55; disk[511]=0xaa;
+  memset(disk,0,sizeof(disk)); block_cache_invalidate(); disk[510]=0x55; disk[511]=0xaa;
   for(int j=0;j<2;j++) {
     u8 *e=disk+446+j*16; e[4]=0x83;
     u32 start=1+j*1200, size=1200;
@@ -227,7 +262,7 @@ int main(){
   CHECK(fs_init(&f)==0 && fs_mount(1,"sdb2","/mnt")==0);
   CHECK(fs_resolve(1,"/mnt/hello",&ino)==0 && fs_read(ino,0,rd,9)==9 && !memcmp(rd,"partition",9));
   /* Invalid and overlapping partition extents are skipped. */
-  disk[446+16+8]=1; disk[446+16+9]=0;
+  disk[446+16+8]=1; disk[446+16+9]=0; block_cache_invalidate();
   CHECK(block_init()==0 && block_count()==2);
   CHECK(lock_depth==0);
   printf("ALL TESTS PASSED (VFS, devfs, MBR, two volumes, corruption)\n"); return 0; }

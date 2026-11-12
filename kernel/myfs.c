@@ -68,7 +68,16 @@ _Static_assert(sizeof(struct dirent_v1) == 32, "dirent v1 must be 32 bytes");
 _Static_assert(sizeof(struct dirent_v2) == 8, "dirent v2 header must be 8 bytes");
 _Static_assert(sizeof(struct superblock) == BS, "superblock must be one block");
 
-struct fs_state { struct superblock super; u8 *bits; u32 bitmap_bytes, hint; bool active; u32 nblocks, ninodes; int device; };
+#define BITMAP_DIRTY_BYTES ((MAX_BLOCKS / BITS_PER_BLK + 7) / 8)
+struct fs_state {
+    struct superblock super;
+    u8 *bits;
+    u32 bitmap_bytes, hint, ino_hint;
+    bool active;
+    u32 nblocks, ninodes;
+    int device;
+    u8 bitmap_dirty[BITMAP_DIRTY_BYTES];
+};
 static struct fs_state states[5];
 static int selected;
 void myfs_select(int slot, int device) { selected = slot; states[slot].device = device; }
@@ -86,7 +95,12 @@ static int prepare_bitmap(u32 bytes) {
 /* ---------------------------------------------------------------- блоки */
 
 static int bread(u32 b, void *buf)        { return block_read(states[selected].device, b, buf)  ? FS_EIO : FS_OK; }
-static int bwrite(u32 b, const void *buf) { return block_write(states[selected].device, b, buf) ? FS_EIO : FS_OK; }
+static int bwrite(u32 b, const void *buf) {
+    return block_write_through(states[selected].device, b, buf) ? FS_EIO : FS_OK;
+}
+static int bwrite_data(u32 b, const void *buf) {
+    return block_write(states[selected].device, b, buf) ? FS_EIO : FS_OK;
+}
 
 static bool bit_get(u32 b) { return bitmap[b / 8] & (1 << (b % 8)); }
 static void bit_set(u32 b, bool v) {
@@ -94,21 +108,35 @@ static void bit_set(u32 b, bool v) {
     else   bitmap[b / 8] &= ~(1 << (b % 8));
 }
 
-/* записать на диск тот сектор битмапа, где лежит бит блока b */
-static int bitmap_sync(u32 b) {
+/* Бит в памяти меняется сразу. Сектор битмапа уходит на диск один раз,
+ * в конце операции, а не на каждое выделение. */
+static void bitmap_mark(u32 b) {
     u32 sec = b / BITS_PER_BLK;
-    return bwrite(sb.bitmap_start + sec, bitmap + sec * BS);
+    if (sec >= sb.bitmap_blocks || sec / 8 >= BITMAP_DIRTY_BYTES) return;
+    states[selected].bitmap_dirty[sec / 8] |= (u8)(1u << (sec % 8));
 }
 
+static int bitmap_flush(void) {
+    if (!mounted || !bitmap) return 0;
+    for (u32 sec = 0; sec < sb.bitmap_blocks; sec++) {
+        u8 bit = (u8)(1u << (sec % 8));
+        u8 *cell = &states[selected].bitmap_dirty[sec / 8];
+        if (!(*cell & bit)) continue;
+        if (bwrite(sb.bitmap_start + sec, bitmap + sec * BS)) return FS_EIO;
+        *cell = (u8)(*cell & (u8)~bit);
+    }
+    return 0;
+}
+
+/* Содержимое нового блока не определено, пока вызывающий его не запишет. */
 static u32 balloc(void) {
-    static u8 zero[BS];
     u32 start=states[selected].hint;
     if(start<sb.data_start || start>=sb.total_blocks) start=sb.data_start;
     for (u32 n=0; n<sb.total_blocks-sb.data_start; n++) {
         u32 b=start+n; if(b>=sb.total_blocks) b=sb.data_start+(b-sb.total_blocks);
         if (!bit_get(b)) {
             bit_set(b, true);
-            if (bitmap_sync(b) || bwrite(b, zero)) { bit_set(b, false); return 0; }
+            bitmap_mark(b);
             states[selected].hint=b+1;
             available_blocks--;
             return b;
@@ -117,21 +145,45 @@ static u32 balloc(void) {
     return 0;  /* места нет */
 }
 
+static void ind_invalidate_block(u32 b);
+
 static void bfree(u32 b) {
     if (b < sb.data_start || b >= sb.total_blocks || !bit_get(b)) return;
     bit_set(b, false);
     if(b<states[selected].hint) states[selected].hint=b;
-    bitmap_sync(b);
+    bitmap_mark(b);
+    ind_invalidate_block(b);
     available_blocks++;
+}
+
+static int write_zero_block(u32 b) {
+    static u8 zero[BS];
+    return bwrite(b, zero);
 }
 
 /* ---------------------------------------------------------------- inode */
 
+static struct {
+    int slot;
+    u32 block;
+    struct inode in[INODES_PER_BLK];
+    bool valid;
+} inoblk;
+
+static int inoblk_load(u32 b) {
+    if (inoblk.valid && inoblk.slot == selected && inoblk.block == b) return 0;
+    if (bread(b, inoblk.in)) return FS_EIO;
+    inoblk.slot = selected;
+    inoblk.block = b;
+    inoblk.valid = true;
+    return 0;
+}
+
 static int iread(u32 ino, struct inode *out) {
-    static struct inode blk[INODES_PER_BLK];
     if (ino == 0 || ino >= sb.inode_count) return FS_EINVAL;
-    if (bread(sb.inode_start + ino / INODES_PER_BLK, blk)) return FS_EIO;
-    *out = blk[ino % INODES_PER_BLK];
+    u32 b = sb.inode_start + ino / INODES_PER_BLK;
+    if (inoblk_load(b)) return FS_EIO;
+    *out = inoblk.in[ino % INODES_PER_BLK];
     return FS_OK;
 }
 
@@ -150,10 +202,76 @@ static struct {
     bool valid;
 } blkcache;
 
+static struct ind_cache {
+    int slot;
+    u32 block;
+    u32 data[NINDIRECT];
+    bool valid, dirty;
+} ind_level, ind_double, ind_triple;
+
+static int ind_flush_one(struct ind_cache *c) {
+    if (!c->valid || !c->dirty) return 0;
+    if (c->slot != selected) return 0;
+    if (bwrite(c->block, c->data)) return FS_EIO;
+    c->dirty = false;
+    return 0;
+}
+
+static int ind_flush_all(void) {
+    if (ind_flush_one(&ind_level) || ind_flush_one(&ind_double) || ind_flush_one(&ind_triple))
+        return FS_EIO;
+    return 0;
+}
+
+static void ind_invalidate_block(u32 b) {
+    struct ind_cache *cs[3] = { &ind_level, &ind_double, &ind_triple };
+    for (int i = 0; i < 3; i++) {
+        if (cs[i]->valid && cs[i]->slot == selected && cs[i]->block == b) {
+            cs[i]->valid = false;
+            cs[i]->dirty = false;
+        }
+    }
+}
+
+static int ind_load(struct ind_cache *c, u32 block, bool zero_new) {
+    if (c->valid && c->slot == selected && c->block == block) return 0;
+    if (ind_flush_one(c)) return FS_EIO;
+    if (zero_new) memset(c->data, 0, sizeof c->data);
+    else if (bread(block, c->data)) return FS_EIO;
+    c->slot = selected;
+    c->block = block;
+    c->valid = true;
+    c->dirty = zero_new;
+    return 0;
+}
+
+static int read_ind(u32 block, u32 *out) {
+    struct ind_cache *cs[3] = { &ind_level, &ind_double, &ind_triple };
+    for (int i = 0; i < 3; i++) {
+        if (cs[i]->valid && cs[i]->slot == selected && cs[i]->block == block) {
+            memcpy(out, cs[i]->data, sizeof cs[i]->data);
+            return 0;
+        }
+    }
+    return bread(block, out);
+}
+
+static int sync_meta(void) {
+    int b = bitmap_flush();
+    int i = ind_flush_all();
+    if (b) return b;
+    return i;
+}
+
 static void permissions_cache_clear(void);
 static void cache_drop_all(void) {
+    if (mounted && bitmap) sync_meta();
     inocache.valid = false;
     blkcache.valid = false;
+    inoblk.valid = false;
+    ind_level.valid = ind_double.valid = ind_triple.valid = false;
+    ind_level.dirty = ind_double.dirty = ind_triple.dirty = false;
+    memset(states[selected].bitmap_dirty, 0, sizeof states[selected].bitmap_dirty);
     permissions_cache_clear();
 }
 
@@ -166,20 +284,30 @@ static void cache_drop_ino(u32 ino) {
 }
 
 static int iwrite(u32 ino, const struct inode *in) {
-    static struct inode blk[INODES_PER_BLK];
+    if (ino == 0 || ino >= sb.inode_count) return FS_EINVAL;
     u32 b = sb.inode_start + ino / INODES_PER_BLK;
     cache_drop_ino(ino);
-    if (ino == 0 || ino >= sb.inode_count) return FS_EINVAL;
-    if (bread(b, blk)) return FS_EIO;
-    blk[ino % INODES_PER_BLK] = *in;
-    return bwrite(b, blk);
+    if (inoblk_load(b)) return FS_EIO;
+    inoblk.in[ino % INODES_PER_BLK] = *in;
+    return bwrite(b, inoblk.in);
 }
 
 #include "myfs-permissions.inc"
 
+static void ino_note_free(u32 ino) {
+    if (ino >= FS_ROOT && ino < sb.inode_count &&
+        (states[selected].ino_hint < FS_ROOT || ino < states[selected].ino_hint))
+        states[selected].ino_hint = ino;
+}
+
 static u32 ialloc(int type) {
     struct inode in;
-    for (u32 i = FS_ROOT; i < sb.inode_count; i++) {
+    u32 start = states[selected].ino_hint;
+    u32 span = sb.inode_count > FS_ROOT ? sb.inode_count - FS_ROOT : 0;
+    if (start < FS_ROOT || start >= sb.inode_count) start = FS_ROOT;
+    for (u32 n = 0; n < span; n++) {
+        u32 i = start + n;
+        if (i >= sb.inode_count) i = FS_ROOT + (i - sb.inode_count);
         if (iread(i, &in)) return 0;
         if (in.type == FS_TYPE_FREE) {
             memset(&in, 0, sizeof(in));
@@ -187,9 +315,10 @@ static u32 ialloc(int type) {
             in.links = 1;
             if (iwrite(i, &in)) return 0;
             if (permissions_store(i,type==FS_TYPE_DIR?0755:0644,0,0)) {
-                memset(&in,0,sizeof(in));iwrite(i,&in);return 0;
+                memset(&in,0,sizeof(in));iwrite(i,&in);ino_note_free(i);return 0;
             }
             available_inodes--;
+            states[selected].ino_hint = (i + 1 < sb.inode_count) ? i + 1 : FS_ROOT;
             return i;
         }
     }
@@ -207,76 +336,116 @@ static u32 max_file_blks(void) {
     return n;
 }
 
-/* Один уровень косвенности: *root — блок из 128 номеров, index — позиция в нём. */
-static u32 map_level(u32 *root, u32 index, bool alloc) {
-    static u32 ind[NINDIRECT];
+/* Один уровень косвенности. Новый блок собирается в памяти: с диска его
+ * читать нельзя, balloc больше не зануляет сектор. */
+static u32 map_level(u32 *root, u32 index, bool alloc, bool *created) {
+    if (created) *created = false;
     if (index >= NINDIRECT) return 0;
-    if (!*root && (!alloc || !(*root = balloc()))) return 0;
-    if (bread(*root, ind)) return 0;
-    if (!ind[index] && alloc) {
+    bool fresh = false;
+    u32 born = 0;
+    if (!*root) {
+        if (!alloc) return 0;
+        born = balloc();
+        if (!born) return 0;
+        fresh = true;
+    }
+    if (ind_load(&ind_level, fresh ? born : *root, fresh)) {
+        if (fresh) bfree(born);
+        return 0;
+    }
+    if (fresh) *root = born;
+    if (!ind_level.data[index] && alloc) {
         u32 b = balloc();
         if (!b) return 0;
-        ind[index] = b;
-        if (bwrite(*root, ind)) { ind[index] = 0; bfree(b); return 0; }
+        ind_level.data[index] = b;
+        ind_level.dirty = true;
+        if (created) *created = true;
     }
-    return ind[index];
+    return ind_level.data[index];
 }
 
-/* Двойной косвенный: *root указывает на блоки, которые указывает map_level. */
-static u32 map_double(u32 *root, u32 idx, bool alloc) {
-    static u32 top[NINDIRECT];
+static u32 map_double(u32 *root, u32 idx, bool alloc, bool *created) {
+    if (created) *created = false;
     if (idx >= NDINDIRECT) return 0;
-    if (!*root && (!alloc || !(*root = balloc()))) return 0;
-    if (bread(*root, top)) return 0;
+    bool fresh = false;
+    u32 born = 0;
+    if (!*root) {
+        if (!alloc) return 0;
+        born = balloc();
+        if (!born) return 0;
+        fresh = true;
+    }
+    if (ind_load(&ind_double, fresh ? born : *root, fresh)) {
+        if (fresh) bfree(born);
+        return 0;
+    }
+    if (fresh) *root = born;
     u32 slot = idx / NINDIRECT;
-    if (!top[slot]) {
+    if (!ind_double.data[slot]) {
         if (!alloc) return 0;
         u32 b = balloc();
         if (!b) return 0;
-        top[slot] = b;
-        if (bwrite(*root, top)) { top[slot] = 0; bfree(b); return 0; }
+        if (ind_load(&ind_level, b, true)) { bfree(b); return 0; }
+        ind_double.data[slot] = b;
+        ind_double.dirty = true;
     }
-    u32 mid = top[slot];
-    return map_level(&mid, idx % NINDIRECT, alloc);
+    u32 mid = ind_double.data[slot];
+    return map_level(&mid, idx % NINDIRECT, alloc, created);
 }
 
-/* Тройной косвенный: *root указывает на двойные косвенные блоки. */
-static u32 map_triple(u32 *root, u32 idx, bool alloc) {
-    static u32 top[NINDIRECT];
+static u32 map_triple(u32 *root, u32 idx, bool alloc, bool *created) {
+    if (created) *created = false;
     if (idx >= NTINDIRECT) return 0;
-    if (!*root && (!alloc || !(*root = balloc()))) return 0;
-    if (bread(*root, top)) return 0;
+    bool fresh = false;
+    u32 born = 0;
+    if (!*root) {
+        if (!alloc) return 0;
+        born = balloc();
+        if (!born) return 0;
+        fresh = true;
+    }
+    if (ind_load(&ind_triple, fresh ? born : *root, fresh)) {
+        if (fresh) bfree(born);
+        return 0;
+    }
+    if (fresh) *root = born;
     u32 slot = idx / NDINDIRECT;
-    if (!top[slot]) {
+    if (!ind_triple.data[slot]) {
         if (!alloc) return 0;
         u32 b = balloc();
         if (!b) return 0;
-        top[slot] = b;
-        if (bwrite(*root, top)) { top[slot] = 0; bfree(b); return 0; }
+        if (ind_load(&ind_double, b, true)) { bfree(b); return 0; }
+        ind_triple.data[slot] = b;
+        ind_triple.dirty = true;
     }
-    u32 child = top[slot];
-    return map_double(&child, idx % NDINDIRECT, alloc);
+    u32 child = ind_triple.data[slot];
+    return map_double(&child, idx % NDINDIRECT, alloc, created);
 }
 
-/* Номер дискового блока для idx-го блока файла. alloc=true — выделить, если нет.
- * Возвращает 0, если блока нет (или не удалось выделить). */
-static u32 bmap(struct inode *in, u32 idx, bool alloc) {
+/* created — блок только что выделен и на диске ещё мусор. */
+static u32 bmap(struct inode *in, u32 idx, bool alloc, bool *created) {
+    if (created) *created = false;
     u32 nd = n_direct();
     if (idx < nd) {
-        if (!in->direct[idx] && alloc) in->direct[idx] = balloc();
+        if (!in->direct[idx] && alloc) {
+            u32 b = balloc();
+            if (!b) return 0;
+            in->direct[idx] = b;
+            if (created) *created = true;
+        }
         return in->direct[idx];
     }
     idx -= nd;
     if (idx < NINDIRECT) {
         u32 slot = in->indirect;
-        u32 b = map_level(&slot, idx, alloc);
+        u32 b = map_level(&slot, idx, alloc, created);
         in->indirect = slot;
         return b;
     }
     idx -= NINDIRECT;
     if (idx < NDINDIRECT) {
         u32 slot = in->dindirect;
-        u32 b = map_double(&slot, idx, alloc);
+        u32 b = map_double(&slot, idx, alloc, created);
         in->dindirect = slot;
         return b;
     }
@@ -284,16 +453,34 @@ static u32 bmap(struct inode *in, u32 idx, bool alloc) {
     idx -= NDINDIRECT;
     {
         u32 slot = in->direct[NDIRECT_V2];
-        u32 b = map_triple(&slot, idx, alloc);
+        u32 b = map_triple(&slot, idx, alloc, created);
         in->direct[NDIRECT_V2] = slot;
         return b;
     }
 }
 
+static void drop_new_block(struct inode *in, u32 idx, u32 block) {
+    u32 nd = n_direct();
+    if (idx < nd) {
+        if (in->direct[idx] == block) in->direct[idx] = 0;
+    } else {
+        struct ind_cache *cs[3] = { &ind_level, &ind_double, &ind_triple };
+        for (int k = 0; k < 3; k++) {
+            struct ind_cache *c = cs[k];
+            if (!c->valid || c->slot != selected) continue;
+            for (u32 i = 0; i < NINDIRECT; i++) if (c->data[i] == block) {
+                c->data[i] = 0;
+                c->dirty = true;
+            }
+        }
+    }
+    bfree(block);
+}
+
 static void free_indirect_block(u32 block) {
     static u32 ind[NINDIRECT];
     if (!block) return;
-    if (!bread(block, ind))
+    if (!read_ind(block, ind))
         for (u32 i = 0; i < NINDIRECT; i++) bfree(ind[i]);
     bfree(block);
 }
@@ -302,7 +489,7 @@ static void free_double_block(u32 block) {
     static u32 top[NINDIRECT];
     u32 kids[NINDIRECT];
     if (!block) return;
-    if (!bread(block, top)) {
+    if (!read_ind(block, top)) {
         for (u32 j = 0; j < NINDIRECT; j++) kids[j] = top[j];
         for (u32 j = 0; j < NINDIRECT; j++) free_indirect_block(kids[j]);
     }
@@ -313,7 +500,7 @@ static void free_triple_block(u32 block) {
     static u32 top[NINDIRECT];
     u32 kids[NINDIRECT];
     if (!block) return;
-    if (!bread(block, top)) {
+    if (!read_ind(block, top)) {
         for (u32 j = 0; j < NINDIRECT; j++) kids[j] = top[j];
         for (u32 j = 0; j < NINDIRECT; j++) free_double_block(kids[j]);
     }
@@ -356,7 +543,7 @@ static int myfs_read_impl(u32 ino, u32 off, void *buf, u32 n) {
         u32 pos = off + done, bo = pos % BS, index = pos / BS;
         u32 chunk = BS - bo;
         if (chunk > n - done) chunk = n - done;
-        u32 b = bmap(&in, index, false);
+        u32 b = bmap(&in, index, false, NULL);
         if (b) {
             if (!(blkcache.valid && blkcache.slot == selected && blkcache.ino == ino && blkcache.index == index)) {
                 if (bread(b, blkcache.data)) return FS_EIO;
@@ -386,16 +573,26 @@ static int myfs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
         u32 pos = off + done, bo = pos % BS;
         u32 chunk = BS - bo;
         if (chunk > n - done) chunk = n - done;
-        u32 b = bmap(&in, pos / BS, true);
+        bool created = false;
+        u32 b = bmap(&in, pos / BS, true, &created);
         if (!b) { r = FS_ENOSPC; break; }
-        if (chunk < BS && bread(b, blk)) { r = FS_EIO; break; }
+        if (chunk < BS) {
+            if (created) memset(blk, 0, BS);
+            else if (bread(b, blk)) { r = FS_EIO; break; }
+        }
         memcpy(blk + bo, src + done, chunk);
-        if (bwrite(b, blk)) { r = FS_EIO; break; }
+        if (bwrite_data(b, blk)) {
+            if (created) drop_new_block(&in, pos / BS, b);
+            r = FS_EIO;
+            break;
+        }
         done += chunk;
     }
     if (off + done > in.size) in.size = off + done;
+    int meta = sync_meta();
     int w = iwrite(ino, &in);
     if (r) return r;
+    if (meta) return meta;
     return w ? w : (int)done;
 }
 
@@ -405,7 +602,10 @@ static int myfs_truncate_impl(u32 ino) {
     if (r) return r;
     if (in.type != FS_TYPE_FILE) return FS_EISDIR;
     free_all_blocks(&in);
-    return iwrite(ino, &in);
+    int w = iwrite(ino, &in);
+    int meta = sync_meta();
+    if (w) return w;
+    return meta;
 }
 
 static int myfs_stat_impl(u32 ino, struct fs_stat *st) {
@@ -729,10 +929,11 @@ static int myfs_remove_impl(u32 cwd, const char *path,bool keep) {
     /* Publish unlink before reclamation. Open descriptors retain the inode. */
     if((r=dir_set(parent,off,0,NULL)))return r;
     in.links=0;
-    if(!keep){free_all_blocks(&in);in.type=FS_TYPE_FREE;}
+    if(!keep){free_all_blocks(&in);in.type=FS_TYPE_FREE;ino_note_free(ino);}
     if((r=iwrite(ino,&in)))return r;
     if(!keep)available_inodes++;
-    return 0;
+    r = sync_meta();
+    return r;
 }
 
 static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
@@ -848,6 +1049,7 @@ static int myfs_format_impl(u32 version) {
     if (bwrite(0, &sb)) return FS_EIO;
 
     states[selected].hint=sb.data_start;
+    states[selected].ino_hint=FS_ROOT+1;
     available_blocks = total - sb.data_start;
     available_inodes = sb.inode_count - 1;
     mounted = true;
@@ -888,6 +1090,7 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
     int allocation=prepare_bitmap(sb.bitmap_blocks * BS);
     if(allocation) return allocation;
     states[selected].hint=sb.data_start;
+    states[selected].ino_hint=0;
     for (u32 i = 0; i < sb.bitmap_blocks; i++)
         if (bread(sb.bitmap_start + i, bitmap + i * BS)) return FS_EIO;
     if(sb.version==3 && ((sb.layout_version!=1 && sb.layout_version!=2) ||
@@ -900,10 +1103,10 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
     struct inode in;
     for (u32 i = FS_ROOT; i < sb.inode_count; i++) {
         if(iread(i,&in))return FS_EIO;
-        if(in.type==FS_TYPE_FREE)available_inodes++;
-        else if(i!=FS_ROOT && !in.links){free_all_blocks(&in);in.type=FS_TYPE_FREE;if(iwrite(i,&in))return FS_EIO;available_inodes++;}
+        if(in.type==FS_TYPE_FREE){available_inodes++;if(!states[selected].ino_hint)states[selected].ino_hint=i;}
+        else if(i!=FS_ROOT && !in.links){free_all_blocks(&in);in.type=FS_TYPE_FREE;ino_note_free(i);if(iwrite(i,&in))return FS_EIO;available_inodes++;}
     }
-    return FS_OK;
+    return sync_meta();
 }
 
 bool myfs_ready(void) { return mounted; }
@@ -953,7 +1156,10 @@ int myfs_remove_keep(u32 cwd,const char *path,bool keep){return myfs_remove_impl
 int myfs_reap_orphan(u32 ino) {
     struct inode in;int ret=iread(ino,&in);if(ret)return ret;
     if(ino==FS_ROOT || in.type==FS_TYPE_FREE || in.links)return FS_EINVAL;
-    free_all_blocks(&in);in.type=FS_TYPE_FREE;ret=iwrite(ino,&in);if(!ret)available_inodes++;return ret;
+    free_all_blocks(&in);in.type=FS_TYPE_FREE;ino_note_free(ino);ret=iwrite(ino,&in);
+    if(ret)return ret;
+    available_inodes++;
+    return sync_meta();
 }
 int myfs_rename(u32 cwd, const char *src, const char *dst) { int r = myfs_rename_impl(cwd, src, dst); return r; }
 int myfs_read(u32 ino, u32 off, void *buf, u32 n) { int r = myfs_read_impl(ino, off, buf, n); return r; }

@@ -8,8 +8,10 @@
 
 static FILE *img;
 static unsigned img_sectors;
+void host_close_image(void);
 
 int host_open_image(const char *path) {
+    host_close_image();
     img = fopen(path, "r+b");
     if (!img) return -1;
     fseek(img, 0, SEEK_END);
@@ -29,7 +31,13 @@ int host_write_sector(unsigned lba, const void *buf) {
     return fwrite(buf, 1, 512, img) == 512 ? 0 : -1;
 }
 
-void host_close_image(void) { if (img) fclose(img); img = NULL; }
+void host_close_image(void) {
+    extern int block_flush(void);
+    extern void block_cache_invalidate(void);
+    if (img) { block_flush(); fclose(img); img = NULL; }
+    /* The cache is keyed by LBA, not by image. Drop it before another file is opened. */
+    block_cache_invalidate();
+}
 
 /* новый пустой образ: его размер и станет размером ФС при форматировании */
 int host_create_image(const char *path, unsigned sectors) {

@@ -803,8 +803,10 @@ static int uninstall_name(const char *dir, const char *name) {
     return 0;
 }
 
+#include "ext-auto.inc"
+
 static void usage(void) {
-    dprintf(STDERR, "usage: ext list | ext install <name> | ext uninstall <name>\n");
+    dprintf(STDERR, "usage: ext list | ext install <name> | ext uninstall <name>\n       ext auto add|remove NAME... | ext auto list|status|run\n");
 }
 
 #if defined(__LINUX_TEST__)
@@ -1020,6 +1022,18 @@ static int selftest(void) {
     if (uninstall_name("/tmp/myos-ext-test/instructions", "noscript") == 0) { printf("FAIL missing uninstall\n"); fails++; }
     if (!stamp_exists("/tmp/myos-ext-test/instructions", "noscript")) { printf("FAIL noscript stamp\n"); fails++; }
     if (dirstat("/tmp/myos-ext-test/noscript/kept", &st) != 0 || st.type != 2) { printf("FAIL kept\n"); fails++; }
+    {
+        struct auto_packages selected;
+        FILE *af=fopen("/tmp/myos-ext-test/auto.conf","w");
+        if(af){fputs("# selected\nbase\ntop # comment\nbase\n",af);fclose(af);}
+        if(!af || auto_read("/tmp/myos-ext-test/auto.conf",&selected) || selected.count!=2 || strcmp(selected.names[1],"top")){printf("FAIL auto selection\n");fails++;}
+        af=fopen("/tmp/myos-ext-test/auto.conf","w");
+        if(af){fputs("base top\n",af);fclose(af);}
+        if(!auto_read("/tmp/myos-ext-test/auto.conf",&selected)){printf("FAIL auto multiple names accepted\n");fails++;}
+        af=fopen("/tmp/myos-ext-test/auto.conf","w");
+        if(af){fputs("../base\n",af);fclose(af);}
+        if(!auto_read("/tmp/myos-ext-test/auto.conf",&selected)){printf("FAIL auto traversal accepted\n");fails++;}
+    }
     return fails != 0;
 }
 #endif
@@ -1029,8 +1043,9 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--selftest")) return selftest();
 #endif
     if (argc == 2 && !strcmp(argv[1], "list")) return list_dir(INST_DIR);
-    if (argc == 3 && !strcmp(argv[1], "install")) return install_name(INST_DIR, argv[2]);
-    if (argc == 3 && !strcmp(argv[1], "uninstall")) return uninstall_name(INST_DIR, argv[2]);
+    if(argc>=2 && !strcmp(argv[1],"auto"))return auto_command(argc,argv);
+    if (argc == 3 && !strcmp(argv[1], "install")) return ext_lock()?1:install_name(INST_DIR, argv[2]);
+    if (argc == 3 && !strcmp(argv[1], "uninstall")) return ext_lock()?1:uninstall_name(INST_DIR, argv[2]);
     usage();
     return 2;
 }
