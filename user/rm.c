@@ -45,6 +45,7 @@ static int remove_children(const char *path) {
     for (i = 0; (status = dirread(path, i, &e)) == 1; i++) {
         char *copy;
         int len = (int)strlen(e.name);
+        if (!strcmp(e.name, ".") || !strcmp(e.name, "..")) continue;
         if (n >= cap) {
             int nc = cap ? cap * 2 : 16;
             char **nn = realloc(names, (size_t)nc * sizeof *nn);
@@ -147,17 +148,28 @@ int main(int argc, char **argv) {
         return 1;
     }
     for (i = optend; i < argc; i++) {
-        if (dot_operand(argv[i])) {
+        char path[1024];
+        int len = (int)strlen(argv[i]);
+        if (len >= (int)sizeof(path)) {
+            dprintf(STDERR, "rm: %s: file name too long\n", argv[i]);
+            rc = 1;
+            continue;
+        }
+        memcpy(path, argv[i], (size_t)len + 1);
+        /* A terminal slash makes lstat follow a directory symlink on POSIX.
+         * Remove it before inspection so recursive removal never follows it. */
+        while (len > 1 && path[len - 1] == '/') path[--len] = 0;
+        if (dot_operand(path)) {
             dprintf(STDERR, "rm: refusing to remove '.' or '..' directory: skipping '%s'\n", argv[i]);
             rc = 1;
             continue;
         }
-        if (opt_recur && is_root(argv[i]) && !opt_nopreserve) {
+        if (opt_recur && is_root(path) && !opt_nopreserve) {
             dprintf(STDERR, "rm: it is dangerous to operate recursively on '/'\n");
             rc = 1;
             continue;
         }
-        if (remove_path(argv[i]) < 0) rc = 1;
+        if (remove_path(path) < 0) rc = 1;
     }
     return rc;
 }

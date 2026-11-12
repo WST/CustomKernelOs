@@ -39,6 +39,17 @@ ln -s tree/a linkdir
 "$R" -rf linkdir || fail symlink
 [ ! -e linkdir ] || fail symlink-left
 [ -f tree/a/b/c ] || fail symlink-followed
+# Trailing separators must not turn a symlink into recursive target deletion.
+ln -s tree/a trailing
+"$R" -rf trailing/// || fail trailing-symlink
+[ ! -L trailing ] || fail trailing-symlink-left
+[ -f tree/a/b/c ] || fail trailing-symlink-followed
+mkdir -p broken-target
+ln -s absent dangling
+"$R" -rf dangling/ || fail dangling-symlink
+[ ! -L dangling ] || fail dangling-symlink-left
+"$R" -rf broken-target/// || fail trailing-directory
+[ ! -e broken-target ] || fail trailing-directory-left
 "$R" -fr tree || fail fr
 [ ! -e tree ] || fail fr-left
 "$R" --recursive --force tmp/ext || fail long
