@@ -1,6 +1,8 @@
 #ifndef AHCI_H
 #define AHCI_H
 #include "types.h"
+#include "hwinfo.h"
+int ahci_port_info(unsigned index, struct hw_sata_info *out);
 
 /* SATA AHCI. A present port replaces the IDE disk of the same index:
  * port 0 is /dev/sdb, port 1 is /dev/sdc. IDE remains the fallback. */

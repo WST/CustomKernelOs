@@ -91,8 +91,8 @@ $(BUILD)/build_info.h: FORCE_BUILD_INFO VERSION tools/build_info.py | $(BUILD)
 	python3 tools/build_info.py $@
 $(BUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
 $(BUILD)/sysinfo.o: $(BUILD)/build_info.h
-$(OBJS): user/lib/sysinfo.h
-$(BUILD)/user/libc.o: user/lib/sysinfo.h
+$(OBJS): user/lib/sysinfo.h user/lib/hwinfo.h
+$(BUILD)/user/libc.o $(BUILD)/user/libc.so: user/lib/sysinfo.h user/lib/hwinfo.h
 CFLAGS += -I$(BUILD)
 
 
@@ -203,7 +203,7 @@ $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.
 
 $(BUILD)/user/code.o: user/code_features.h user/code_index.h user/code_workspace.h user/code_chrome.h user/code_signature.h
 
-$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
+$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 # sh и cc остаются статическими: оболочка и компилятор стартуют даже со сломанной libc.so.
@@ -442,13 +442,13 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
+CC_HDRS   := user/lib/myos.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
 	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
@@ -603,7 +603,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in myos.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in myos.h hwinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
@@ -1028,6 +1028,7 @@ $(HWBUILD)/x86emu/%.o: drivers/video/x86emu/%.c drivers/video/x86emu/include/*.h
 	mkdir -p $(@D)
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -w -c $< -o $@
 HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC)) $(patsubst drivers/video/%.c,$(HWBUILD)/video/%.o,$(VIDEO_SRC))
+$(HWOBJS): user/lib/hwinfo.h
 $(HWBUILD):
 	mkdir -p $@
 $(HWBUILD)/%.o: kernel/%.c kernel/*.h $(BUILD)/build_info.h | $(HWBUILD)
@@ -1301,3 +1302,17 @@ nano-sshtest: nano-build openssh-tests-ready
 .PHONY: nano-networktest
 nano-networktest: nano-build
 	python3 tests/nano_smoke.py --network
+
+# Hardware discovery: real PCI scanner plus disposable legacy/SATA and USB boots.
+$(BUILD)/hwinfo-check.o: tests/hwinfo_check.c user/lib/hwinfo.h user/lib/myos.h | $(BUILD)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/hwinfo-check: $(BUILD)/hwinfo-check.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+$(BUILD)/user/lspci.o $(BUILD)/user/lsusb.o $(BUILD)/user/lsports.o: user/lib/hwformat.h
+.PHONY: hardwaretest
+hardwaretest: $(BUILD)/os.img $(HWBUILD)/kernel.bin $(BUILD)/hwinfo-check $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libc.so $(BUILD)/user/sh $(BUILD)/user/lspci $(BUILD)/user/lsusb $(BUILD)/user/lsports
+	gcc -std=gnu11 -DHOST_TEST -fno-builtin -Wall -Wextra -Ikernel tests/pci_inventory_test.c kernel/pci.c -o $(BUILD)/pci-inventory-test
+	./$(BUILD)/pci-inventory-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -fno-builtin -ffunction-sections -fdata-sections tests/ahci_inventory_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/ahci-inventory-test
+	./$(BUILD)/ahci-inventory-test
+	python3 tests/hardware_inventory_smoke.py

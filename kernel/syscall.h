@@ -91,6 +91,7 @@ enum {
     SYS_IPCCTL,         /* explicit SHM grants, discard, size and mailbox grants */
     SYS_REBOOT,         /* reboot(RB_POWEROFF | RB_REBOOT): не возвращается */
     SYS_THREAD_CTL,     /* errno/ключи, detach, cond_wait/cond_wake; номера как в myos.h */
+    SYS_HWINFO,         /* read-only PCI, USB root ports and SATA inventory */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */

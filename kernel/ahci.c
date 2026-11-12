@@ -27,6 +27,7 @@ static volatile u8 *mmio;
 static u32 data_page[4];
 static struct pci_dev controller;
 static bool dma_failed;
+static bool inventory_ready;
 static struct {
     int index;
     u32 page;
@@ -228,13 +229,55 @@ static bool setup_port(int port, int slot) {
     return true;
 }
 
+int ahci_port_info(unsigned index, struct hw_sata_info *out) {
+    if (!inventory_ready || index>=32) return 0;
+    u32 pi=rd(HBA_PI); unsigned n=0,port;
+    for (port=0;port<32;port++) if (pi&(1u<<port)) {
+        if (n++==index) break;
+    }
+    if (port==32) return 0;
+    memset(out,0,sizeof(*out));
+    out->bus=controller.bus; out->device=controller.dev; out->function=controller.func;
+    out->port=port;
+    u32 status=rd(port_off(port)+0x28);
+    out->detection=status&15; out->speed=(status>>4)&15; out->power=(status>>8)&15;
+    out->signature=rd(port_off(port)+0x24);
+    for (unsigned i=0;i<2;i++) if (unit[i].index==(int)port) {
+        out->driver_active=unit[i].sectors && !dma_failed;
+        out->sectors=unit[i].sectors;
+        memcpy(out->model,unit[i].model,sizeof(unit[i].model));
+    }
+    return 1;
+}
+#ifdef MYOS_HARDWARE
+/* Live diagnostics must not take ownership of firmware-managed disks. Only
+ * inspect an already decoded ABAR; never enable PCI, reset ports or issue DMA. */
+static bool ahci_inventory_init(void) {
+    struct pci_dev dev;
+    if (!pci_find_class(0x01,0x06,&dev)) return false;
+    u32 command=pci_read(dev.bus,dev.dev,dev.func,4);
+    if (!(command&2)) return false;
+    u32 bar=pci_read(dev.bus,dev.dev,dev.func,0x24);
+    if ((bar&1) || (bar&6)) return false; /* AHCI ABAR is a 32-bit memory BAR. */
+    u32 phys=bar&~15u, base=phys&~4095u;
+    if (!phys || base>0xffffffffu-MMIO_PAGES*PAGE_SIZE) return false;
+    for (u32 off=0;off<MMIO_PAGES*PAGE_SIZE;off+=PAGE_SIZE)
+        if (vmm_map(MMIO_VIRT+off,base+off,0x18)) return false;
+    mmio=(volatile u8 *)(MMIO_VIRT+(phys&4095));
+    if ((rd(0x10)>>16)!=1 || rd(HBA_PI)==0xffffffffu) return false;
+    controller=dev; inventory_ready=true;
+    return true;
+}
+#endif
 bool ahci_init(void) {
+    inventory_ready=false;
     for (int i = 0; i < 2; i++) unit[i].index = -1;
+#ifdef MYOS_HARDWARE
+    ahci_inventory_init();
+    return false; /* Storage ownership remains with the Live RAM root. */
+#endif
     const struct boot_info *live = boot_info_get();
     if (live) return false;
-#ifdef MYOS_HARDWARE
-    return false;
-#endif
     struct pci_dev dev;
     dma_failed = false;
     /* This QEMU reports programming interface 2 for an AHCI 1.0 register map.
@@ -252,6 +295,7 @@ bool ahci_init(void) {
     pci_write(dev.bus, dev.dev, dev.func, 0x04, (cmd & 0xffff) | 0x06 | (1u << 10));
     wr(HBA_GHC, rd(HBA_GHC) | (1u << 31));
     if ((rd(0x10) >> 16) != 1) return false;
+    inventory_ready=true;
     for (int i = 0; i < 4; i++) {
         data_page[i] = pmm_alloc();
         if (!data_page[i]) return false;

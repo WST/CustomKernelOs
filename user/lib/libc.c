@@ -1665,6 +1665,9 @@ int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv) {
 }
 int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
 int cpuinfo(struct cpu_info *out, unsigned capacity) { return syscall3(SYS_CPUINFO, (int)out, capacity, 0); }
+int hwinfo(unsigned kind, unsigned index, void *out, unsigned size) {
+    return syscall5(SYS_HWINFO,kind,index,(int)out,size,0);
+}
 int klog_read(void *buffer,unsigned capacity,struct klog_cursor *cursor) {
     return ioerr(syscall3(SYS_KLOG_READ,(int)buffer,capacity,(int)cursor));
 }

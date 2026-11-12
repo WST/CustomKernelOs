@@ -1255,6 +1255,9 @@ VBE framebuffer, live-файловая система в RAM, USB HID клави
 Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
 Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).
 
+Просмотр PCI-устройств и USB/SATA-портов: `lspci -v`, `lsusb -t`, `lsports`.
+Описание и ограничения: [docs/hardware-inventory.md](docs/hardware-inventory.md).
+
 ## Пакеты при загрузке
 
 `EXT_AUTOINSTALL_PACKAGES="openssh lua"` в `.env` задаёт список для нового Live-образа.

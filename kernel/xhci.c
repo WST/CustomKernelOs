@@ -57,6 +57,9 @@ static struct hid hids[NHID];
 static unsigned ndev,nhid;
 static u32 waiting,wait_code,wait_slot;
 static bool running,poisoned;
+static bool inventory_ready;
+static struct pci_dev inventory_controller;
+static struct hw_usb_info inventory[256];
 
 static u32 rd(u32 o) { return *(volatile u32 *)(mmio+o); }
 static void wr(u32 o,u32 v) { *(volatile u32 *)(mmio+o)=v; }
@@ -254,6 +257,11 @@ static bool configure(struct usbdev *d) {
         d->mps=mps;
     }
     if (!control(d,0x80,6,0x100,0,18) || d->buffer[0]!=18 || d->buffer[1]!=1) return false;
+    struct hw_usb_info *info=&inventory[d->port-1];
+    info->vendor_id=d->buffer[8]|((u32)d->buffer[9]<<8);
+    info->product_id=d->buffer[10]|((u32)d->buffer[11]<<8);
+    info->bcd_usb=d->buffer[2]|((u32)d->buffer[3]<<8);
+    info->device_class=d->buffer[4]; info->descriptor_valid=1;
     if (d->buffer[4]==9) { kprintf("USB port %u: hubs are not supported\n",d->port); return false; }
     if (!control(d,0x80,6,0x200,0,9) || d->buffer[1]!=2) return false;
     unsigned total=d->buffer[2]|d->buffer[3]<<8,config=d->buffer[5];
@@ -266,6 +274,9 @@ static bool configure(struct usbdev *d) {
         if (len<2 || pos+len>total) break;
         if (p[1]==4 && len>=9) {
             protocol=(p[3]==0 && p[5]==3 && p[6]==1 && (p[7]==1 || p[7]==2))?p[7]:0;
+            if (!info->interface_class) {
+                info->interface_class=p[5]; info->protocol=p[7];
+            }
             iface=p[2];report_bytes=0;
         } else if(p[1]==0x21 && protocol && len>=6) {
             for(u32 i=0;i<p[5] && 6+i*3+3<=len;i++)
@@ -342,7 +353,7 @@ static bool attach(unsigned port) {
     ep[2]=(u32)d->control.base|1; ep[4]=8;
     if (!command((u32)d->input,TYPE(11)|(slot<<24))) return false;
     kprintf("USB device: port %u, speed %u, slot %u\n",port,speed,slot);
-    if (configure(d)) return true;
+    if (configure(d)) { inventory[port-1].hid_active=1; return true; }
     /* Failed/unsupported devices must not leave enabled endpoints with DMA. */
     for (unsigned i=0;i<nhid;i++) if (hids[i].dev==d) hids[i].active=false;
     if (!poisoned) command(0,TYPE(10)|(slot<<24));
@@ -362,6 +373,16 @@ static void worker(void *unused) {
         sleep_ms(10);
     }
     wr(op,rd(op)&~1u);
+}
+int xhci_port_info(unsigned index, struct hw_usb_info *out) {
+    if (!inventory_ready || index>=ports) return 0;
+    *out=inventory[index];
+    out->bus=inventory_controller.bus; out->device=inventory_controller.dev;
+    out->function=inventory_controller.func; out->port=index+1;
+    u32 status=rd(op+0x400+index*16);
+    out->raw_status=status; out->connected=status&1; out->enabled=(status>>1)&1;
+    out->speed=(status>>10)&15; out->controller_running=running && !poisoned;
+    return 1;
 }
 bool xhci_init(void) {
     struct pci_dev controller={0}; bool found=false;
@@ -395,6 +416,8 @@ bool xhci_init(void) {
     maxslots=rd(4)&255; ports=rd(4)>>24; context_bytes=(rd(0x10)&4)?64:32;
     kprintf("xHCI: MMIO=%x version=%x slots=%u\n",phys,rd(0)>>16,maxslots);
     if (op<0x20 || db+1024>WINDOW || rt+0x40>WINDOW || op+0x400+ports*16>WINDOW || !maxslots) return false;
+    inventory_controller=controller;
+    inventory_ready=ports!=0;
     /* BIOS ownership handoff before touching operational registers. */
     unsigned ext=rd(0x10)>>16;
     for (unsigned n=0;ext && n<64;n++) {
@@ -465,5 +488,6 @@ bool xhci_init(void) {
     return active!=0;
 }
 #else
+int xhci_port_info(unsigned index, struct hw_usb_info *out) { (void)index; (void)out; return 0; }
 bool xhci_init(void) { return false; }
 #endif

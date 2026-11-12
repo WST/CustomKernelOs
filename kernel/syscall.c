@@ -11,6 +11,7 @@
 #include "syscall.h"
 #include "klog.h"
 #include "sysinfo.h"
+#include "hwinfo.h"
 #include "smp.h"
 #include "tty.h"
 #include "keyboard.h"
@@ -1141,6 +1142,16 @@ void syscall_dispatch(struct regs *r) {
         }
         irq_restore(flags);
         memcpy((void *)a,sample,count*sizeof(struct cpu_info)); ret=count; break;
+    }
+    case SYS_HWINFO: {
+        unsigned size=hwinfo_record_size(a);
+        if (!size || d<size) { ret=-EINVAL; break; }
+        if (!user_buf_ok(c,size,true)) { ret=-EFAULT; break; }
+        union { struct hw_pci_info pci; struct hw_usb_info usb; struct hw_sata_info sata; } info;
+        memset(&info,0,sizeof(info));
+        ret=hwinfo_read(a,b,&info);
+        if (ret==1) memcpy((void *)c,&info,size);
+        break;
     }
     case SYS_SYSINFO: {
         if (b < sizeof(struct system_info)) { ret=-EINVAL; break; }
