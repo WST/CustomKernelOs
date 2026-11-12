@@ -433,6 +433,7 @@ int proc_fork(struct regs *r) {
     task_process(t)->cwd        = task_process(parent)->cwd;
     t->parent     = parent->id;
     t->pgid       = parent->pgid;
+    t->tcb        = parent->tcb;
     t->keep_zombie = true;                               /* родитель заберёт код в waitpid */
     fpu_copy_current(t);                                 /* и регистры FPU тоже копия */
     for (int i = 0; i < MAX_FDS; i++) task_process(t)->fds[i] = file_dup(task_process(parent)->fds[i]);
@@ -463,6 +464,7 @@ int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
     vmm_destroy_dir(old);                                /* ...и только теперь его освобождаем */
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;
+    t->tcb = 0;                                          /* старый блок errno указывал в прежнюю память */
     fpu_reset_current();                                 /* новой программе — чистый FPU */
     const char *b = basename(path);
     u32 n = strlen(b);

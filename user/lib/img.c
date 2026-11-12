@@ -1,8 +1,7 @@
 /* img.c — PNG, GIF, JPEG, BMP -> пиксели 0xAARRGGBB (см. img.h).
  *
  * Устройство:
- *   inflate      — распаковка zlib/deflate (PNG): блоки без сжатия, с фиксированным
- *                  и с переданным кодом Хаффмана; окно не нужно — пишем сразу в выход.
+ *   inflate      — распаковка zlib/deflate (PNG) через libz.
  *   PNG          — склеить IDAT, inflate, снять фильтры строк (Sub, Up, Average, Paeth),
  *                  развернуть в ARGB; черезстрочный Adam7 — 7 проходов.
  *   GIF          — LZW с переменной длиной кода, первый кадр, прозрачность из GCE.
@@ -18,6 +17,7 @@
 #include "myos.h"
 #endif
 #include "img.h"
+#include "../include/zlib.h"
 
 typedef unsigned char u8;
 typedef unsigned int u32;
@@ -36,150 +36,23 @@ static unsigned *new_px(int w, int h) { return malloc(sizeof(unsigned) * w * h);
 
 /* ====================================================================== inflate */
 
-struct huff {                       /* канонический код Хаффмана: сколько кодов каждой длины и символы */
-    unsigned short count[16];
-    unsigned short sym[320];
-};
-
-struct bits {
-    const u8 *p, *end;
-    u32 buf;
-    int n;
-    int bad;
-};
-
-static int getbit(struct bits *b) {
-    if (!b->n) {
-        if (b->p >= b->end) { b->bad = 1; return 0; }
-        b->buf = *b->p++;
-        b->n = 8;
-    }
-    int v = b->buf & 1;
-    b->buf >>= 1;
-    b->n--;
-    return v;
-}
-
-static u32 getbits(struct bits *b, int n) {
-    u32 v = 0;
-    for (int i = 0; i < n; i++) v |= (u32)getbit(b) << i;
-    return v;
-}
-
-static int huff_build(struct huff *h, const u8 *lens, int n) {
-    int offs[16];
-    for (int i = 0; i < 16; i++) h->count[i] = 0;
-    for (int i = 0; i < n; i++) h->count[lens[i]]++;
-    h->count[0] = 0;
-    int left = 1;
-    for (int i = 1; i < 16; i++) { left <<= 1; left -= h->count[i]; if (left < 0) return -1; }
-    offs[1] = 0;
-    for (int i = 1; i < 15; i++) offs[i + 1] = offs[i] + h->count[i];
-    for (int i = 0; i < n; i++) if (lens[i]) h->sym[offs[lens[i]]++] = i;
-    return 0;
-}
-
-static int huff_decode(struct bits *b, const struct huff *h) {
-    int code = 0, first = 0, index = 0;
-    for (int len = 1; len < 16; len++) {
-        code |= getbit(b);
-        int count = h->count[len];
-        if (code - count < first) return h->sym[index + (code - first)];
-        index += count;
-        first += count;
-        first <<= 1;
-        code <<= 1;
-        if (b->bad) return -1;
-    }
+int img_inflate(const u8 *in, int len, u8 *out, int max, int zlib_header) {
+    z_stream s;
+    int ret, got;
+    if (!in || len < 0 || !out || max < 0) return -1;
+    memset(&s, 0, sizeof s);
+    if (inflateInit2(&s, zlib_header ? 15 : -15) != Z_OK) return -1;
+    s.next_in = (Bytef *)in;
+    s.avail_in = (uInt)len;
+    s.next_out = out;
+    s.avail_out = (uInt)max;
+    ret = inflate(&s, Z_NO_FLUSH);
+    got = (int)s.total_out;
+    inflateEnd(&s);
+    if (ret == Z_STREAM_END) return got;
+    if (got > 0) return got;
     return -1;
 }
-
-static const unsigned short len_base[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59,
-                                             67, 83, 99, 115, 131, 163, 195, 227, 258 };
-static const u8 len_extra[29] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
-static const unsigned short dist_base[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769,
-                                              1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
-static const u8 dist_extra[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
-
-int img_inflate(const u8 *in, int len, u8 *out, int max, int zlib_header) {
-    struct bits b = { in, in + len, 0, 0, 0 };
-    if (zlib_header) {
-        if (len < 2 || (in[0] & 15) != 8 || ((in[0] << 8) | in[1]) % 31) return -1;
-        if (in[1] & 0x20) return -1;                       /* словарь — не бывает в PNG */
-        b.p += 2;
-    }
-    static struct huff lit, dist;                          /* 1.4 КБ — не на стеке */
-    int o = 0, last;
-    do {
-        last = getbit(&b);
-        int type = getbits(&b, 2);
-        if (b.bad) return o ? o : -1;
-        if (type == 0) {                                   /* без сжатия */
-            b.n = 0;
-            if (b.end - b.p < 4) return o ? o : -1;
-            int n = rd16le(b.p);
-            b.p += 4;
-            if (b.end - b.p < n) n = b.end - b.p;
-            if (n > max - o) n = max - o;
-            memcpy(out + o, b.p, n);
-            b.p += n;
-            o += n;
-            continue;
-        }
-        if (type == 3) return o ? o : -1;
-        if (type == 1) {                                   /* фиксированный код */
-            static u8 l[320];
-            int i = 0;
-            for (; i < 144; i++) l[i] = 8;
-            for (; i < 256; i++) l[i] = 9;
-            for (; i < 280; i++) l[i] = 7;
-            for (; i < 288; i++) l[i] = 8;
-            huff_build(&lit, l, 288);
-            for (i = 0; i < 30; i++) l[i] = 5;
-            huff_build(&dist, l, 30);
-        } else {                                           /* свой код в начале блока */
-            int hlit = getbits(&b, 5) + 257, hdist = getbits(&b, 5) + 1, hclen = getbits(&b, 4) + 4;
-            static const u8 order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
-            u8 cl[19], l[320];
-            struct huff ch;
-            memset(cl, 0, sizeof(cl));
-            for (int i = 0; i < hclen; i++) cl[order[i]] = getbits(&b, 3);
-            if (huff_build(&ch, cl, 19) < 0) return o ? o : -1;
-            int i = 0;
-            while (i < hlit + hdist) {
-                int s = huff_decode(&b, &ch);
-                if (s < 0 || b.bad) return o ? o : -1;
-                if (s < 16) { l[i++] = s; continue; }
-                int rep, v = 0;
-                if (s == 16) { if (!i) return o ? o : -1; v = l[i - 1]; rep = 3 + getbits(&b, 2); }
-                else if (s == 17) rep = 3 + getbits(&b, 3);
-                else rep = 11 + getbits(&b, 7);
-                if (i + rep > hlit + hdist) return o ? o : -1;
-                while (rep--) l[i++] = v;
-            }
-            if (huff_build(&lit, l, hlit) < 0 || huff_build(&dist, l + hlit, hdist) < 0) return o ? o : -1;
-        }
-        for (;;) {
-            int s = huff_decode(&b, &lit);
-            if (s < 0 || b.bad) return o ? o : -1;
-            if (s < 256) { if (o >= max) return o; out[o++] = s; continue; }
-            if (s == 256) break;
-            s -= 257;
-            if (s >= 29) return o ? o : -1;
-            int n = len_base[s] + getbits(&b, len_extra[s]);
-            int d = huff_decode(&b, &dist);
-            if (d < 0 || d >= 30) return o ? o : -1;
-            int back = dist_base[d] + getbits(&b, dist_extra[d]);
-            if (back > o) return o ? o : -1;
-            if (n > max - o) n = max - o;
-            for (int k = 0; k < n; k++, o++) out[o] = out[o - back];
-            if (o >= max) return o;
-        }
-    } while (!last);
-    return o;
-}
-
-/* ====================================================================== PNG */
 
 static int paeth(int a, int b, int c) {
     int p = a + b - c, pa = p > a ? p - a : a - p, pb = p > b ? p - b : b - p, pc = p > c ? p - c : c - p;

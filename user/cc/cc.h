@@ -135,6 +135,9 @@ struct Member {
     Token *name;
     int    idx;
     int    offset;
+    int    bit_off;
+    int    bit_width;
+    bool   is_bitfield;
 };
 
 extern Type *ty_void, *ty_bool, *ty_char, *ty_short, *ty_int, *ty_llong, *ty_ullong;

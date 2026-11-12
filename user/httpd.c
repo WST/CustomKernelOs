@@ -9,6 +9,9 @@
  * Каждое соединение обслуживает отдельный процесс (fork), поэтому один
  * «молчащий» клиент не задерживает остальных. */
 #include "myos.h"
+#include "sys/socket.h"
+#include "netinet/in.h"
+#include "arpa/inet.h"
 
 /* ------------------------------------------------------------ строка-буфер */
 
@@ -233,22 +236,30 @@ static void handle(int fd, const char *who) {
 
 int main(int argc, char **argv) {
     int port = argc > 1 ? atoi(argv[1]) : 80;
-    int ls = socket(SOCK_TCP);
-    if (ls < 0) { dprintf(STDERR, "httpd: socket: %s\n", strerror(-ls)); return 1; }
-    int r = bind(ls, port);
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in addr;
+    socklen_t alen;
+    int r;
+    if (ls < 0) { dprintf(STDERR, "httpd: socket: %s\n", strerror(errno)); return 1; }
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((unsigned short)port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    r = bind(ls, (struct sockaddr *)&addr, sizeof(addr));
     if (r == 0) r = listen(ls, 8);
-    if (r < 0) { dprintf(STDERR, "httpd: port %d: %s\n", port, strerror(-r)); return 1; }
+    if (r < 0) { dprintf(STDERR, "httpd: port %d: %s\n", port, strerror(errno)); return 1; }
     printf("httpd: listening on port %d", port);
     if (port == 80) printf(" - open http://localhost:8080 in your browser");
     printf("\n");
 
     for (;;) {
-        struct sockaddr from;
-        int c = accept(ls, &from);
+        struct sockaddr_in from;
+        alen = sizeof(from);
+        int c = accept(ls, (struct sockaddr *)&from, &alen);
         while (waitpid(-1, NULL, WNOHANG) > 0) {}       /* прибрать закончивших помощников */
-        if (c < 0) { dprintf(STDERR, "httpd: accept: %s\n", strerror(-c)); sleep_ms(100); continue; }
+        if (c < 0) { dprintf(STDERR, "httpd: accept: %s\n", strerror(errno)); sleep_ms(100); continue; }
         char who[24], ips[16];
-        snprintf(who, sizeof(who), "%s:%u", ip_str(from.ip, ips), from.port);
+        snprintf(who, sizeof(who), "%s:%u", ip_str(ntohl(from.sin_addr.s_addr), ips), ntohs(from.sin_port));
         int pid = fork();
         if (pid == 0) {                                   /* помощник: обслужить и выйти */
             close(ls);

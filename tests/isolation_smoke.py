@@ -14,7 +14,12 @@ for cpus in [1,4]:
   run(b/'myfs',image,'put',b/'user/sh','/bin/sh');run(b/'myfs',image,'put',b/'isolation-check','/bin/isolation-check')
   log=b/f'isolation-{cpus}.log';log.write_text('')
   q=subprocess.Popen(['qemu-system-i386','-cpu','max','-smp',str(cpus),'-m','256M','-display','none','-no-reboot','-nic','none','-drive',f'format=raw,file={boot},index=0','-drive',f'format=raw,file={image},index=1','-serial',f'file:{log}','-monitor','stdio'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
-  def text():return re.sub(r'\x1b\[[0-9;?]*[A-Za-z]','',log.read_text(errors='replace')).replace('\r','')
+  def text():
+   try:content=log.read_text(errors='replace')
+   except OSError as error:
+    if error.errno!=61:raise
+    return ''  # transient WSL/Windows sharing while QEMU flushes the serial log
+   return re.sub(r'\x1b\[[0-9;?]*[A-Za-z]','',content).replace('\r','')
   def wait(marker,start=0):
    end=time.monotonic()+90
    while time.monotonic()<end:

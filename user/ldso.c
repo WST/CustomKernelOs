@@ -157,6 +157,29 @@ static Obj objs[MAX_OBJ];
 static int nobj;
 static Obj self_obj;
 static char *libpath;                      /* LD_LIBRARY_PATH, если окружение есть */
+static char err_store[160];
+static int err_set;
+static int opening;                        /* dlopen: ошибка возвращается, а не завершает процесс */
+
+static void note(const char *s) {
+    int i = 0;
+    while (s[i] && i < (int)sizeof(err_store) - 1) {
+        err_store[i] = s[i];
+        i++;
+    }
+    err_store[i] = 0;
+    err_set = 1;
+}
+
+/* 1 — вызывающий должен вернуться с ошибкой. Иначе процесс завершается. */
+static int boom(const char *s) {
+    if (opening) {
+        note(s);
+        return 1;
+    }
+    die(s);
+    return 1;
+}
 
 static unsigned elf_hash(const char *name) {
     unsigned h = 0, g;
@@ -175,16 +198,16 @@ static int is_elf(const unsigned char *b, unsigned sz) {
 }
 
 /* Теги-указатели храним уже с базой загрузки. */
-static void read_dynamic(Obj *o, unsigned dyn, unsigned end) {
+static int read_dynamic(Obj *o, unsigned dyn, unsigned end) {
     unsigned p;
-    if (!dyn || end < dyn || end - dyn < 8) die("bad dynamic section");
+    if (!dyn || end < dyn || end - dyn < 8) return boom("bad dynamic section");
     o->syment = 16;
     for (p = dyn; p + 8 <= end && rd32((unsigned char *)p) != DT_NULL; p += 8) {
         unsigned tag = rd32((unsigned char *)p);
         unsigned val = rd32((unsigned char *)(p + 4));
         unsigned ptr = val + o->bias;
         if (tag == DT_NEEDED) {
-            if (o->nneeded >= MAX_NEED) die("too many DT_NEEDED");
+            if (o->nneeded >= MAX_NEED) return boom("too many DT_NEEDED");
             o->needed[o->nneeded++] = (char *)(o->strtab ? o->strtab + val : 0);
             /* STRTAB может встретиться позже: смещение запомним, поправим вторым проходом. */
             if (!o->strtab) o->needed[o->nneeded - 1] = (char *)(unsigned)val;
@@ -214,6 +237,7 @@ static void read_dynamic(Obj *o, unsigned dyn, unsigned end) {
         if (o->soname && (unsigned)o->soname < o->strsz)
             o->soname = (char *)(o->strtab + (unsigned)o->soname);
     }
+    return 0;
 }
 
 static unsigned dyn_addr(const unsigned char *eh, unsigned bias, unsigned *end) {
@@ -446,17 +470,30 @@ static Obj *find_loaded(const char *name) {
     return 0;
 }
 
-static void load_needed(const char *name);
+static int load_needed(const char *name);
+static void drop_last(void);
 
 static Obj *map_library(const char *path) {
     unsigned sz = 0, span, phoff, phnum, i, dyn;
     unsigned char *file = read_whole(path, &sz);
     Obj *o;
-    if (!file || !is_elf(file, sz) || rd16(file + 16) != ET_DYN) die("not a shared library");
-    if (rd16(file + 42) != 32 || rd16(file + 44) == 0) die("bad program headers");
+    if (!file || !is_elf(file, sz) || rd16(file + 16) != ET_DYN) {
+        boom("not a shared library");
+        return 0;
+    }
+    if (rd16(file + 42) != 32 || rd16(file + 44) == 0) {
+        boom("bad program headers");
+        return 0;
+    }
     span = map_span(file);
-    if (!span) die("library has no segments");
-    if (nobj >= MAX_OBJ) die("too many libraries");
+    if (!span) {
+        boom("library has no segments");
+        return 0;
+    }
+    if (nobj >= MAX_OBJ) {
+        boom("too many libraries");
+        return 0;
+    }
     o = &objs[nobj++];
     o->map = map_anon(span);
     o->span = span;
@@ -473,28 +510,67 @@ static Obj *map_library(const char *path) {
         off = rd32(ph + 4);
         va = rd32(ph + 8);
         filesz = rd32(ph + 16);
-        if (off + filesz > sz) die("segment past end of file");
+        if (off + filesz > sz) {
+            boom("segment past end of file");
+            drop_last();
+            return 0;
+        }
         mem_copy(o->map + va, file + off, filesz);
     }
     {
         unsigned dend = 0;
         dyn = dyn_addr(o->map, o->bias, &dend);
-        if (!dyn) die("library has no dynamic section");
-        read_dynamic(o, dyn, dend);
+        if (!dyn || read_dynamic(o, dyn, dend)) {
+            if (!dyn) boom("library has no dynamic section");
+            drop_last();
+            return 0;
+        }
     }
-    if (!o->symtab || !o->strtab || !o->hash) die("library has no symbol hash");
+    if (!o->symtab || !o->strtab || !o->hash) {
+        boom("library has no symbol hash");
+        drop_last();
+        return 0;
+    }
     return o;
 }
 
-static void load_needed(const char *name) {
+static void drop_last(void) {
+    Obj *o;
+    unsigned char *p;
+    unsigned n;
+    if (nobj <= 0) return;
+    o = &objs[nobj - 1];
+    if (o->map && o->span && !o->pinned)
+        __syscall(SYS_MUNMAP, (int)o->map, (int)o->span);
+    p = (unsigned char *)o;
+    n = sizeof *o;
+    while (n--) *p++ = 0;
+    nobj--;
+}
+
+static int load_needed(const char *name) {
     char path[128];
     Obj *o;
-    int i;
-    if (!name || !name[0] || find_loaded(name)) return;
-    if (!locate(name, path, (int)sizeof(path))) die(name);
-    if (find_loaded(path)) return;
+    int i, from;
+    if (!name || !name[0] || find_loaded(name)) return 0;
+    if (!locate(name, path, (int)sizeof(path))) {
+        if (opening) {
+            note("library not found");
+            return -1;
+        }
+        die(name);
+    }
+    if (find_loaded(path)) return 0;
+    from = nobj;
     o = map_library(path);
-    for (i = 0; i < o->nneeded; i++) load_needed(o->needed[i]);
+    if (!o) return -1;
+    for (i = 0; i < o->nneeded; i++) {
+        if (load_needed(o->needed[i])) {
+            while (nobj > from) drop_last();
+            return -1;
+        }
+    }
+    return 0;
 }
 
 static void fill_mapped(Obj *o, unsigned char *eh, unsigned bias, int kind) {
@@ -599,31 +675,51 @@ int _start(unsigned *sp) {
 
 void *dlopen(const char *path, int flags) {
     Obj *o;
-    int i, from;
+    int i, from, failed;
     (void)flags;
+    err_set = 0;
     if (!path) return &objs[0];
     o = find_loaded(path);
     if (o) { if (o != &self_obj) o->refs++; return o; }
     from = nobj;
-    load_needed(path);
+    opening = 1;
+    failed = load_needed(path);
+    opening = 0;
+    if (failed) return 0;
     for (i = from; i < nobj; i++) relocate(&objs[i]);
     for (i = nobj; i-- > from; ) call_init(&objs[i]);
     o = find_loaded(path);
-    return o ? o : 0;
+    if (!o) note("library not found");
+    return o;
+}
+
+static void *lookup_named(int from, const char *name) {
+    unsigned addr = 0, size = 0;
+    int i;
+    for (i = from; i < nobj; i++)
+        if (find_in(&objs[i], name, &addr, &size)) return (void *)addr;
+    if (find_in(&self_obj, name, &addr, &size)) return (void *)addr;
+    note("symbol not found");
+    return 0;
 }
 
 void *dlsym(void *handle, const char *name) {
     unsigned addr = 0, size = 0;
-    int i;
-    if (!name) return 0;
-    if (!handle) {
-        for (i = 0; i < nobj; i++)
-            if (find_in(&objs[i], name, &addr, &size)) return (void *)addr;
-        if (find_in(&self_obj, name, &addr, &size)) return (void *)addr;
+    if (!name) {
+        note("symbol not found");
         return 0;
     }
+    if (!handle || handle == (void *)-1)
+        return lookup_named(handle ? 1 : 0, name);
     if (find_in(handle, name, &addr, &size)) return (void *)addr;
+    note("symbol not found");
     return 0;
+}
+
+char *dlerror(void) {
+    if (!err_set) return 0;
+    err_set = 0;
+    return err_store;
 }
 
 int dlclose(void *handle) {
@@ -638,3 +734,8 @@ int dlclose(void *handle) {
     o->symtab = o->hash = o->strtab = 0;
     return 0;
 }
+
+void *_dl_open(const char *path, int flags) { return dlopen(path, flags); }
+void *_dl_sym(void *handle, const char *name) { return dlsym(handle, name); }
+int _dl_close(void *handle) { return dlclose(handle); }
+char *_dl_error(void) { return dlerror(); }

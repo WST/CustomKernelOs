@@ -27,6 +27,10 @@ struct tm {
     int tm_isdst;
 };
 
+#define CLOCK_REALTIME  0
+#define CLOCK_MONOTONIC 1
+int clock_gettime(int clock_id, struct timespec *ts);
+int nanosleep(const struct timespec *req, struct timespec *rem);
 time_t time(time_t *tloc);
 double difftime(time_t a, time_t b);
 clock_t clock(void);

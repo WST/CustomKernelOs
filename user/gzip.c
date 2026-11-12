@@ -1,6 +1,5 @@
 /* gzip — системный архиватор формата RFC 1952.
- * Поток внутри — deflate (RFC 1951): на запись фиксированные коды Хаффмана
- * либо несжатые блоки, на чтение ещё и динамические коды (их пишет GNU gzip).
+ * Сжатый поток — deflate из libz. Здесь только заголовок gzip: имя, CRC и длина.
  * Флаги совпадают с GNU gzip. Стандартный ввод и вывод пока не поддерживаются:
  * -c и запуск без имён файлов завершаются ошибкой.
  *
@@ -10,206 +9,13 @@
 #include "stdlib.h"
 #include "sys/stat.h"
 #include "dirent.h"
+#include "zlib.h"
 
-#define WSIZE     32768
-#define HASH_SIZE 32768
-#define MAX_MATCH 258
 #define OUT_MAX   (9 * 1024 * 1024)
-
-static const unsigned short len_base[29] = {
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
-    35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258
-};
-static const unsigned char len_extra[29] = {
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
-    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0
-};
-static const unsigned short dist_base[30] = {
-    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
-    257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577
-};
-static const unsigned char dist_extra[30] = {
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6,
-    7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13
-};
-static const unsigned char clen_order[19] = {
-    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
-};
-
-static unsigned crc_table[256];
-static int crc_ready;
-static unsigned gz_head[HASH_SIZE];
-static unsigned gz_prev[WSIZE];
-static unsigned short lit_code[288];
-static unsigned char lit_nbits[288];
-static unsigned short dist_code[30];
-static unsigned char dist_nbits[30];
-static int codes_ready;
 
 static int opt_decomp, opt_force, opt_keep, opt_list, opt_name, opt_noname;
 static int opt_quiet, opt_recur, opt_test, opt_verbose, opt_stdout, opt_level;
 static const char *opt_suffix = ".gz";
-
-static void crc_init(void) {
-    unsigned i, c, bit;
-    if (crc_ready) return;
-    for (i = 0; i < 256; i++) {
-        c = i;
-        for (bit = 0; bit < 8; bit++) c = (c & 1) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        crc_table[i] = c;
-    }
-    crc_ready = 1;
-}
-
-static unsigned crc32_bytes(const unsigned char *p, int n) {
-    unsigned crc = 0xFFFFFFFFu;
-    int i;
-    crc_init();
-    for (i = 0; i < n; i++) crc = crc_table[(crc ^ p[i]) & 255] ^ (crc >> 8);
-    return ~crc;
-}
-
-/* ------------------------------------------------------- битовый поток */
-
-struct br {
-    const unsigned char *in;
-    int len, pos;
-    unsigned buf;
-    int bits;
-    int err;
-};
-
-static int getbits(struct br *b, int n) {
-    unsigned v;
-    if (b->err || n < 0 || n > 16) { b->err = 1; return 0; }
-    while (b->bits < n) {
-        if (b->pos >= b->len) { b->err = 1; return 0; }
-        b->buf |= (unsigned)b->in[b->pos++] << b->bits;
-        b->bits += 8;
-    }
-    v = b->buf & ((1u << n) - 1u);
-    b->buf >>= n;
-    b->bits -= n;
-    return (int)v;
-}
-
-/* Отбросить хвост текущего байта (заголовок stored-блока на границе байта). */
-static void align_byte(struct br *b) {
-    int rem = b->bits & 7;
-    if (rem) getbits(b, rem);
-}
-
-struct bout {
-    unsigned char *p;
-    int n, cap, bits, err;
-    unsigned acc;
-};
-
-static void put_byte(struct bout *o, unsigned char c) {
-    if (o->err) return;
-    if (o->n >= o->cap) {
-        int nc = o->cap ? o->cap * 2 : 256;
-        unsigned char *np;
-        if (nc < o->n + 1) nc = o->n + 1;
-        np = realloc(o->p, (size_t)nc);
-        if (!np) { o->err = 1; return; }
-        o->p = np;
-        o->cap = nc;
-    }
-    o->p[o->n++] = c;
-}
-
-static void putbit(struct bout *o, int bit) {
-    if (o->err) return;
-    o->acc |= (unsigned)(bit & 1) << o->bits;
-    if (++o->bits == 8) { put_byte(o, (unsigned char)o->acc); o->acc = 0; o->bits = 0; }
-}
-
-static void put_msb(struct bout *o, unsigned v, int n) {
-    int i;
-    for (i = n - 1; i >= 0; i--) putbit(o, (v >> i) & 1);
-}
-
-static void put_lsb(struct bout *o, unsigned v, int n) {
-    int i;
-    for (i = 0; i < n; i++) putbit(o, (v >> i) & 1);
-}
-
-static void bout_flush(struct bout *o) {
-    if (o->bits) put_byte(o, (unsigned char)o->acc);
-    o->acc = 0;
-    o->bits = 0;
-}
-
-/* ------------------------------------------------------- Хаффман */
-
-static int construct(short *count, short *symbol, const unsigned char *length, int n) {
-    int len, sym, left;
-    short offs[16];
-    for (len = 0; len <= 15; len++) count[len] = 0;
-    for (sym = 0; sym < n; sym++) {
-        if (length[sym] > 15) return -1;
-        count[length[sym]]++;
-    }
-    if (count[0] == n) return 0;
-    left = 1;
-    for (len = 1; len <= 15; len++) {
-        left <<= 1;
-        left -= count[len];
-        if (left < 0) return -1;
-    }
-    offs[1] = 0;
-    for (len = 1; len < 15; len++) offs[len + 1] = (short)(offs[len] + count[len]);
-    for (sym = 0; sym < n; sym++)
-        if (length[sym]) symbol[offs[length[sym]]++] = (short)sym;
-    return left;
-}
-
-static int decode(struct br *b, const short *count, const short *symbol) {
-    int len, code = 0, first = 0, index = 0;
-    for (len = 1; len <= 15; len++) {
-        int count_len;
-        code |= getbits(b, 1);
-        if (b->err) return -1;
-        count_len = count[len];
-        if (code - count_len < first) return symbol[index + (code - first)];
-        index += count_len;
-        first += count_len;
-        first <<= 1;
-        code <<= 1;
-    }
-    return -1;
-}
-
-static void codes_from_lengths(unsigned short *code, unsigned char *nbits, const unsigned char *len, int n) {
-    int count[16], nextc[16], i, bits, c;
-    memset(count, 0, sizeof count);
-    for (i = 0; i < n; i++) if (len[i]) count[len[i]]++;
-    c = 0;
-    for (bits = 1; bits <= 15; bits++) {
-        c = (c + count[bits - 1]) << 1;
-        nextc[bits] = c;
-    }
-    for (i = 0; i < n; i++) {
-        nbits[i] = len[i];
-        code[i] = 0;
-        if (len[i]) code[i] = (unsigned short)nextc[len[i]]++;
-    }
-}
-
-static void codes_init(void) {
-    unsigned char llen[288], dlen[30];
-    int i;
-    if (codes_ready) return;
-    for (i = 0; i < 144; i++) llen[i] = 8;
-    for (; i < 256; i++) llen[i] = 9;
-    for (; i < 280; i++) llen[i] = 7;
-    for (; i < 288; i++) llen[i] = 8;
-    for (i = 0; i < 30; i++) dlen[i] = 5;
-    codes_from_lengths(lit_code, lit_nbits, llen, 288);
-    codes_from_lengths(dist_code, dist_nbits, dlen, 30);
-    codes_ready = 1;
-}
 
 struct grow {
     unsigned char *p;
@@ -236,279 +42,58 @@ static int grow_need(struct grow *g, int add) {
     return 0;
 }
 
-static int emit_lit(struct bout *o, int sym) {
-    if (sym < 0 || sym > 287 || !lit_nbits[sym]) return -1;
-    put_msb(o, lit_code[sym], lit_nbits[sym]);
-    return o->err ? -1 : 0;
+/* Сырой deflate: контейнер gzip собирается вокруг него. */
+static unsigned char *raw_deflate(const unsigned char *raw, int n, int level, int *out_n) {
+    z_stream s;
+    unsigned char *def;
+    uLong bound;
+    int ret;
+    memset(&s, 0, sizeof s);
+    if (level < 1) level = 6;
+    if (deflateInit2(&s, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) return NULL;
+    bound = deflateBound(&s, (uLong)n);
+    def = malloc(bound ? bound : 1);
+    if (!def) { deflateEnd(&s); return NULL; }
+    s.next_in = (Bytef *)raw;
+    s.avail_in = (uInt)n;
+    s.next_out = def;
+    s.avail_out = (uInt)bound;
+    ret = deflate(&s, Z_FINISH);
+    *out_n = (int)s.total_out;
+    deflateEnd(&s);
+    if (ret != Z_STREAM_END) { free(def); return NULL; }
+    return def;
 }
 
-static int emit_match(struct bout *o, int length, int dist) {
-    int i, ls, ds;
-    if (length < 3 || length > 258 || dist < 1 || dist > WSIZE) return -1;
-    ls = 285;
-    for (i = 0; i < 29; i++) {
-        int max = len_base[i] + ((1 << len_extra[i]) - 1);
-        if (length <= max) { ls = 257 + i; break; }
-    }
-    if (emit_lit(o, ls) < 0) return -1;
-    put_lsb(o, (unsigned)(length - len_base[ls - 257]), len_extra[ls - 257]);
-    ds = 29;
-    for (i = 0; i < 30; i++) {
-        int max = dist_base[i] + ((1 << dist_extra[i]) - 1);
-        if (dist <= max) { ds = i; break; }
-    }
-    put_msb(o, dist_code[ds], dist_nbits[ds]);
-    put_lsb(o, (unsigned)(dist - dist_base[ds]), dist_extra[ds]);
-    return o->err ? -1 : 0;
-}
-
-/* ------------------------------------------------------- распаковка */
-
-static int inflate_block(struct br *b, struct grow *g, int *bfinal) {
-    int type, len, nlen, sym;
-    short lcount[16], lsym[288], dcount[16], dsym[32];
-    unsigned char llen[288], dlen[32], clen[19];
-    int nlit, ndist, nclen, i, nlen_tot;
-
-    *bfinal = getbits(b, 1);
-    type = getbits(b, 2);
-    if (b->err) return -1;
-    if (type == 3) return -1;
-
-    if (type == 0) {
-        align_byte(b);
-        len = getbits(b, 16);
-        nlen = getbits(b, 16);
-        if (b->err || nlen != (len ^ 0xFFFF)) return -1;
-        if (grow_need(g, len) < 0) return -1;
-        while (b->bits >= 8 && len > 0) {
-            g->p[g->n++] = (unsigned char)(b->buf & 255);
-            b->buf >>= 8;
-            b->bits -= 8;
-            len--;
-        }
-        if (b->pos + len > b->len) { b->err = 1; return -1; }
-        if (len) {
-            memcpy(g->p + g->n, b->in + b->pos, (size_t)len);
-            g->n += len;
-            b->pos += len;
-        }
-        return 0;
-    }
-
-    if (type == 1) {
-        static short fcount[16], fsym[288], fdcount[16], fdsym[32];
-        static int ready;
-        if (!ready) {
-            unsigned char fl[288], fd[32];
-            for (i = 0; i < 144; i++) fl[i] = 8;
-            for (; i < 256; i++) fl[i] = 9;
-            for (; i < 280; i++) fl[i] = 7;
-            for (; i < 288; i++) fl[i] = 8;
-            for (i = 0; i < 32; i++) fd[i] = 5;
-            if (construct(fcount, fsym, fl, 288) < 0) return -1;
-            if (construct(fdcount, fdsym, fd, 32) < 0) return -1;
-            ready = 1;
-        }
-        memcpy(lcount, fcount, sizeof lcount);
-        memcpy(lsym, fsym, sizeof lsym);
-        memcpy(dcount, fdcount, sizeof dcount);
-        memcpy(dsym, fdsym, sizeof dsym);
-    } else {
-        memset(clen, 0, sizeof clen);
-        memset(llen, 0, sizeof llen);
-        memset(dlen, 0, sizeof dlen);
-        nlit = getbits(b, 5) + 257;
-        ndist = getbits(b, 5) + 1;
-        nclen = getbits(b, 4) + 4;
-        if (b->err || nlit > 286 || ndist > 32 || nclen > 19) return -1;
-        for (i = 0; i < nclen; i++) clen[clen_order[i]] = (unsigned char)getbits(b, 3);
-        if (b->err || construct(lcount, lsym, clen, 19) < 0) return -1;
-        nlen_tot = nlit + ndist;
-        i = 0;
-        while (i < nlen_tot) {
-            int rep, what;
-            sym = decode(b, lcount, lsym);
-            if (sym < 0 || sym > 18) return -1;
-            if (sym < 16) {
-                if (i < nlit) llen[i] = (unsigned char)sym;
-                else dlen[i - nlit] = (unsigned char)sym;
-                i++;
-                continue;
-            }
-            if (sym == 16) {
-                if (i == 0) return -1;
-                what = i <= nlit ? llen[i - 1] : dlen[i - nlit - 1];
-                rep = 3 + getbits(b, 2);
-            } else if (sym == 17) {
-                what = 0;
-                rep = 3 + getbits(b, 3);
-            } else {
-                what = 0;
-                rep = 11 + getbits(b, 7);
-            }
-            if (b->err || i + rep > nlen_tot) return -1;
-            while (rep--) {
-                if (i < nlit) llen[i] = (unsigned char)what;
-                else dlen[i - nlit] = (unsigned char)what;
-                i++;
-            }
-        }
-        if (construct(lcount, lsym, llen, nlit) < 0) return -1;
-        if (construct(dcount, dsym, dlen, ndist) < 0) return -1;
-    }
-
+static int raw_inflate(const unsigned char *in, int n, struct grow *g, int *used) {
+    z_stream s;
+    int ret;
+    memset(&s, 0, sizeof s);
+    *used = 0;
+    if (inflateInit2(&s, -15) != Z_OK) { g->err = 1; return -1; }
+    s.next_in = (Bytef *)in;
+    s.avail_in = (uInt)n;
     for (;;) {
-        sym = decode(b, lcount, lsym);
-        if (sym < 0 || sym > 285) return -1;
-        if (sym < 256) {
-            if (grow_need(g, 1) < 0) return -1;
-            g->p[g->n++] = (unsigned char)sym;
-            continue;
-        }
-        if (sym == 256) return 0;
-        {
-            int length = len_base[sym - 257] + getbits(b, len_extra[sym - 257]);
-            int ds = decode(b, dcount, dsym);
-            int dist, j;
-            if (ds < 0 || ds > 29 || b->err) return -1;
-            dist = dist_base[ds] + getbits(b, dist_extra[ds]);
-            if (b->err || dist < 1 || dist > g->n || length < 3) return -1;
-            if (grow_need(g, length) < 0) return -1;
-            for (j = 0; j < length; j++) g->p[g->n + j] = g->p[g->n - dist + j];
-            g->n += length;
-        }
+        uLong in_before, out_before;
+        int room;
+        if (g->n >= OUT_MAX) { g->err = 1; ret = Z_DATA_ERROR; break; }
+        room = OUT_MAX - g->n;
+        if (room > 8192) room = 8192;
+        if (grow_need(g, room) < 0) { ret = Z_MEM_ERROR; break; }
+        s.next_out = g->p + g->n;
+        s.avail_out = (uInt)(g->cap - g->n);
+        in_before = s.total_in;
+        out_before = s.total_out;
+        ret = inflate(&s, Z_NO_FLUSH);
+        g->n = (int)s.total_out;
+        if (ret == Z_STREAM_END) break;
+        if (ret != Z_OK && ret != Z_BUF_ERROR) break;
+        if (s.total_in == in_before && s.total_out == out_before) { ret = Z_DATA_ERROR; break; }
     }
-}
-
-static int inflate(const unsigned char *in, int n, struct grow *g) {
-    struct br b;
-    int final = 0;
-    memset(&b, 0, sizeof b);
-    b.in = in;
-    b.len = n;
-    while (!final) {
-        if (inflate_block(&b, g, &final) < 0) return -1;
-    }
-    /* Непрочитанные биты последнего байта — заполнение. Следующий байт уже в pos. */
-    b.buf = 0;
-    b.bits = 0;
-    return b.pos;
-}
-
-/* ------------------------------------------------------- упаковка */
-
-static unsigned hash3(const unsigned char *s) {
-    return (((unsigned)s[0] << 10) ^ ((unsigned)s[1] << 5) ^ (unsigned)s[2]) & (HASH_SIZE - 1);
-}
-
-static void insert_hash(const unsigned char *in, int n, int pos) {
-    unsigned h;
-    if (pos < 0 || pos + 2 >= n) return;
-    h = hash3(in + pos);
-    gz_prev[pos & (WSIZE - 1)] = gz_head[h];
-    gz_head[h] = (unsigned)pos + 1;
-}
-
-static int deflate_huff(const unsigned char *in, int n, int level, struct bout *o) {
-    static const int chains[10] = { 0, 4, 8, 16, 32, 64, 128, 256, 1024, 4096 };
-    static const int nices[10] = { 0, 8, 16, 32, 48, 64, 128, 128, 258, 258 };
-    int pos = 0, chain, nice;
-    if (level < 1) level = 1;
-    if (level > 9) level = 9;
-    chain = chains[level];
-    nice = nices[level];
-    codes_init();
-    memset(gz_head, 0, sizeof gz_head);
-    putbit(o, 1);
-    putbit(o, 1);
-    putbit(o, 0);
-    while (pos < n) {
-        int len = 0, dist = 0, k;
-        if (pos + 3 <= n) {
-            unsigned cur;
-            int steps, max, best = 0, best_d = 0;
-            insert_hash(in, n, pos);
-            cur = gz_prev[pos & (WSIZE - 1)];
-            max = n - pos;
-            if (max > MAX_MATCH) max = MAX_MATCH;
-            steps = chain;
-            while (cur && steps--) {
-                int p = (int)cur - 1;
-                int d = pos - p;
-                int m = 0;
-                if (p < 0 || d <= 0 || d > WSIZE) break;
-                while (m < max && in[p + m] == in[pos + m]) m++;
-                if (m >= 3 && m > best) { best = m; best_d = d; }
-                if (best >= nice || best == max) break;
-                cur = gz_prev[p & (WSIZE - 1)];
-            }
-            len = best;
-            dist = best_d;
-        }
-        if (len >= 3) {
-            if (emit_match(o, len, dist) < 0) return -1;
-            for (k = 1; k < len; k++) insert_hash(in, n, pos + k);
-            pos += len;
-        } else {
-            if (emit_lit(o, in[pos]) < 0) return -1;
-            pos++;
-        }
-    }
-    if (emit_lit(o, 256) < 0) return -1;
-    bout_flush(o);
-    return o->err ? -1 : 0;
-}
-
-static int deflate_stored(const unsigned char *in, int n, struct bout *o) {
-    int off = 0;
-    while (off < n) {
-        int chunk = n - off;
-        int last;
-        if (chunk > 65535) chunk = 65535;
-        last = off + chunk == n;
-        putbit(o, last);
-        putbit(o, 0);
-        putbit(o, 0);
-        bout_flush(o);
-        put_byte(o, (unsigned char)(chunk & 255));
-        put_byte(o, (unsigned char)((chunk >> 8) & 255));
-        put_byte(o, (unsigned char)((~chunk) & 255));
-        put_byte(o, (unsigned char)(((~chunk) >> 8) & 255));
-        if (o->err) return -1;
-        if (o->n > OUT_MAX - chunk) return -1;
-        if (o->n + chunk > o->cap) {
-            unsigned char *np = realloc(o->p, (size_t)(o->n + chunk));
-            if (!np) return -1;
-            o->p = np;
-            o->cap = o->n + chunk;
-        }
-        memcpy(o->p + o->n, in + off, (size_t)chunk);
-        o->n += chunk;
-        off += chunk;
-    }
-    if (n == 0) {
-        putbit(o, 1);
-        putbit(o, 0);
-        putbit(o, 0);
-        bout_flush(o);
-        put_byte(o, 0); put_byte(o, 0); put_byte(o, 0xFF); put_byte(o, 0xFF);
-    }
-    return o->err ? -1 : 0;
-}
-
-static unsigned char *deflate(const unsigned char *in, int n, int level, int *out_n) {
-    struct bout huff, stored;
-    memset(&huff, 0, sizeof huff);
-    memset(&stored, 0, sizeof stored);
-    if (n && deflate_huff(in, n, level, &huff) == 0 && !huff.err && huff.n < n) {
-        *out_n = huff.n;
-        return huff.p;
-    }
-    free(huff.p);
-    if (deflate_stored(in, n, &stored) < 0 || stored.err) { free(stored.p); return NULL; }
-    *out_n = stored.n;
-    return stored.p;
+    *used = (int)s.total_in;
+    inflateEnd(&s);
+    if (ret != Z_STREAM_END) { g->err = 1; return -1; }
+    return 0;
 }
 
 /* ------------------------------------------------------- контейнер gzip */
@@ -527,7 +112,7 @@ static unsigned char *gzip_wrap(const unsigned char *raw, int n, const char *pat
     int dn, off, i;
     if (save_name && base[0]) namelen = (int)strlen(base);
     if (namelen > 255) namelen = 0;
-    def = deflate(raw, n, level, &dn);
+    def = raw_deflate(raw, n, level, &dn);
     if (!def) return NULL;
     out = malloc((size_t)dn + (size_t)namelen + 32);
     if (!out) { free(def); return NULL; }
@@ -545,7 +130,7 @@ static unsigned char *gzip_wrap(const unsigned char *raw, int n, const char *pat
     memcpy(out + off, def, (size_t)dn);
     off += dn;
     free(def);
-    crc = crc32_bytes(raw, n);
+    crc = (unsigned)crc32(0, raw ? raw : (const Bytef *)"", (uInt)n);
     isize = (unsigned)n;
     for (i = 0; i < 4; i++) out[off++] = (unsigned char)((crc >> (8 * i)) & 255);
     for (i = 0; i < 4; i++) out[off++] = (unsigned char)((isize >> (8 * i)) & 255);
@@ -699,11 +284,12 @@ static unsigned char *gzip_unwrap_n(const unsigned char *in, int n, char *saved,
             pos += 2;
         }
         memset(&part, 0, sizeof part);
-        used = inflate(in + pos, n - pos, &part);
-        if (used < 0 || part.err) { free(part.p); free(g.p); *err = "invalid compressed data"; return NULL; }
+        if (raw_inflate(in + pos, n - pos, &part, &used) < 0 || part.err) {
+            free(part.p); free(g.p); *err = "invalid compressed data"; return NULL;
+        }
         if (pos + used + 8 > n) { free(part.p); free(g.p); *err = "unexpected end of file"; return NULL; }
         want = rd_u32(in + pos + used);
-        got = crc32_bytes(part.p ? part.p : (const unsigned char *)"", part.n);
+        got = (unsigned)crc32(0, part.p ? part.p : (const Bytef *)"", (uInt)part.n);
         if (want != got) { free(part.p); free(g.p); *err = "crc error"; return NULL; }
         if ((int)rd_u32(in + pos + used + 4) != part.n) {
             free(part.p); free(g.p); *err = "length error"; return NULL;

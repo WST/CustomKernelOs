@@ -21,6 +21,7 @@
 #include "vga.h"
 #include "gdt.h"
 #include "paging.h"
+#include "pmm.h"
 #include "file.h"
 #include "fb.h"
 #include "syscall.h"
@@ -110,6 +111,26 @@ static void close_all_files(struct task *t) {
     }
 }
 
+/* mmap-стек отсоединённого потока. Чужой стек (куча, не mmap) не трогаем. */
+static void release_user_stack(struct task *t) {
+    u32 addr = t->user_stack_base, len = t->user_stack_size, end, va, n = 0;
+    struct task *owner;
+    if (!addr || !len || (addr & (PAGE_SIZE - 1)) || addr < MMAP_BASE) return;
+    end = (len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    if (end < len || addr + end < addr || addr + end > MMAP_END) return;
+    t->user_stack_base = 0;
+    t->user_stack_size = 0;
+    t->guard_va = 0;
+    for (va = addr; va < addr + end; va += PAGE_SIZE) {
+        u32 frame = vmm_unmap_in(t->page_dir, va);
+        if (!frame) continue;
+        pmm_free(frame);
+        n++;
+    }
+    owner = task_process(t);
+    if (owner && owner->user_pages >= n) owner->user_pages -= n;
+}
+
 /* Превратить задачу в зомби: стек и память освободит reap().
  * Файлы закрываем сразу — чтобы, например, читатель канала увидел конец. */
 static void make_zombie(struct task *t, int code) {
@@ -131,6 +152,10 @@ static void make_zombie(struct task *t, int code) {
     fb_release(t->id);              /* если программа захватила экран — вернуть консоль */
     t->exit_code = code;
     t->state = TASK_ZOMBIE;
+    if (t->detached) {
+        release_user_stack(t);
+        t->keep_zombie = false;
+    }
     if (!process_alive(p)) close_all_files(p);
     /* A dead joiner cannot retain another thread forever. */
     for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && tasks[i]->joiner == t->id) tasks[i]->joiner=0;
@@ -456,6 +481,7 @@ int task_thread_join(u32 tid, int *code) {
     for (;;) {
         struct task *t=task_by_id(tid);
         if (!t || !t->leader || t->leader != task_process(current)) { irq_restore(f); return -ESRCH; }
+        if (t->detached) { irq_restore(f); return -EINVAL; }
         if (t==current || (t->joiner && t->joiner != current->id)) { irq_restore(f); return -EBUSY; }
         t->joiner=current->id;
         /* The outgoing CPU must have stopped using the thread's user stack. */
@@ -470,6 +496,32 @@ int task_thread_join(u32 tid, int *code) {
         task_wait_timeout(t,1);
     }
 }
+int task_thread_detach(u32 tid) {
+    u32 f = irq_save();
+    struct task *thr = task_by_id(tid);
+    if (!thr || !thr->leader || thr->leader != task_process(current)) { irq_restore(f); return -ESRCH; }
+    if (thr->detached || thr->joiner) { irq_restore(f); return -EINVAL; }
+    thr->detached = true;
+    if (thr->state == TASK_ZOMBIE) {
+        release_user_stack(thr);
+        thr->keep_zombie = false;
+    }
+    irq_restore(f);
+    return 0;
+}
+
+int task_thread_set_stack(u32 tid, u32 base, u32 len) {
+    u32 f = irq_save();
+    struct task *thr = task_by_id(tid);
+    if (!thr || !thr->leader || thr->leader != task_process(current)) { irq_restore(f); return -ESRCH; }
+    if (!base || (base & (PAGE_SIZE - 1)) || base < MMAP_BASE || !len ||
+        base + len < base || base + len > MMAP_END) { irq_restore(f); return -EINVAL; }
+    thr->user_stack_base = base;
+    thr->user_stack_size = len;
+    irq_restore(f);
+    return 0;
+}
+
 void task_set_pgid(struct task *p, u32 pgid) {
     for (int i=0; i<MAX_TASKS; i++) if (tasks[i] && task_process(tasks[i])==p) tasks[i]->pgid=pgid;
 }
@@ -621,6 +673,19 @@ void task_wakeup(void *chan) {
         if (t && t->state == TASK_BLOCKED && t->wait_chan == chan) {
             t->state = TASK_READY;
             smp_wake(t->cpu);
+        }
+    }
+    irq_restore(f);
+}
+
+void task_wake_one(void *chan) {
+    u32 f = irq_save();
+    for (int i = 0; i < MAX_TASKS; i++) {
+        struct task *t = tasks[i];
+        if (t && t->state == TASK_BLOCKED && t->wait_chan == chan) {
+            t->state = TASK_READY;
+            smp_wake(t->cpu);
+            break;
         }
     }
     irq_restore(f);

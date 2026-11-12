@@ -8,6 +8,7 @@
 #define F_GETFL 3
 #define F_SETFL 4
 #define FD_CLOEXEC 1
+#define O_NONBLOCK 04000
 
 int fcntl(int fd, int cmd, ...);
 #endif
