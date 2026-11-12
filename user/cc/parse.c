@@ -1673,26 +1673,31 @@ static Obj *find_func(char *name) {
 }
 
 static Token *function(Token *tok, Type *basety, VarAttr *attr) {
-    Type *ty = declarator(&tok, tok, basety);
-    if (!ty->name) error_tok(tok, "function name omitted");
-    char *name = get_ident(ty->name);
+    Type *ty;
+    Obj *fn = NULL;
+    for (;;) {
+        ty = declarator(&tok, tok, basety);
+        if (!ty->name) error_tok(tok, "function name omitted");
+        char *name = get_ident(ty->name);
 
-    Obj *fn = find_func(name);
-    if (fn) {
-        if (!fn->is_function) error_tok(tok, "redeclared as a different kind of symbol");
-        if (fn->is_definition && equal(tok, "{")) error_tok(tok, "redefinition of %s", name);
-        if (!fn->ty->is_prototyped || equal(tok, "{")) fn->ty = ty;
-    } else {
-        fn = new_gvar(name, ty);
-        fn->is_function = true;
-        fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
-        if (fn->is_static) fn->name = static_name(name);
-        fn->is_definition = false;
+        fn = find_func(name);
+        if (fn) {
+            if (!fn->is_function) error_tok(tok, "redeclared as a different kind of symbol");
+            if (fn->is_definition && equal(tok, "{")) error_tok(tok, "redefinition of %s", name);
+            if (!fn->ty->is_prototyped || equal(tok, "{")) fn->ty = ty;
+        } else {
+            fn = new_gvar(name, ty);
+            fn->is_function = true;
+            fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
+            if (fn->is_static) fn->name = static_name(name);
+            fn->is_definition = false;
+        }
+        fn->tok = ty->name;
+        fn->is_definition = fn->is_definition || equal(tok, "{");
+
+        if (consume(&tok, tok, ";")) return tok;
+        if (!consume(&tok, tok, ",")) break;
     }
-    fn->tok = ty->name;
-    fn->is_definition = fn->is_definition || equal(tok, "{");
-
-    if (consume(&tok, tok, ";")) return tok;
 
     current_fn = fn;
     locals = NULL;

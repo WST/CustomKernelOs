@@ -237,6 +237,12 @@ static void round_to_float(void) {
     sub_esp(4); E("D9 1C 24"); E("D9 04 24"); add_esp(4);     /* fstp dword [esp]; fld dword [esp] */
 }
 
+/* x87 считает в 80 битах. Каждая операция должна округляться к типу Си,
+ * иначе x+2^52-2^52 не отбрасывает дробную часть и floor из musl ломается. */
+static void round_to_double(void) {
+    sub_esp(8); E("DD 1C 24"); E("DD 04 24"); add_esp(8);     /* fstp qword [esp]; fld qword [esp] */
+}
+
 static void float_to_int(int wide) {
     sub_esp(12);
     E("D9 3C 24");                                              /* fnstcw [esp] */
@@ -285,6 +291,7 @@ static void gen_cast(Type *from, Type *to) {
             E("89 04 24 89 54 24 04 DF 2C 24");                 /* mov [esp], eax; mov [esp+4], edx; fild qword */
             add_esp(8);
             if (t == F32) round_to_float();
+            else round_to_double();
             return;
         }
         if (to->kind == TY_BOOL) { cmp_zero(from); E("0F 95 C0 0F B6 C0"); return; }
@@ -768,6 +775,8 @@ static void gen_expr(Node *node) {
         default: error_tok(node->tok, "invalid expression");
         }
         pop_double_cmp();
+        if (node->ty->kind == TY_FLOAT) round_to_float();
+        else round_to_double();
         return;
     }
 

@@ -197,24 +197,14 @@ static bool convert_int(Token *tok) {
     return true;
 }
 
+#ifndef CC_HOST
+double strtod(const char *nptr, char **end);
+#endif
+
+/* Десятичная дробь через strtod: поразрядное умножение на 0.1 ошибается на
+ * несколько ulp, и 1/DBL_EPSILON перестаёт быть степенью двойки. */
 static double parse_double(char *p, char **end) {
-    double v = 0;
-    while (isdigit(*p)) v = v * 10 + (*p++ - '0');
-    if (*p == '.') {
-        p++;
-        double f = 0.1;
-        while (isdigit(*p)) { v += (*p++ - '0') * f; f /= 10; }
-    }
-    if (*p == 'e' || *p == 'E') {
-        p++;
-        int sign = 1, e = 0;
-        if (*p == '+') p++;
-        else if (*p == '-') { sign = -1; p++; }
-        while (isdigit(*p)) e = e * 10 + (*p++ - '0');
-        while (e--) v = sign > 0 ? v * 10 : v / 10;
-    }
-    *end = p;
-    return v;
+    return strtod(p, end);
 }
 
 static int hex_digit(int c) {
