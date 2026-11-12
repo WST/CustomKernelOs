@@ -542,7 +542,10 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
             mem->ty = declarator(&tok, tok, basety);
             mem->name = mem->ty->name;
             mem->idx = idx++;
-            if (equal(tok, ":")) error_tok(tok, "bit fields are not supported");
+            if (consume(&tok, tok, ":")) {
+                mem->is_bitfield = true;
+                mem->bit_width = const_expr(&tok, tok);
+            }
             cur = cur->next = mem;
         }
     }
@@ -552,6 +555,59 @@ static void struct_members(Token **rest, Token *tok, Type *ty) {
     }
     *rest = tok->next;
     ty->members = head.next;
+}
+
+/* Соседние битовые поля одного типа пакуются в ячейку этого типа.
+ * Нулевая ширина закрывает ячейку и выравнивает следующее поле. */
+static void layout_record(Type *ty, bool is_union, Token *tok) {
+    int offset = 0, max_end = 0, bit_end = -1, unit = 0;
+    for (Member *mem = ty->members; mem; mem = mem->next) {
+        if (mem->ty->size < 0) error_tok(mem->name ? mem->name : tok, "incomplete member type");
+        if (!mem->is_bitfield) {
+            bit_end = -1;
+            if (is_union) {
+                mem->offset = 0;
+                if (max_end < mem->ty->size) max_end = mem->ty->size;
+            } else {
+                offset = align_to(offset, mem->ty->align);
+                mem->offset = offset;
+                offset += mem->ty->size;
+                if (max_end < offset) max_end = offset;
+            }
+            if (ty->align < mem->ty->align) ty->align = mem->ty->align;
+            continue;
+        }
+        int usz = mem->ty->size, ual = mem->ty->align, width = mem->bit_width;
+        if (!is_integer(mem->ty) || usz < 1 || usz > 4)
+            error_tok(mem->name ? mem->name : tok, "invalid bit field type");
+        if (width < 0 || width > usz * 8)
+            error_tok(mem->name ? mem->name : tok, "invalid bit field width");
+        if (width == 0) {
+            int base = bit_end < 0 ? offset : (bit_end + 7) / 8;
+            base = align_to(base, ual);
+            bit_end = -1;
+            mem->offset = is_union ? 0 : base;
+            if (!is_union) offset = base;
+            if (max_end < mem->offset) max_end = mem->offset;
+            if (ty->align < ual) ty->align = ual;
+            continue;
+        }
+        int boundary = usz * 8, start;
+        if (bit_end < 0 || unit != usz || (bit_end % boundary) + width > boundary) {
+            int base = bit_end < 0 ? offset : (bit_end + 7) / 8;
+            base = align_to(base, ual);
+            start = base * 8;
+            unit = usz;
+        } else start = bit_end;
+        mem->offset = (start / 8) & ~(usz - 1);
+        mem->bit_off = start - mem->offset * 8;
+        bit_end = start + width;
+        if (!is_union) offset = mem->offset + usz;
+        if (max_end < mem->offset + usz) max_end = mem->offset + usz;
+        if (ty->align < ual) ty->align = ual;
+    }
+    if (ty->align < 1) ty->align = 1;
+    ty->size = align_to(max_end, ty->align);
 }
 
 static Type *struct_union_decl(Token **rest, Token *tok, TypeKind kind) {
@@ -574,24 +630,7 @@ static Type *struct_union_decl(Token **rest, Token *tok, TypeKind kind) {
     struct_members(&tok, tok, ty);
     *rest = skip_attributes(tok);
 
-    if (kind == TY_STRUCT) {
-        int offset = 0;
-        for (Member *mem = ty->members; mem; mem = mem->next) {
-            if (mem->ty->size < 0) error_tok(mem->name ? mem->name : tok, "incomplete member type");
-            offset = align_to(offset, mem->ty->align);
-            mem->offset = offset;
-            offset += mem->ty->size;
-            if (ty->align < mem->ty->align) ty->align = mem->ty->align;
-        }
-        ty->size = align_to(offset, ty->align);
-    } else {
-        ty->size = 0;
-        for (Member *mem = ty->members; mem; mem = mem->next) {
-            if (ty->align < mem->ty->align) ty->align = mem->ty->align;
-            if (ty->size < mem->ty->size) ty->size = mem->ty->size;
-        }
-        ty->size = align_to(ty->size, ty->align);
-    }
+    layout_record(ty, kind == TY_UNION, tok);
     ty->is_complete = true;
 
     if (tag) {
@@ -866,6 +905,19 @@ static void write_buf(char *buf, unsigned long long val, int sz) {
     for (int i = 0; i < sz && i < 8; i++) buf[i] = (char)((val >> (8 * i)) & 0xFF);
 }
 
+static void poke_bitfield(char *buf, Member *mem, int base, Initializer *init) {
+    unsigned word, mask, val;
+    int i, n;
+    if (!mem->bit_width || !init || !init->expr) return;
+    n = mem->ty->size;
+    mask = mem->bit_width >= 32 ? 0xffffffffu : (1u << mem->bit_width) - 1;
+    val = (unsigned)eval(init->expr) & mask;
+    word = 0;
+    for (i = 0; i < n; i++) word |= (unsigned char)buf[base + i] << (8 * i);
+    word = (word & ~(mask << mem->bit_off)) | (val << mem->bit_off);
+    for (i = 0; i < n; i++) buf[base + i] = (char)((word >> (8 * i)) & 0xff);
+}
+
 static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf, int offset) {
     if (ty->kind == TY_ARRAY) {
         int sz = ty->base->size;
@@ -875,11 +927,22 @@ static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf
     }
     if (ty->kind == TY_STRUCT) {
         if (init->expr) error_tok(init->expr->tok, "initializer is not a constant");
-        for (Member *mem = ty->members; mem; mem = mem->next)
+        for (Member *mem = ty->members; mem; mem = mem->next) {
+            if (mem->is_bitfield) {
+                poke_bitfield(buf, mem, offset + mem->offset, init->children[mem->idx]);
+                continue;
+            }
             cur = write_gvar_data(cur, init->children[mem->idx], mem->ty, buf, offset + mem->offset);
+        }
         return cur;
     }
-    if (ty->kind == TY_UNION) return write_gvar_data(cur, init->children[0], ty->members->ty, buf, offset);
+    if (ty->kind == TY_UNION) {
+        if (ty->members && ty->members->is_bitfield) {
+            poke_bitfield(buf, ty->members, offset + ty->members->offset, init->children[0]);
+            return cur;
+        }
+        return write_gvar_data(cur, init->children[0], ty->members->ty, buf, offset);
+    }
     if (!init->expr) return cur;
 
     if (ty->kind == TY_FLOAT) {
@@ -1209,7 +1272,9 @@ static int eval_rval(Node *node, char ***label) {
         *label = &node->var->name;
         return 0;
     case ND_DEREF: return eval2(node->lhs, label);
-    case ND_MEMBER: return eval_rval(node->lhs, label) + node->member->offset;
+    case ND_MEMBER:
+        if (node->member->is_bitfield) error_tok(node->tok, "cannot take address of bit-field");
+        return eval_rval(node->lhs, label) + node->member->offset;
     default: break;
     }
     error_tok(node->tok, "invalid initializer");
@@ -1262,9 +1327,27 @@ static double eval_double(Node *node) {
 }
 
 /* a op= b  ->  tmp = &a, *tmp = *tmp op b */
+/* += у битового поля нельзя свести к адресу: читаем значение, потом пишем его обратно. */
+static Node *bitfield_update(Node *binary) {
+    Node *mem = binary->lhs, *acc, *acc2, *save, *read, *write;
+    Token *tok = binary->tok;
+    Obj *base = new_lvar("", pointer_to(mem->lhs->ty));
+    Obj *val = new_lvar("", mem->ty);
+    save = new_binary(ND_ASSIGN, new_var_node(base, tok), new_unary(ND_ADDR, mem->lhs, tok), tok);
+    acc = new_unary(ND_MEMBER, new_unary(ND_DEREF, new_var_node(base, tok), tok), tok);
+    acc->member = mem->member;
+    acc2 = new_unary(ND_MEMBER, new_unary(ND_DEREF, new_var_node(base, tok), tok), tok);
+    acc2->member = mem->member;
+    read = new_binary(ND_ASSIGN, new_var_node(val, tok), acc, tok);
+    write = new_binary(ND_ASSIGN, acc2, new_binary(binary->kind, new_var_node(val, tok), binary->rhs, tok), tok);
+    return new_binary(ND_COMMA, save, new_binary(ND_COMMA, read, write, tok), tok);
+}
+
 static Node *to_assign(Node *binary) {
     add_type(binary->lhs);
     add_type(binary->rhs);
+    if (binary->lhs->kind == ND_MEMBER && binary->lhs->member->is_bitfield)
+        return bitfield_update(binary);
     Token *tok = binary->tok;
     Obj *var = new_lvar("", pointer_to(binary->lhs->ty));
     Node *expr1 = new_binary(ND_ASSIGN, new_var_node(var, tok), new_unary(ND_ADDR, binary->lhs, tok), tok);

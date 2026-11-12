@@ -180,6 +180,58 @@ static void load(Type *ty) {
     else E("8B 00");                                            /* mov eax, [eax] */
 }
 
+static void load_unit(int sz) {
+    if (sz == 1) E("0F B6 00");
+    else if (sz == 2) E("0F B7 00");
+    else E("8B 00");
+}
+
+static void bitfield_extract(Member *mem) {
+    int sh = mem->bit_off, w = mem->bit_width;
+    load_unit(mem->ty->size);
+    if (sh) { E("C1 E8"); buf_byte(&text, sh); }
+    if (w >= 32) return;
+    E("25"); imm32((int)((1u << w) - 1));
+    if (!mem->ty->is_unsigned && w > 0) {
+        int n = 32 - w;
+        E("C1 E0"); buf_byte(&text, n);
+        E("C1 F8"); buf_byte(&text, n);
+    }
+}
+
+static void gen_expr(Node *node);
+static void gen_addr(Node *node);
+
+static void bitfield_assign(Node *node) {
+    Member *mem = node->lhs->member;
+    int sh = mem->bit_off, w = mem->bit_width, sz = mem->ty->size;
+    unsigned mask = w >= 32 ? 0xffffffffu : (1u << w) - 1;
+    gen_expr(node->rhs);
+    if (w < 32) { E("25"); imm32((int)mask); }
+    if (!mem->ty->is_unsigned && w > 0 && w < 32) {
+        int n = 32 - w;
+        E("C1 E0"); buf_byte(&text, n);
+        E("C1 F8"); buf_byte(&text, n);
+    }
+    push_eax();
+    gen_addr(node->lhs);
+    E("89 C1");                                                 /* mov ecx, eax */
+    if (w >= 32) E("31 C0");
+    else {
+        load_unit(sz);
+        E("25"); imm32((int)~(mask << sh));
+    }
+    E("5A"); depth -= 4;                                        /* pop edx */
+    E("52"); depth += 4;
+    if (w < 32) { E("81 E2"); imm32((int)mask); }
+    if (sh) { E("C1 E2"); buf_byte(&text, sh); }
+    E("09 D0");                                                 /* or eax, edx */
+    if (sz == 1) E("88 01");
+    else if (sz == 2) E("66 89 01");
+    else E("89 01");
+    E("58"); depth -= 4;                                        /* результат присваивания */
+}
+
 /* адрес лежит в стеке, значение — в eax / st(0) */
 static void store(Type *ty) {
     pop_ecx();
@@ -655,13 +707,16 @@ static void gen_expr(Node *node) {
         return;
     case ND_MEMBER:
         gen_addr(node);
-        load(node->ty);
+        if (node->member->is_bitfield) bitfield_extract(node->member);
+        else load(node->ty);
         return;
     case ND_DEREF:
         gen_expr(node->lhs);
         load(node->ty);
         return;
     case ND_ADDR:
+        if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield)
+            error_tok(node->tok, "cannot take address of bit-field");
         gen_addr(node->lhs);
         return;
     case ND_ASSIGN:
@@ -675,6 +730,10 @@ static void gen_expr(Node *node) {
             else if (ty->size == 1) E("88"), ebp_operand(0, off);
             else if (ty->size == 2) E("66 89"), ebp_operand(0, off);
             else E("89"), ebp_operand(0, off);
+            return;
+        }
+        if (node->lhs->kind == ND_MEMBER && node->lhs->member->is_bitfield) {
+            bitfield_assign(node);
             return;
         }
         gen_addr(node->lhs);
