@@ -417,6 +417,9 @@ static int new_password(const char *name,int op) {
     clear_password(a,sizeof(a));clear_password(b,sizeof(b));return r;
 }
 static int login_prompt(void) {
+    /* SSH and terminal children inherit a kernel-authenticated identity.
+     * Never trust argv/environment to bypass login; logout clears this identity. */
+    if(account(5,username,NULL)==0) return 0;
     int r=account(0,0,0);
     if(r<0) {printf("Cannot load accounts: %s\n",strerror(-r));return -1;}
     while(r==1) {
