@@ -1235,5 +1235,8 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 `make usb-image` создаёт отдельный `build/myos-usb.img`: загрузчик BIOS,
 VBE framebuffer, live-файловая система в RAM, USB HID клавиатура/мышь через xHCI.
 `make usbtest` проверяет загрузку с USB в QEMU. Обычный `make run` сохраняется.
+Размер Live-корня по умолчанию 256 МиБ; `make usb-image USB_ROOT_MB=512`
+выбирает 512 МиБ (допустимо 64–512). Для профиля 256 МиБ рекомендуется
+512 МиБ RAM, для 512 МиБ — 1 ГиБ RAM.
 Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
 Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).

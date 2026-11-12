@@ -758,8 +758,9 @@ consoletest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/console_output.c -o $(BUILD)/console-output-test
 	./$(BUILD)/console-output-test
 USB_VIDEO ?= auto
+USB_ROOT_MB ?= 256
 usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
-	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm --video "$(USB_VIDEO)"
+	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm --video "$(USB_VIDEO)" --root-mb "$(USB_ROOT_MB)"
 usbtest: usb-image
 	python3 tests/hardware_smoke.py
 
@@ -905,3 +906,11 @@ install-permissions: $(BUILD)/myfs
 .PHONY: isolationtest
 isolationtest:
 	python3 tests/isolation_smoke.py
+
+$(BUILD)/user/live-rootcheck.o: tests/live_rootcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/live-rootcheck: $(BUILD)/user/live-rootcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: liveroottest
+liveroottest: usb-image $(BUILD)/user/live-rootcheck
+	python3 tests/live_root_smoke.py

@@ -49,8 +49,7 @@ static bool identify(int u) {
 static const struct boot_info *live;
 bool ata_init(void) {
     live=boot_info_get();
-    if (live && (live->root_phys!=0x1000000 || !live->root_bytes ||
-                 live->root_bytes>0x4000000 || (live->root_bytes&511))) live=NULL;
+    if (!boot_root_valid(live)) live=NULL;
     if (live) {
         /* Live mode deliberately does not probe or expose internal ATA disks. */
         units[0].sectors=live->root_bytes/512;
