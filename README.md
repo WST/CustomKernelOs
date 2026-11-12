@@ -1,5 +1,8 @@
 # MyOS
 
+**Настройки сборки и запуска** — общий `.env` для Make, Live и netboot,
+включая Python-сервер в Windows. [Пример](.env.example), [правила и параметры](docs/environment.md).
+
 **Изоляция процессов и стеки** — проверка kill по UID, явные разрешения IPC,
 пространства имён служб и guard-страницы. [Устройство и проверки](docs/isolation.md).
 
@@ -1230,10 +1233,20 @@ qemu-system-i386 -m 256M -vga vmware -drive format=raw,file=build\os.img,index=0
 внутри ОС через `mode` и Display, если видеобиос совместим с интерпретатором.
 [Поддержка NVIDIA, ограничения и проверка](docs/nvidia.md).
 
+## Обновление по сети
+
+`make netboot-image` публикует Live-образ, `make netboot-serve` раздаёт его по HTTP.
+`make netboot-usb NETBOOT_URL=http://IP:8080/boot.ipxe` создаёт маленький iPXE-USB:
+запишите его один раз, затем обновляйте ОС на сервере и перезагружайте тестовый ПК.
+[Настройка Windows/WSL, ограничения и проверки](docs/netboot.md).
+
 ## Загрузка с USB на реальном ПК (BIOS/CSM)
 
 `make usb-image` создаёт отдельный `build/myos-usb.img`: загрузчик BIOS,
 VBE framebuffer, live-файловая система в RAM, USB HID клавиатура/мышь через xHCI.
 `make usbtest` проверяет загрузку с USB в QEMU. Обычный `make run` сохраняется.
+Размер Live-корня по умолчанию 256 МиБ; `make usb-image USB_ROOT_MB=512`
+выбирает 512 МиБ (допустимо 64–512). Для профиля 256 МиБ рекомендуется
+512 МиБ RAM, для 512 МиБ — 1 ГиБ RAM.
 Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
 Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).

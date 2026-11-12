@@ -16,18 +16,14 @@
 # На macOS (и вообще не на x86-Linux) системный gcc — это clang под arm64/x86_64-darwin,
 # он не умеет собирать 32-битный ELF. Нужен кросс-тулчейн:
 #   brew install i686-elf-gcc i686-elf-binutils nasm qemu
-UNAME_S := $(shell uname -s)
-ifeq ($(UNAME_S),Darwin)
-CROSS   ?= i686-elf-
+# CLI overrides > process environment > .env > defaults.
+# Parse .env as data, never as shell or Make code. Each configuration gets its
+# own immutable include so concurrent Make invocations cannot overwrite it.
+ENV_CONFIG_MK := $(shell python3 tools/env_config.py --make-file)
+ifeq ($(strip $(ENV_CONFIG_MK)),)
+$(error Cannot load .env configuration; see the diagnostic above)
 endif
-CROSS   ?=
-CC      := $(CROSS)gcc
-LD      := $(CROSS)ld
-AR      := $(CROSS)ar
-NASM    := nasm
-OBJCOPY := $(CROSS)objcopy
-QEMU    := qemu-system-i386
-HOSTCC  ?= cc
+include $(ENV_CONFIG_MK)
 
 # переносимые (GNU/BSD) размер файла и дополнение файла нулями до размера
 fsize   = $$(wc -c < $(1) | tr -d ' ')
@@ -41,12 +37,10 @@ LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
 
 BUILD   := build
 HWBUILD := $(BUILD)/hardware
-DISK    := disk.img
 # Новый disk.img, если файла ещё нет. Готовый образ сам не растёт:
 # build/myfs disk.img grow 8192  (прежний остаётся как disk.img.bak)
 # 4 ГБ — разреженный файл: место на компьютере занимает только записанное.
 # Потолок ФС — 8 ГБ (FS_MAX_BLOCKS). Версия 2 хранит файл любого размера в этих пределах.
-DISK_MB := 4096
 VIDEO_SRC := $(wildcard drivers/video/*.c)
 C_SRC   := $(wildcard kernel/*.c)
 OBJS    := $(BUILD)/entry.o $(BUILD)/isr.o $(BUILD)/ap.o $(patsubst kernel/%.c,$(BUILD)/%.o,$(C_SRC)) $(patsubst drivers/video/%.c,$(BUILD)/video/%.o,$(VIDEO_SRC))
@@ -429,24 +423,16 @@ QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive if=none,id=sysdisk,file=$(DISK),format=raw \
                -device ich9-ahci,id=ahci \
                -device ide-hd,drive=sysdisk,bus=ahci.0
-QEMU_MEM ?= 256M
-QEMU_CPUS ?= 4
-QEMU_CPU ?=
 QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
-DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
 QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk
 endif
 # auto: verified hardware VirGL on Linux/WSL, portable software framebuffer on Mac.
 # GPU=on requires acceleration; GPU=off forces software; VGA=vmware/std overrides auto.
-VGA ?= auto
-GPU ?= auto
 QEMU_VIDEO = python3 tools/run_qemu.py --qemu "$(QEMU)" --gpu "$(GPU)" --vga "$(VGA)" --
 # сеть: карта e1000 за NAT QEMU; HOST_PORT хоста -> порт 80 MyOS (httpd)
 # Другой порт: make run HOST_PORT=8081
-HOST_PORT ?= 8080
-SSH_PORT ?=
 QEMU_SSH_FORWARD :=
 ifneq ($(SSH_PORT),)
 QEMU_SSH_FORWARD := ,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22
@@ -760,9 +746,8 @@ consoleloadtest: usb-image $(BUILD)/user/consoleload
 consoletest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin tests/console_output.c -o $(BUILD)/console-output-test
 	./$(BUILD)/console-output-test
-USB_VIDEO ?= auto
 usb-image: $(HWBUILD)/kernel.bin $(UBINS) $(BUILD)/myfs
-	python3 tools/make_usb_image.py --nasm $(NASM) --nm $(CROSS)nm --video "$(USB_VIDEO)"
+	python3 tools/make_usb_image.py --nasm $(NASM) --nm "$(NM)" --video "$(USB_VIDEO)" --root-mb "$(USB_ROOT_MB)"
 usbtest: usb-image
 	python3 tests/hardware_smoke.py
 
@@ -908,3 +893,31 @@ install-permissions: $(BUILD)/myfs
 .PHONY: isolationtest
 isolationtest:
 	python3 tests/isolation_smoke.py
+
+$(BUILD)/user/live-rootcheck.o: tests/live_rootcheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/live-rootcheck: $(BUILD)/user/live-rootcheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: liveroottest
+liveroottest: usb-image $(BUILD)/user/live-rootcheck
+	python3 tests/live_root_smoke.py
+
+# Network development boot: publish versioned images, then keep the HTTP server running.
+.PHONY: envtest netboot-image netboot-serve netboot-usb netboottest netbootsmoke netboot-usb-smoke
+netboot-image: usb-image
+	python3 tools/netboot.py publish
+netboot-serve:
+	python3 tools/netboot.py serve --bind "$(NETBOOT_BIND)" --port "$(NETBOOT_PORT)"
+netboot-usb:
+	python3 tools/build_ipxe.py --url "$(NETBOOT_URL)"
+netboottest:
+	python3 tests/netboot_test.py
+
+netbootsmoke: netboot-image
+	python3 tests/netboot_smoke.py
+
+netboot-usb-smoke:
+	python3 tests/netboot_smoke.py --bootstrap
+
+envtest:
+	python3 tests/env_config_test.py

@@ -27,17 +27,25 @@ def save_png(ppm,png):
                     chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
 
 class VM:
-    def __init__(self,name,usb=True,vga='std',memory='256M',machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None):
+    def __init__(self,name,usb=True,vga='std',memory=None,machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None,netboot_url=None):
         self.temp=tempfile.TemporaryDirectory(prefix='myos-usb-')
         # Poll a native filesystem log: DrvFS can return ENODATA while a Windows
         # file is concurrently extended by QEMU.
         self.log=pathlib.Path(self.temp.name)/(name+'.log'); self.log.write_text('')
         self.log_artifact=B/(name+'.log')
         self.sockpath=self.temp.name+'/qmp'
+        root_mb=json.loads((B/'hardware/manifest.json').read_text())['root_bytes']//1048576
+        self.boot_timeout=max(40,root_mb//2)
+        if memory is None:
+            memory=str(1 << (max(256,root_mb+128)-1).bit_length())+'M'
         args=['qemu-system-i386','-m',memory,'-cpu',cpu,'-smp',str(cpus),'-display','none','-vga',vga,
               '-serial','file:'+str(self.log),'-qmp','unix:'+self.sockpath+',server=on,wait=off',
               '-no-reboot','-nic','none']
-        if usb:
+        if netboot_url:
+            # No attached disk: successful boot must come from the HTTP server.
+            args+=['-netdev','user,id=netboot,bootfile='+netboot_url,
+                   '-device','e1000,netdev=netboot,bootindex=1','-boot','order=n']
+        elif usb:
             # No PS/2 controller: all injected keys must traverse the xHCI driver.
             args+=['-machine',machine+',i8042=off','-device','qemu-xhci,id=xhci',
                    '-drive',f'if=none,id=stick,format=raw,file={IMAGE},snapshot=on',
@@ -68,8 +76,8 @@ class VM:
     def qmp(self,command,args=None):
         self.s.sendall((json.dumps({'execute':command,'arguments':args or {}})+'\n').encode())
         return self.read_response()
-    def wait(self,marker,after=0,timeout=40):
-        end=time.monotonic()+timeout
+    def wait(self,marker,after=0,timeout=None):
+        end=time.monotonic()+(self.boot_timeout if timeout is None else timeout)
         while time.monotonic()<end:
             text=clean(self.log)
             if marker in text[after:]: return len(text)

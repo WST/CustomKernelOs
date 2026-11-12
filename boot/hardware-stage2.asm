@@ -10,7 +10,11 @@ INFO equ 0x6000
 FONT equ 0x5000
 BOUNCE equ 0x70000
 KERNEL equ 0x100000
-ROOT equ 0x1000000
+; Layout limits are passed from kernel/bootinfo.h by the image builder.
+ROOT equ ROOT_PHYS
+%if ROOT_SECTORS*512 < ROOT_MIN_BYTES || ROOT_SECTORS*512 > ROOT_MAX_BYTES
+%error "Live root size is outside the supported range"
+%endif
 start:
     cli
     xor ax,ax
@@ -64,7 +68,7 @@ start:
     mov edx,KERNEL_END
     call usable
     mov eax,ROOT
-    mov edx,ROOT+ROOT_SECTORS*512
+    mov edx,ROOT+ROOT_SECTORS*512+ROOT_RESERVE_BYTES
     call usable
     in al,0x92
     or al,2
@@ -562,7 +566,7 @@ dap_count: dw 64
 dap_lba: dq 0
 loading: db 'MyOS USB: loading kernel and live filesystem...',13,10,0
 disk_error: db 'MyOS: disk read failed',0
-mem_error: db 'MyOS: insufficient usable E820 RAM',0
+mem_error: db 'MyOS: insufficient usable E820 RAM for live root and working memory',0
 a20_msg: db 'MyOS: A20 enable failed',0
 video_error: db 'MyOS: no 32-bit RGB VBE mode, using text',13,10,0
 times 16384-($-$$) db 0

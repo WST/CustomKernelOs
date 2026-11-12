@@ -94,7 +94,7 @@ void pmm_init(void) {
     for (u32 f=(u32)__kernel_start/PAGE_SIZE; f<((u32)__bss_end+PAGE_SIZE-1)/PAGE_SIZE; f++)
         set_used(f);
     const struct boot_info *boot=boot_info_get();
-    if (boot && boot->root_phys==0x1000000 && boot->root_bytes && boot->root_bytes<=0x4000000)
+    if (boot_root_valid(boot))
         for (u32 f=boot->root_phys/PAGE_SIZE; f<(boot->root_phys+boot->root_bytes+PAGE_SIZE-1)/PAGE_SIZE; f++)
             set_used(f);
 #endif

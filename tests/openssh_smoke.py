@@ -1,6 +1,6 @@
 """Boot a fresh test disk; native SSH ABI and OpenSSH client/server validation."""
 from pathlib import Path
-import subprocess,re,time,shutil,os,tempfile,sys
+import subprocess,re,time,shutil,os,tempfile,sys,select
 ROOT=Path(__file__).resolve().parents[1]
 b=ROOT/'build';resume='--resume-ext' in sys.argv;ext_mode='--ext' in sys.argv or resume
 image=Path((b/'openssh-ext-image.txt').read_text().strip()) if resume else (Path(tempfile.mkdtemp(prefix='myos-openssh-disk-'))/'disk.img' if ext_mode else b/'openssh-test.img')
@@ -83,6 +83,8 @@ try:
   wait('New password:');send('review123','Confirm password:');send('review123','Login [root]:')
  else:wait('Login [root]:')
  send('','Password:');send('review123','root:/')
+ send('useradd sshuser','New password:')
+ send('user123','Confirm password:');send('user123','root:/')
  send('sshcheck','SSH ABI PASS')
  if ext_mode:send('ext install openssh','OpenSSH installed.',7200)
  send('ssh -V','OpenSSH_10.6p2')
@@ -113,6 +115,38 @@ try:
   assert (result.returncode==0)==allowed,(password,result.stderr,text()[-7000:])
   if allowed:assert 'SSH_PASSWORD_PASS' in result.stdout
  print('Valid and invalid password authentication: PASS',flush=True)
+ def interactive_login(user,opts,env=None):
+  session=subprocess.Popen(['ssh']+opts+['-tt',user+'@127.0.0.1'],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=env)
+  output=''
+  def received(marker):
+   nonlocal output
+   deadline=time.monotonic()+45
+   while time.monotonic()<deadline:
+    if marker in output:return
+    ready,_,_=select.select([session.stdout],[],[],.1)
+    if ready:
+     chunk=os.read(session.stdout.fileno(),4096)
+     if not chunk:raise AssertionError('SSH session closed: '+output+'\n'+text()[-5000:])
+     output+=re.sub(r'\x1b\[[0-9;?]*[A-Za-z]','',chunk.decode(errors='replace')).replace('\r','')
+    elif session.poll() is not None:raise AssertionError('SSH exited: '+output)
+   raise AssertionError(marker+' missing in SSH session: '+output+'\n'+text()[-5000:])
+  try:
+   home='/root' if user=='root' else '/home/'+user
+   received(user+':'+home+'$ ')
+   assert 'Login [root]:' not in output and 'Password:' not in output,output
+   output='';session.stdin.write(b'whoami\n');session.stdin.flush();received('\n'+user+'\n')
+   # Explicit logout must still require fresh credentials.
+   output='';session.stdin.write(b'logout\n');session.stdin.flush();received('Login [root]:')
+  finally:
+   session.terminate()
+   try:session.wait(timeout=5)
+   except subprocess.TimeoutExpired:session.kill();session.wait()
+ interactive_login('root',keyopts)
+ passwordopts=options+['-o','PubkeyAuthentication=no','-o','PreferredAuthentications=password','-o','NumberOfPasswordPrompts=1']
+ env=dict(os.environ,SSH_ASKPASS=str(askpass),SSH_ASKPASS_REQUIRE='force',DISPLAY=':myos-test',MYOS_SSH_TEST_PASSWORD='user123')
+ interactive_login('sshuser',passwordopts,env)
+ print('Interactive SSH root/user sessions inherit identity without a second login; logout still prompts: PASS',flush=True)
+
  payload=b/'openssh-upload.bin';download=b/'openssh-download.bin';payload.write_bytes(bytes(range(256))*12)
  batch=b/'openssh-sftp.batch';batch.write_text(f'put {payload} /tmp/openssh-upload.bin\nchmod 600 /tmp/openssh-upload.bin\nget /tmp/openssh-upload.bin {download}\n')
  # sftp uses uppercase -P for the port.
