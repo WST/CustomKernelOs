@@ -278,7 +278,8 @@ $(BUILD)/user/l_img.o: user/lib/img.c user/lib/img.h user/lib/myos.h | $(BUILD)/
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/l_svg.o: user/lib/svg.c user/lib/svg.h user/lib/gfx.h user/lib/js.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
-$(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
+$(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h user/lib/browser_background.h user/lib/browser_effects.h user/lib/browser_profile.h
+$(BUILD)/user/l_css.o: user/lib/css_background.h user/lib/css_effects.h
 
 $(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) -L$(BUILD)/user -lc -lgfx
@@ -529,7 +530,14 @@ $(BUILD)/browser-bench: tests/browser_host.c tests/browser_compat.h user/browser
 browserbench: $(BUILD)/browser-bench
 	./$(BUILD)/browser-bench tests/web/layout.html w 1920 h 600 bench 500
 
-browsertest: user/lib/dom_prelude.h | $(BUILD)
+$(BUILD)/browser-profile-test: tests/browser_profile_host.c user/lib/browser_profile.h user/lib/tls.c user/lib/tls.h | $(BUILD)
+	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -ffunction-sections -fdata-sections -Iuser/lib tests/browser_profile_host.c user/lib/tls.c -Wl,--gc-sections -o $@
+
+.PHONY: browserprofiletest
+browserprofiletest: $(BUILD)/browser-profile-test
+	./$(BUILD)/browser-profile-test
+
+browsertest: user/lib/dom_prelude.h browserprofiletest | $(BUILD)
 	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
 	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
@@ -539,7 +547,7 @@ browsertest: user/lib/dom_prelude.h | $(BUILD)
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --compat-test
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/modules.html assert-no-errors scroll
 	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/async-generators.html timers 150 assert-no-errors
-	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/web-api.html timers 250 assert-no-errors
+	UBSAN_OPTIONS=halt_on_error=1 ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/web-api.html timers 250 assert-no-errors assert-text web-api-ok
 
 # Сглаженная графика и шрифты на Linux: пробная картинка build/gfxtest.ppm
 gfxtest: | $(BUILD)

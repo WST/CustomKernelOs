@@ -1,4 +1,5 @@
 """Run the real MyOS browser on an isolated disk against compressed HTTP fixtures."""
+import hashlib
 import gzip
 import os
 import http.server
@@ -9,6 +10,7 @@ import subprocess
 import threading
 import time
 import zlib
+from hardware_smoke import save_png
 
 build = pathlib.Path('build')
 seen = []
@@ -16,8 +18,8 @@ pages = {
     '/': ('text/html', 'gzip', b'<title>Browser smoke</title><link rel="stylesheet" href="/style.css">'
           b'<h1>Browser smoke</h1><div class="row"><div>Alpha</div><div>Beta</div></div>'
           b'<svg width="24" height="24" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#fb8b24"/></svg>'
-          b'<p id="result"></p><script type="module" src="/app.js"></script>'),
-    '/style.css': ('text/css', 'deflate', b'.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.row>div{padding:12px;box-sizing:border-box;background:oklch(70.5% .213 47.604)}'),
+          b'<div class="smoke-mask"></div><p id="result"></p><script type="module" src="/app.js"></script>'),
+    '/style.css': ('text/css', 'deflate', b'.row{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}.row>div{padding:12px;box-sizing:border-box;background:oklch(70.5% .213 47.604);background-image:linear-gradient(135deg,transparent,rgba(255,255,255,.25));box-shadow:2px 4px 5px #0003;font-family:monospace}.smoke-mask{width:48px;height:24px;margin:12px;background:#22aa66;mask:linear-gradient(to right,black 50%,transparent 50%);opacity:.5}'),
     '/app.js': ('application/javascript', 'gzip', b'import {value,inc} from "./counter.js"; inc();'
                b'if(value!==42 || document.currentScript!==null) throw new Error("module context failed");'
                b'async function* seq(){yield Promise.resolve(20);yield await Promise.resolve(22);}'
@@ -26,6 +28,10 @@ pages = {
                b'if(!controller.signal.aborted || aborted!==1)throw new Error("abort failed");'
                b'try{await fetch("/must-not-fetch",{signal:controller.signal});throw new Error("not aborted");}catch(e){if(e!=="test")throw e;}'
                b'if(await new Response(new Blob(["hello"])).text()!=="hello")throw new Error("response failed");'
+               b'const large=JSON.stringify({text:"x".repeat(160000)});'
+               b'if((await new Response(large).json()).text.length!==160000)throw new Error("large JSON failed");'
+               b'localStorage.setItem("native","saved");sessionStorage.setItem("native","session");'
+               b'if(localStorage.getItem("native")!=="saved")throw new Error("storage failed");'
                b'let sum=0;for await(const n of seq()) sum+=n;'
                b'if(sum!==42)throw new Error("async generator failed");'
                b'document.getElementById("result").innerHTML=\'<a href="/ok">JSOK</a>\';} verify();'
@@ -60,12 +66,17 @@ class Server(http.server.BaseHTTPRequestHandler):
         self.wfile.flush()
         self.close_connection = False
 
-server = http.server.ThreadingHTTPServer(('0.0.0.0', 0), Server)
+server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Server)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 image = build / 'browser-smoke.img'
 boot_image = build / 'browser-smoke-boot.img'
+if os.environ.get('MYOS_TEST_DISK'):
+    shutil.copyfile(os.environ['MYOS_TEST_DISK'], image)
+else:
+    with image.open('wb') as stream: stream.truncate(64*1048576)
+    subprocess.run(['make','-j4','build/os.img','build/user/browser','install','DISK='+str(image.resolve()),
+                    'EXT_AUTOINSTALL_PACKAGES=','SSH_AUTHORIZED_KEY=','SSH_AUTHORIZED_KEY_FILE='],check=True,stdout=subprocess.DEVNULL)
 shutil.copyfile(build / 'os.img', boot_image)
-shutil.copyfile(os.environ.get('MYOS_TEST_DISK', 'disk.img'), image)
 # Only the disposable disk is changed; a user's desktop service may own the console.
 subprocess.run(['build/myfs', str(image), 'rm', '/etc/services/enabled/desktop.service'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 subprocess.run(['build/myfs', str(image), 'rm', '/etc/accounts'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -117,16 +128,26 @@ try:
     send('test123', 'Login [root]:')
     send('', 'Password:')
     send('test123', 'root:/')
-    send('sh /browser-smoke.sh', 'Done:')
+    send('sh /browser-smoke.sh', '1 links - JS: 1 script, 1 modules')
     text = read_log()
     assert '1 links - JS: 1 script' in text, text[-2000:]
     assert 'error' not in text[text.rfind('Done:'):], text[-2000:]
     assert all(path in seen for path in pages), seen
     assert 'PANIC' not in text and 'kernel stack overflow' not in text, text[-2000:]
+    snapshot=build/'browser-smoke.ppm';snapshot.unlink(missing_ok=True)
     proc.stdin.write('screendump build/browser-smoke.ppm\n')
     proc.stdin.flush()
-    time.sleep(.3)
-    print('browser QEMU smoke: OK (chunked keep-alive, gzip HTML/JS, deflate CSS, DOM update)')
+    deadline=time.monotonic()+10
+    while True:
+        try:save_png(snapshot,build/'browser-smoke.png');break
+        except (AssertionError,ValueError,OSError):
+            if time.monotonic()>=deadline:raise
+            time.sleep(.05)
+    magic, dimensions, maximum, pixels = snapshot.read_bytes().split(b'\n', 3)
+    masked_green = bytes((144, 212, 178))
+    coverage = sum(pixels[i:i+3] == masked_green for i in range(0, len(pixels), 3))
+    assert 500 <= coverage <= 650, ('native mask/opacity pixels differ', coverage)
+    print('browser QEMU smoke: OK (chunked keep-alive, gzip HTML/JS, CSS masks/opacity/shadows, DOM update)')
 finally:
     proc.terminate()
     try:
@@ -135,3 +156,10 @@ finally:
         proc.kill()
         proc.wait()
     server.shutdown()
+
+origin = f'http://10.0.2.2:{server.server_port}'
+profile = '/root/.myos-browser/' + hashlib.sha256(origin.encode()).hexdigest() + '.local'
+stored = subprocess.run(['build/myfs', str(image), 'cat', profile], check=True, capture_output=True).stdout
+assert b'MYOSST1\n' + origin.encode() + b'\n' in stored and b'"native":"saved"' in stored, stored
+assert b'"native":"session"' not in stored, stored
+print('browser native localStorage persistence: OK')

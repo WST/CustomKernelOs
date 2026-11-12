@@ -15,6 +15,21 @@ async function test(){
  check(await copy.text()==='Привет','response clone');
  try{await response.text();throw new Error('double read');}catch(e){check(e.name==='TypeError','bodyUsed');}
  const json=await new Response('{"ok":true}').json();check(json.ok,'json');
+ const large=JSON.stringify({text:'x'.repeat(160000)});const largeResponse=new Response(large),largeCopy=largeResponse.clone();
+ check((await largeResponse.json()).text.length===160000,'large JSON avoids eager byte-array expansion');
+ check((await largeCopy.text())===large,'large text clone');
+ const unicodeResponse=new Response('Привет 🌍');check(await unicodeResponse.text()==='Привет 🌍','text response UTF-8');
+ const bytes=await new Response('ok').arrayBuffer();check(new Uint8Array(bytes)[0]===111 && bytes.byteLength===2,'lazy response bytes');
+
+ localStorage.clear();sessionStorage.clear();
+ localStorage.setItem('','empty');localStorage.setItem('length','reserved');localStorage.setItem('__proto__','safe');localStorage.setItem('setItem','method');
+ check(localStorage.length===4 && localStorage.key(0)==='' && localStorage.getItem('length')==='reserved' && localStorage.getItem('__proto__')==='safe' && typeof localStorage.setItem==='function','storage reserved keys');
+ localStorage.named='value';check(localStorage.getItem('named')==='value','storage property setter');delete localStorage.named;check(localStorage.getItem('named')===null,'storage property deletion');
+ localStorage.setItem('quota','before');try{localStorage.setItem('quota','x'.repeat(40000));throw new Error('quota accepted');}catch(e){check(e.name==='QuotaExceededError','quota error');}
+ check(localStorage.getItem('quota')==='before','quota failure is atomic');
+ check(sessionStorage.length===0,'storage types isolated');
+ try{history.pushState(null,'','https://other.test/');throw new Error('cross-origin history accepted');}catch(e){check(e.name==='SecurityError','history origin check');}
+ localStorage.clear();check(localStorage.length===0,'storage clear');
  const root=document.createElement('div');root.innerHTML='<p>A<b>B</b></p><section><i>C</i></section>';
  const walker=document.createTreeWalker(root,NodeFilter.SHOW_ELEMENT,{acceptNode:n=>n.tagName==='SECTION'?NodeFilter.FILTER_REJECT:NodeFilter.FILTER_ACCEPT});
  check(walker.nextNode().tagName==='P' && walker.nextNode().tagName==='B' && walker.nextNode()===null,'tree walker filtering');

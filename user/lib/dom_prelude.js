@@ -253,24 +253,43 @@
   }
   w.URL = URL; w.URLSearchParams = URLSearchParams; w.webkitURL = URL;
 
-  // ---------------------------------------------------------------- хранилище (пока открыт браузер)
-  function makeStorage(tag) {
-    var st = Object.create(Storage.prototype);
-    def(st, '__tag', tag);
-    return st;
-  }
+  // ---------------------------------------------------------------- storage (origin-scoped in domjs.c)
+  var storageStates = new WeakMap();
   function Storage() { throw new TypeError('Illegal constructor'); }
-  Storage.prototype.getItem = function (k) { k = String(k); return Object.prototype.hasOwnProperty.call(this, k) ? this[k] : null; };
-  Storage.prototype.setItem = function (k, v) { this[String(k)] = String(v); my.store(this.__tag, JSON.stringify(Object.assign({}, this))); };
-  Storage.prototype.removeItem = function (k) { delete this[String(k)]; my.store(this.__tag, JSON.stringify(Object.assign({}, this))); };
-  Storage.prototype.clear = function () { for (var k of Object.keys(this)) delete this[k]; my.store(this.__tag, '{}'); };
-  Storage.prototype.key = function (i) { return Object.keys(this)[i] || null; };
-  Object.defineProperty(Storage.prototype, 'length', { get: function () { return Object.keys(this).length; } });
-  w.Storage = Storage;
-  var ls = makeStorage('local'), ss = makeStorage('session');
-  try { Object.assign(ls, JSON.parse(my.load('local') || '{}')); } catch (e) {}
-  try { Object.assign(ss, JSON.parse(my.load('session') || '{}')); } catch (e) {}
-  w.localStorage = ls; w.sessionStorage = ss;
+  function storageState(receiver) { var state=storageStates.get(receiver); if(!state)throw new TypeError('Illegal invocation'); return state; }
+  function storageCopy(data) { return Object.assign(Object.create(null),data); }
+  function storageMirror(state,k) {
+    if(k in Storage.prototype)return;
+    if(Object.prototype.hasOwnProperty.call(state.data,k))Object.defineProperty(state.target,k,{value:state.data[k],enumerable:true,configurable:true,writable:true});
+    else delete state.target[k];
+  }
+  Storage.prototype.getItem = function(k) { var d=storageState(this).data;k=String(k);return Object.prototype.hasOwnProperty.call(d,k)?d[k]:null; };
+  Storage.prototype.setItem = function(k,v) {
+    var st=storageState(this);k=String(k);v=String(v);var next=storageCopy(st.data);next[k]=v;
+    my.store(st.tag,JSON.stringify(next));st.data=next;storageMirror(st,k);
+  };
+  Storage.prototype.removeItem = function(k) {
+    var st=storageState(this);k=String(k);var next=storageCopy(st.data);delete next[k];
+    my.store(st.tag,JSON.stringify(next));st.data=next;storageMirror(st,k);
+  };
+  Storage.prototype.clear = function() {
+    var st=storageState(this);my.store(st.tag,'{}');var keys=Object.keys(st.data);st.data=Object.create(null);
+    keys.forEach(function(k){storageMirror(st,k);});
+  };
+  Storage.prototype.key = function(i) { var keys=Object.keys(storageState(this).data);i=Number(i)>>>0;return i<keys.length?keys[i]:null; };
+  Object.defineProperty(Storage.prototype,'length',{get:function(){return Object.keys(storageState(this).data).length;}});
+  function makeStorage(tag) {
+    var target=Object.create(Storage.prototype),data=Object.create(null);
+    try {Object.assign(data,JSON.parse(my.load(tag)||'{}'));}catch(e){}
+    var state={target:target,data:data,tag:tag};storageStates.set(target,state);
+    Object.keys(data).forEach(function(k){storageMirror(state,k);});
+    var proxy=new Proxy(target,{
+      set:function(t,k,v){Storage.prototype.setItem.call(proxy,k,v);return true;},
+      deleteProperty:function(t,k){Storage.prototype.removeItem.call(proxy,k);return true;}
+    });
+    storageStates.set(proxy,state);return proxy;
+  }
+  w.Storage=Storage;w.localStorage=makeStorage('local');w.sessionStorage=makeStorage('session');
 
   // ---------------------------------------------------------------- сеть
   class Headers {
@@ -294,7 +313,10 @@
     constructor(body, init) {
       init = init || {};
       this._body = body === undefined || body === null ? '' : body;
-      this._blob = body instanceof Blob ? body : new Blob([this._body]);
+      // Text/JSON responses do not need an eagerly encoded byte array.
+      // Keep binary bodies snapshotted, and materialize bytes only on demand.
+      this._text = typeof this._body === 'string' ? this._body : null;
+      this._blob = this._text === null ? (body instanceof Blob ? body : new Blob([this._body])) : null;
       this.status = init.status === undefined ? 200 : init.status;
       this.statusText = init.statusText || '';
       this.ok = this.status >= 200 && this.status < 300;
@@ -305,11 +327,11 @@
       this.bodyUsed = false;
     }
     _consume(read) { if(this.bodyUsed)return Promise.reject(new TypeError('Response body has already been consumed'));this.bodyUsed=true;return read(); }
-    text() { return this._consume(()=>this._blob.text()); }
+    text() { return this._consume(()=>this._text === null ? this._blob.text() : Promise.resolve(this._text)); }
     json() { return this.text().then(text=>JSON.parse(text)); }
-    blob() { return this._consume(()=>Promise.resolve(new Blob([this._blob],{type:this.headers.get('content-type')||''}))); }
-    arrayBuffer() { return this._consume(()=>this._blob.arrayBuffer()); }
-    clone() { if(this.bodyUsed)throw new TypeError('Response body has already been consumed');return new Response(this._body, this); }
+    blob() { return this._consume(()=>Promise.resolve(new Blob([this._blob || this._text],{type:this.headers.get('content-type')||''}))); }
+    arrayBuffer() { return this._consume(()=>(this._blob || new Blob([this._text])).arrayBuffer()); }
+    clone() { if(this.bodyUsed)throw new TypeError('Response body has already been consumed');return new Response(this._blob || this._text, this); }
     static json(d, i) { return new Response(JSON.stringify(d), i); }
     static error() { return new Response('', { status: 0 }); }
   }
@@ -492,8 +514,8 @@
   function Proxy_(st, el) {
     var o = Object.create(st);
     o.getPropertyValue = function (p) { return my.computed(el, String(p)); };
-    ['display', 'visibility', 'color', 'backgroundColor', 'fontSize', 'fontWeight', 'fontStyle', 'textAlign',
-     'opacity', 'position', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'paddingTop', 'paddingBottom',
+    ['display', 'visibility', 'color', 'backgroundColor', 'fontSize', 'fontWeight', 'fontStyle', 'fontFamily', 'textAlign',
+     'opacity', 'position', 'pointerEvents', 'marginTop', 'marginBottom', 'marginLeft', 'marginRight', 'paddingTop', 'paddingBottom',
      'paddingLeft', 'paddingRight'].forEach(function (k) { o[k] = my.computed(el, k); });
     return o;
   }

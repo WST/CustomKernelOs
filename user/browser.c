@@ -88,10 +88,10 @@ static char *astrdup(const char *s, int n) {
 
 /* ------------------------------------------------------------ элементы на странице */
 
-enum { IT_TEXT, IT_HR, IT_BOX, IT_INPUT, IT_BUTTON, IT_BULLET, IT_FILL, IT_IMG };
+enum { IT_TEXT, IT_HR, IT_BOX, IT_INPUT, IT_BUTTON, IT_BULLET, IT_FILL, IT_IMG, IT_ATOMIC };
 
 struct item {
-    int clip;
+    int clip, inline_owner, fixed;
     int  x, y, w, h;
     unsigned char kind, scale, bold, underline, strike;
     unsigned char font, fsize;     /* IT_TEXT шрифтом TrueType: какой и какого размера (0 — моноширинный) */
@@ -122,6 +122,7 @@ struct imgent {
 static struct imgent imgs[IMG_N];
 static int img_page;               /* растёт с каждой новой страницей */
 static unsigned img_clock;
+static bool img_more;
 static int img_find(const char *u, bool create);
 
 #define MAX_ITEMS 60000
@@ -283,7 +284,7 @@ static struct dom_style def_style, plain_style;
 static void init_styles(void) {
     memset(&def_style, 0, sizeof(def_style));
     def_style.display = DS_INLINE;
-    def_style.color = 0x141414;
+    def_style.color = 0x141414;def_style.opacity=10000;
     def_style.bg = -1;
     def_style.font_px = 16;
     def_style.width = def_style.max_width = def_style.height = -1;
@@ -292,16 +293,75 @@ static void init_styles(void) {
 }
 
 /* прямоугольники фона и рамок блоков */
-struct box { int x, y, w, h; int radius, clip, clip_height; int bg; short bw[4]; int bc[4]; };
+struct box { int x, y, w, h; int radius, clip, clip_height, fixed; int bg; short bw[4],padding[4]; int bc[4];
+    const struct css_background *background,*mask; const struct css_shadows *shadows;
+    unsigned char pointer_none,opacity,mask_luminance,mask_composite[CSS_BG_LAYERS];
+    int bg_clip,images[CSS_BG_LAYERS],mask_images[CSS_BG_LAYERS]; };
 #define MAX_BOXES 12000
 static struct box *boxes;
 static int n_boxes;
+
+/* A display list interleaves each background with its content. Positioned
+ * stacking contexts own their descendants, so a child's z-index cannot escape
+ * its parent context. Paint and hit testing consume the same flattened order. */
+#define MAX_CONTEXTS 4096
+#define MAX_PAINT (MAX_ITEMS+MAX_BOXES+3*MAX_CONTEXTS)
+enum { PAINT_ITEM, PAINT_BOX, PAINT_CONTEXT, PAINT_BEGIN, PAINT_END };
+struct paint_command { int kind,index,next; };
+struct paint_context { int head,tail,children,sibling,z,background,effect_box,end;
+    color_t *snapshot;int x,y,w,h,anchor_first,anchor_end; };
+static struct paint_command paint_commands[MAX_PAINT];
+static struct paint_context paint_contexts[MAX_CONTEXTS];
+static int paint_order[MAX_PAINT],n_paint_commands,n_paint_order,n_contexts,current_context;
+static int current_fixed,page_has_fixed,fixed_roots;
+static void paint_context_init(int id,int z) {
+    struct paint_context *p=&paint_contexts[id];p->head=p->tail=p->children=p->sibling=p->background=p->effect_box=-1;p->z=z;p->snapshot=NULL;p->anchor_first=-1;
+}
+static void paint_append(int kind,int index) {
+    if(n_paint_commands>=MAX_PAINT)return;
+    int id=n_paint_commands++;paint_commands[id]=(struct paint_command){kind,index,-1};
+    struct paint_context *p=&paint_contexts[current_context];
+    if(p->tail>=0)paint_commands[p->tail].next=id;else p->head=id;p->tail=id;
+}
+static int paint_new_context(int z) {
+    if(n_contexts>=MAX_CONTEXTS)return -1;
+    int id=n_contexts++;paint_context_init(id,z);paint_append(PAINT_CONTEXT,id);
+    int *link=&paint_contexts[current_context].children;
+    while(*link>=0 && paint_contexts[*link].z<=z)link=&paint_contexts[*link].sibling;
+    paint_contexts[id].sibling=*link;*link=id;return id;
+}
+static void paint_effect_command(int kind,int context) {
+    if(n_paint_commands>=MAX_PAINT || n_paint_order>=MAX_PAINT)return;
+    int op=n_paint_commands++;paint_commands[op]=(struct paint_command){kind,context,-1};paint_order[n_paint_order++]=op;
+}
+static void paint_flatten(int context) {
+    struct paint_context *p=&paint_contexts[context];
+    if(p->effect_box>=0)paint_effect_command(PAINT_BEGIN,context);
+    if(p->background>=0)paint_order[n_paint_order++]=p->background;
+    for(int c=p->children;c>=0;c=paint_contexts[c].sibling)if(paint_contexts[c].z<0)paint_flatten(c);
+    for(int i=p->head;i>=0;i=paint_commands[i].next) {
+        struct paint_command *op=&paint_commands[i];
+        if(op->kind==PAINT_CONTEXT){if(!paint_contexts[op->index].z)paint_flatten(op->index);}
+        else if(i!=p->background)paint_order[n_paint_order++]=i;
+    }
+    for(int c=p->children;c>=0;c=paint_contexts[c].sibling)if(paint_contexts[c].z>0)paint_flatten(c);
+    if(p->effect_box>=0){p->end=n_paint_order;paint_effect_command(PAINT_END,context);}
+}
+static void paint_reset(void) {
+    n_paint_commands=n_paint_order=0;n_contexts=1;current_context=current_fixed=page_has_fixed=fixed_roots=0;paint_context_init(0,0);
+}
+
+static void move_fragment(int first,int end,int box_first,int box_end,int dx,int dy,int anchor) {
+    for(int i=first;i<end;i++)if(items[i].fixed==anchor){items[i].x+=dx;items[i].y+=dy;}
+    for(int i=box_first;i<box_end;i++)if(boxes[i].fixed==anchor){boxes[i].x+=dx;boxes[i].y+=dy;}
+}
 
 static struct item *add_item(int kind, int w, int h) {
     if (n_items >= MAX_ITEMS) return NULL;
     struct item *it = &items[n_items++];
     memset(it, 0, sizeof(*it));
-    it->kind = kind;
+    it->kind = kind;it->inline_owner=-1;it->fixed=current_fixed;
+    paint_append(PAINT_ITEM,n_items-1);
     it->clip=clip_box;
     it->x = lx;
     it->y = ly;
@@ -322,11 +382,19 @@ static void finish_line(void) {
     int shift = 0;
     if (cs->align) {                                       /* text-align: center / right */
         int used = left;
-        for (int i = line_start; i < n_items; i++) if (items[i].x + items[i].w > used) used = items[i].x + items[i].w;
+        for (int i = line_start; i < n_items; i++) if (items[i].inline_owner<0 && items[i].x + items[i].w > used) used = items[i].x + items[i].w;
         shift = cs->align == 1 ? (right - used) / 2 : right - used;
         if (shift < 0) shift = 0;
     }
-    for (int i = line_start; i < n_items; i++) { items[i].y = ly + leading/2 + asc - items[i].h; items[i].x += shift; }
+    for (int i = line_start; i < n_items; i++) {
+        struct item *it=&items[i];if(it->inline_owner>=0)continue;
+        int y=ly+leading/2+asc-it->h;
+        if(it->kind==IT_ATOMIC) {
+            int dy=y-it->y;
+            move_fragment(it->img,i,it->color,it->bg,shift,dy,it->fixed);
+        }
+        it->y=y;it->x+=shift;
+    }
     ly += asc + desc + leading;
     line_leading = 0;
     lx = left;
@@ -347,7 +415,6 @@ static void apply_gap(void) {
     gap_pending = 0;
 }
 
-static int cur_scale(void) { return cs->font_px >= 26 ? 2 : 1; }
 
 static int luma(int c) { return (((c >> 16) & 255) * 299 + ((c >> 8) & 255) * 587 + (c & 255) * 114) / 1000; }
 
@@ -363,7 +430,8 @@ static color_t text_color(void) {
 }
 
 /* шрифт и размер текущего текста (из CSS) */
-static int cur_font(void) { return cs->bold ? FONT_UI_BOLD : FONT_UI; }
+static int style_font(const struct dom_style *s) {return s->font_family?(s->bold?FONT_MONO_BOLD:FONT_MONO):(s->bold?FONT_UI_BOLD:FONT_UI);}
+static int cur_font(void) { return style_font(cs); }
 static int cur_size(void) {
     int px = cs->font_px;
     if (px < 9) px = 9;
@@ -386,8 +454,14 @@ static void place_word(const char *w, int n) {
     int sw = text_width(font, size, " ");
     int space = space_pending && lx > left ? sw : 0;
     int h = size * 5 / 4 + 1;                              /* межстрочный интервал ~1.25 */
-    if (lx + space + width > right && lx > left) { finish_line(); space = 0; }
-    if (width > right - left) {                            /* слово длиннее строки — рубим */
+    if(!cs->nowrap && (cs->wrap_word&2) && lx>left && lx+space+width>right) {
+        int available=right-lx-space,fit=text_fit(font,size,w,available);
+        if(fit>0 && fit<n) {
+            place_word(w,fit);space_pending=false;finish_line();place_word(w+fit,n-fit);return;
+        }
+    }
+    if (!cs->nowrap && lx + space + width > right && lx > left) { finish_line(); space = 0; }
+    if (!cs->nowrap && cs->wrap_word && width > right - left && n>utf8_len1(w)) {                            /* слово длиннее строки — рубим */
         int fit = text_fit(font, size, w, right - lx);
         if (fit < 1) fit = utf8_len1(w);
         if (fit > n) fit = n;
@@ -517,6 +591,28 @@ static bool styled_button(const struct dom_style *s) {
     return dom_css && (s->flex_row || s->bg>=0 || s->padding[0] || s->padding[1] || s->padding[2] || s->padding[3]);
 }
 
+static int clampi(int v,int lo,int hi);
+static int u8count(const char *s,int bytes);
+static int control_styled(const struct dom_style *s) {
+    return dom_css && (s->width>=0 || s->height>=0 || s->min_width>0 || s->font_px!=16 || s->font_family || s->bold || s->bg>=0 ||
+        s->padding[0] || s->padding[1] || s->padding[2] || s->padding[3] ||
+        s->border[0] || s->border[1] || s->border[2] || s->border[3] || s->radius);
+}
+static void control_size(int *w,int *h) {
+    int ex=cs->padding[1]+cs->padding[3]+cs->border[1]+cs->border[3];
+    int ey=cs->padding[0]+cs->padding[2]+cs->border[0]+cs->border[2];
+    int avail=right-left;
+    if(cs->width>=0)*w=(cs->width_pct?avail*cs->width/100:cs->width)+(cs->border_box?0:ex);
+    else *w+=ex;
+    if(cs->max_width>=0){int max=(cs->max_width_pct?avail*cs->max_width/100:cs->max_width)+(cs->border_box?0:ex);if(*w>max)*w=max;}
+    int min=(cs->min_width_pct?avail*cs->min_width/100:cs->min_width)+(cs->border_box?0:ex);
+    if(*w<min)*w=min;
+    if(cs->height>=0)*h=(cs->height_pct?layout_image_height:cs->height)+(cs->border_box?0:ey);
+    else *h+=ey;
+    if(*h<cs->min_height)*h=cs->min_height;
+    *w=clampi(*w,1,20000);*h=clampi(*h,1,20000);
+}
+
 static void tag_input(const char *t, int n, bool button_tag) {
     char type[16], name[40], value[128];
     get_attr(t, n, "type", type, sizeof(type));
@@ -538,12 +634,15 @@ static void tag_input(const char *t, int n, bool button_tag) {
         in->type = 's';
         if (!in->value[0]) strcpy(in->value, button_tag ? "Submit" : "Submit");
         apply_gap();
-        int w = strlen(in->value) * 8 + 20;
+        int custom=control_styled(cs),size=clampi(cs->font_px,9,72);
+        int w = custom?text_width(style_font(cs),size,in->value)+20:u8count(in->value,strlen(in->value))*8+20;
+        int h = custom?text_line_h(FONT_UI,size)+8:24;
+        if(custom)control_size(&w,&h);
         if (lx + w + 8 > right && lx > left) finish_line();
         if (space_pending && lx > left) lx += 8;
-        struct item *it = add_item(IT_BUTTON, w, 24);
+        struct item *it = add_item(IT_BUTTON, w, h);
         if (!it) return;
-        it->input = n_inputs;
+        it->input = n_inputs;it->node=in->node;it->fsize=custom?size:0;
         in->item = it - items;
         lx += w;
         space_pending = true;
@@ -557,12 +656,15 @@ static void tag_input(const char *t, int n, bool button_tag) {
     if (chars < 8) chars = 8;
     if (chars > 50) chars = 50;
     apply_gap();
-    int w = chars * 8 + 8;
+    int custom=control_styled(cs),size=clampi(cs->font_px,9,72);
+    int w = chars * 8 + 8,h=custom?text_line_h(FONT_UI,size)+8:24;
+    if(custom)control_size(&w,&h);
     if (lx + w + 8 > right && lx > left) finish_line();
     if (space_pending && lx > left) lx += 8;
-    struct item *it = add_item(IT_INPUT, w, 24);
+    struct item *it = add_item(IT_INPUT, w, h);
     if (!it) return;
-    it->input = n_inputs;
+    it->input = n_inputs;it->node=in->node;it->fsize=custom?size:0;
+    char placeholder[128];if(get_attr(t,n,"placeholder",placeholder,sizeof(placeholder)))it->text=astrdup(placeholder,strlen(placeholder));
     in->item = it - items;
     lx += w;
     space_pending = true;
@@ -732,19 +834,24 @@ enum { FK_INLINE, FK_BLOCK, FK_IBLOCK, FK_ROW, FK_CELL };
 struct frame {
     const struct dom_style *prev, *s;
     int kind, left, right, box, inline_bg, cur_bg, item_start;
-    int fill_x, fill_start, fill_lines, flex_item, promoted;
+    int flex_item;
     int flex_x, flex_y, flex_bottom, flex_count, column;
     int id, box_start, content_y, fragment_start;
     int row_left, row_right, row_count, button_input;
     int outflow, flow_y, flow_gap, target_height, containing_right, containing_bottom, position_y;
     int old_clip;
-    int sizing_avail, flex_fixed, flex_autos, flex_grow;
+    int sizing_avail, flex_fixed, flex_autos, flex_grow, grid_columns;
+    int vertical_item, border_x, border_y, border_w;
+    int old_context,own_context,old_fixed,fixed_anchor;
+    int floating, float_left, float_right, float_y, float_bottom, float_count;
+    int inline_x, inline_y, inline_w, inline_h, saved_line_h, saved_below, saved_start, saved_leading, saved_gap;
     double flex_weight;
 };
 static struct frame frames[256];
 struct flex_fragment {
     struct frame *parent;
     int item_begin, item_end, box_begin, box_end, box, bottom, align, stretch;
+    int x, y, width, grow, fixed_anchor;
 };
 static struct flex_fragment flex_fragments[MAX_ITEMS];
 static int n_flex_fragments;
@@ -771,13 +878,20 @@ static int measure_intrinsic(const char *s,int size,int bold) {
         char full[1024];resolve_url(url,s,full,sizeof(full));int k=img_find(full,false);
         return k>=0 && imgs[k].state==IMG_OK?imgs[k].w:24;
     }
-    return text_width(bold?FONT_UI_BOLD:FONT_UI,clampi(size,9,72),s)+(*s?2:0);
+    return text_width((bold&2)?((bold&1)?FONT_MONO_BOLD:FONT_MONO):((bold&1)?FONT_UI_BOLD:FONT_UI),clampi(size,9,72),s)+(*s?2:0);
 }
 /* Measure auto bases before distributing positive or negative free space. */
 static int flex_width(struct frame *p, const struct dom_style *s, int id, int avail, int gap) {
-    if (p->s->grid_columns) {
-        int cols=p->s->grid_columns;
-        int width=(avail-gap*(cols-1))/cols;
+    if(p->grid_columns) {
+        int cols=p->grid_columns,index=p->row_count%cols;
+        if(p->s->grid_auto){int width=(avail-gap*(cols-1))/cols;return width>0?width:1;}
+        int used=gap*(cols-1),weights=0;
+        for(int i=0;i<cols;i++) {
+            int type=p->s->grid_track_type[i],value=p->s->grid_track[i];
+            if(type)used+=type==2?avail*value/100:value;else weights+=value;
+        }
+        int type=p->s->grid_track_type[index],value=p->s->grid_track[index];
+        int width=type==1?value:type==2?avail*value/100:weights && avail>used?(int)((long long)(avail-used)*value/weights):0;
         return width>0?width:1;
     }
     int count = p->flex_count > 0 ? p->flex_count : 1;
@@ -828,11 +942,38 @@ static void flex_finish_row(struct frame *p) {
             p->s->justify == 3 && count>1 ? free*index/(count-1) :
             p->s->justify == 4 ? free*(2*index+1)/(2*count) :
             p->s->justify == 5 ? free*(index+1)/(count+1) : 0;
+        if(p->s->flex_reverse)dx=p->row_left+p->row_right-2*r->x-r->width-dx;
         int extra = p->flex_bottom-r->bottom;
         int dy = r->align == 1 ? extra/2 : r->align == 2 ? extra : 0;
-        for (int k=r->item_begin;k<r->item_end;k++) { items[k].x+=dx; items[k].y+=dy; }
-        for (int k=r->box_begin;k<r->box_end;k++) { boxes[k].x+=dx; boxes[k].y+=dy; }
+        move_fragment(r->item_begin,r->item_end,r->box_begin,r->box_end,dx,dy,r->fixed_anchor);
         if (r->stretch && r->box >= 0 && extra > 0) boxes[r->box].h += extra;
+        index++;
+    }
+    p->fragment_start=n_flex_fragments;
+}
+
+/* Column flex uses the same retained fragments as rows. Only completed
+ * subtrees are moved, so text, backgrounds and hit targets stay together. */
+static void flex_finish_column(struct frame *p) {
+    int count=0,grow=0;
+    for(int i=p->fragment_start;i<n_flex_fragments;i++)if(flex_fragments[i].parent==p){count++;grow+=flex_fragments[i].grow;}
+    int extra=ly-p->flex_bottom;if(extra<0)extra=0;
+    int index=0,used=0,weight=0;
+    for(int i=p->fragment_start;i<n_flex_fragments;i++) {
+        struct flex_fragment *r=&flex_fragments[i];if(r->parent!=p)continue;
+        int increase=0,dy=used;
+        if(grow){weight+=r->grow;int total=extra*weight/grow;increase=total-used;used=total;}
+        else dy=p->s->justify==1?extra/2:p->s->justify==2?extra:
+            p->s->justify==3 && count>1?extra*index/(count-1):
+            p->s->justify==4?extra*(2*index+1)/(2*count):p->s->justify==5?extra*(index+1)/(count+1):0;
+        if(p->s->flex_reverse) {
+            int height=r->box>=0?boxes[r->box].h:r->bottom-r->y;
+            dy=p->content_y+ly-2*r->y-height-increase-dy;
+        }
+        int room=p->row_right-r->x-r->width;if(room<0)room=0;
+        int dx=r->align==1?room/2:r->align==2?room:0;
+        move_fragment(r->item_begin,r->item_end,r->box_begin,r->box_end,dx,dy,r->fixed_anchor);
+        if(r->box>=0)boxes[r->box].h+=increase;
         index++;
     }
     p->fragment_start=n_flex_fragments;
@@ -866,25 +1007,20 @@ static void list_marker(const struct dom_style *s) {
     space_pending = false;
 }
 
-/* в inline-block оказался блок (карточка в flex-строке): дальше считаем его блоком —
- * с новой строки, с фоном и рамкой на всю ширину */
-static void promote(struct frame *f) {
-    for (struct frame *p = f - 1; p >= frames; p--) {
-        if (!p->s || p->kind == FK_INLINE) continue;
-        if (p->kind != FK_IBLOCK || p->promoted) return;
-        p->promoted = 1;
-        finish_line();
-        const struct dom_style *ps = p->s;
-        if ((ps->bg >= 0 || has_border(ps) || ps->bg_image) && n_boxes < MAX_BOXES) {
-            apply_gap();
-            struct box *b = &boxes[n_boxes];
-            p->box = n_boxes++;
-            b->x = left; b->y = ly; b->w = right - left; b->h = 0;
-            b->bg = ps->bg; b->radius=ps->radius;b->clip=clip_box;b->clip_height=-1;
-            for (int i = 0; i < 4; i++) { b->bw[i] = clampi(ps->border[i], 0, 8); b->bc[i] = ps->border_color[i]; }
-            ly += clampi(ps->padding[0] + ps->border[0], 0, 120);
-        }
-        return;
+static void box_background(struct box *b,const struct dom_style *s) {
+    b->background=s->background;b->bg_clip=s->bg_clip;b->mask=s->mask;b->shadows=s->shadows;b->pointer_none=s->pointer_none;b->opacity=(s->opacity*255+5000)/10000;b->mask_luminance=s->mask_luminance;
+    memcpy(b->mask_composite,s->mask_composite,sizeof(b->mask_composite));
+    for(int i=0;i<CSS_BG_LAYERS;i++) {
+        b->mask_images[i]=-1;
+        if(!s->mask || i>=s->mask->count || !s->mask->layer[i].url)continue;
+        int k=img_find(s->mask->layer[i].url,true);b->mask_images[i]=k;if(k>=0)imgs[k].page=img_page;
+    }
+    for(int side=0;side<4;side++)b->padding[side]=s->padding[side];
+    for(int i=0;i<CSS_BG_LAYERS;i++) {
+        b->images[i]=-1;
+        if(!b->background || i>=b->background->count || !b->background->layer[i].url)continue;
+        int k=img_find(b->background->layer[i].url,true);b->images[i]=k;
+        if(k>=0)imgs[k].page=img_page;
     }
 }
 
@@ -892,7 +1028,13 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
     f->button_input=!strcmp(tag,"button") && styled_button(s) && n_inputs<MAX_INPUTS?n_inputs:-1;
     f->id = id;
     f->box_start = n_boxes;
-    f->old_clip=clip_box;
+    f->old_clip=clip_box;f->old_context=current_context;f->old_fixed=current_fixed;f->own_context=-1;
+    if(s->fixed==2){current_fixed=++fixed_roots;page_has_fixed=1;clip_box=-1;}
+    f->fixed_anchor=current_fixed;
+    if(s->mask || s->opacity<10000 || s->fixed==2 || (s->has_z_index && (s->fixed || cs->flex_row || cs->flex_column))) {
+        int context=paint_new_context(s->has_z_index?s->z_index:0);
+        if(context>=0){current_context=context;f->own_context=context;}
+    }
     f->prev = cs;
     f->s = s;
     f->left = left;
@@ -902,9 +1044,8 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
     f->cur_bg = cur_bg;
     f->item_start = n_items;
     f->flex_item = cs->flex_row;
-    f->promoted = 0;
     f->kind = display_kind(s);
-    f->column = 0;
+    f->column = f->vertical_item = f->floating = 0;
     int vertical=s->padding[0]+s->padding[2]+s->border[0]+s->border[2];
     int parent_height=f>frames?(f-1)->target_height:dom_view_height;
     f->target_height=s->height_pct?(parent_height*s->height/100):(s->height>=0?s->height:0);
@@ -931,6 +1072,32 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         if(s->height<0 && offsets[0]!=CSS_AUTO && offsets[2]!=CSS_AUTO) f->target_height=f->containing_bottom-ly;
         f->kind=FK_BLOCK;
     }
+    if(f>frames && !f->outflow && !cs->flex_row && !cs->flex_column) {
+        struct frame *p=f-1;
+        if(p->float_count && (s->clear_side || ly>=p->float_bottom)) {
+            finish_line();if(ly<p->float_bottom)ly=p->float_bottom;
+            left=p->row_left;right=p->row_right;lx=left;p->float_count=0;
+        }
+        if(s->float_side) {
+            finish_line();apply_gap();
+            if(!p->float_count){p->float_left=p->row_left;p->float_right=p->row_right;p->float_y=p->float_bottom=ly;}
+            int avail=p->row_right-p->row_left;
+            int width=s->width<0?dom_layout_intrinsic(id,measure_intrinsic):
+                (s->width_pct?avail*s->width/100:s->width)+(s->border_box?0:s->padding[1]+s->padding[3]+s->border[1]+s->border[3]);
+            width+=vmargin(s->margin[1])+vmargin(s->margin[3]);width=clampi(width,1,avail>0?avail:1);
+            if(p->float_count && width>p->float_right-p->float_left){p->float_y=p->float_bottom;p->float_left=p->row_left;p->float_right=p->row_right;}
+            left=s->float_side==2?p->float_right-width:p->float_left;right=left+width;
+            if(s->float_side==2)p->float_right=left;else p->float_left=right;
+            p->float_count++;ly=p->float_y;lx=left;gap_pending=0;f->floating=1;f->kind=FK_BLOCK;
+        }
+    }
+    if(cs->flex_column && f>frames && !f->outflow) {
+        struct frame *p=f-1;finish_line();
+        left=p->row_left;right=p->row_right;ly=p->flex_y;lx=left;gap_pending=0;
+        int align=s->align_self?(s->align_self==4?0:s->align_self):cs->align_items;
+        if(s->width<0 && align)right=left+clampi(dom_layout_intrinsic(id,measure_intrinsic),1,right-left);
+        f->vertical_item=1;f->kind=FK_BLOCK;
+    }
     if (cs->flex_row && f > frames && !f->outflow) {
         struct frame *p = f - 1;
         int avail = right - left;
@@ -948,7 +1115,7 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         int width = flex_width(p,s,id,avail,gap);
         if (anonymous && s->width < 0) width = clampi((right-p->flex_x)/count,1,avail);
         int margins = vmargin(s->margin[1]) + vmargin(s->margin[3]);
-        if (cs->flex_wrap && p->flex_x > left && (p->flex_x + width + margins > right + 1 || (cs->grid_columns && p->row_count >= cs->grid_columns))) {
+        if (cs->flex_wrap && p->flex_x > left && (p->flex_x + width + margins > right + 1 || (p->grid_columns && p->row_count >= p->grid_columns))) {
             flex_finish_row(p);
             p->row_count=0;
             p->flex_x = left;
@@ -968,11 +1135,11 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         if(width>0 && left+width<right)right=left+width;
         f->kind=FK_BLOCK;
     }
-    if (f->kind == FK_BLOCK) promote(f);
     bool root = !strcmp(tag, "html") || !strcmp(tag, "body");
     switch (f->kind) {
     case FK_BLOCK: {
         block(vmargin(s->margin[0]));
+        if(f->column || f->vertical_item || f->floating)apply_gap();
         inline_bg = -1;
         int avail = right - left;
         int ml = s->margin[3] == CSS_AUTO ? 0 : clampi(s->margin[3], -left, 2000);
@@ -986,24 +1153,33 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         if (s->max_width >= 0) {
             int mw = s->max_width_pct ? avail * s->max_width / 100 : s->max_width;
             if (!s->border_box) mw += s->padding[1] + s->padding[3] + s->border[1] + s->border[3];
-            if (want < 0 || mw < want) want = mw;
+            if (want < 0) want = mw < bxr-bx ? mw : bxr-bx;
+            else if (mw < want) want = mw;
         }
-        if (want >= 0 && want < bxr - bx) {
-            int extra = bxr - bx - want;
+        int minw=s->min_width_pct?avail*s->min_width/100:s->min_width;
+        if(minw>0 && !s->border_box)minw+=s->padding[1]+s->padding[3]+s->border[1]+s->border[3];
+        if((want<0 && minw>bxr-bx) || (want>=0 && want<minw))want=minw;
+        if (want >= 0) {
+            int extra = bxr - bx - want;if(extra<0)extra=0;
             if (s->margin[1] == CSS_AUTO && s->margin[3] == CSS_AUTO) bx += extra / 2;
             else if (s->margin[3] == CSS_AUTO) bx += extra;
             bxr = bx + want;
         }
         if (bxr < bx) bxr = bx;
-        bool painted = s->bg >= 0 || has_border(s) || s->bg_image || s->clip_overflow;
-        if (root && s->bg >= 0 && page_bg < 0) { page_bg = s->bg; painted = has_border(s); }   /* фон страницы */
+        f->border_x=bx;f->border_y=ly;f->border_w=bxr-bx;
+        bool painted = s->bg >= 0 || has_border(s) || s->bg_image || s->mask || s->opacity<10000 || s->shadows || s->clip_overflow;
+        if (root && s->bg >= 0 && page_bg < 0 && !s->mask && s->opacity==10000) { page_bg = s->bg; painted = has_border(s) || s->bg_image || s->mask || s->opacity<10000 || s->shadows; }   /* фон страницы */
         int pt = s->padding[0] + s->border[0];
-        if (painted || pt || s->flex_row) apply_gap();
+        if (painted || pt || s->flex_row || s->flex_column) apply_gap();
+        f->border_y=ly;
         if (painted && n_boxes < MAX_BOXES) {
             struct box *b = &boxes[n_boxes];
-            f->box = n_boxes++;
+            f->box = n_boxes++;b->fixed=current_fixed;
+            if(f->own_context>=0)paint_contexts[current_context].background=n_paint_commands;
+            paint_append(PAINT_BOX,f->box);
             b->x = bx; b->y = ly; b->w = bxr - bx; b->h = 0;
             b->bg = root && s->bg == page_bg ? -1 : s->bg; b->radius=s->radius;b->clip=clip_box;
+            box_background(b,s);
             b->clip_height=s->clip_overflow && f->target_height>0?f->target_height+s->padding[0]+s->padding[2]+s->border[0]+s->border[2]:-1;
             if(s->clip_overflow)clip_box=f->box;
             for (int i = 0; i < 4; i++) { b->bw[i] = clampi(s->border[i], 0, 8); b->bc[i] = s->border_color[i]; }
@@ -1029,20 +1205,30 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
         }
         break;
     case FK_IBLOCK: {
-        int target=s->width>=0?(s->width_pct?(right-left)*s->width/100:s->width):dom_layout_intrinsic(id,measure_intrinsic);
-        if(target>0 && lx+target<right)right=lx+target;
-        int sc = cur_scale();
-        if (space_pending && lx > left) lx += 8 * sc;
-        space_pending = false;
-        if (lx > left) lx += vmargin(s->margin[3]);
-        if (lx > right - 16 && lx > left) finish_line();
-        f->fill_x = lx;
-        f->fill_start = n_items;
-        f->fill_lines = lines_done;
-        lx += clampi(s->border[3] + s->padding[3], 0, 64);
-        inline_bg = -1;
-        if (s->bg >= 0) cur_bg = s->bg;
-        else if (s->bg_image) cur_bg = -2;
+        int extra=s->padding[1]+s->padding[3]+s->border[1]+s->border[3];
+        int target=s->width>=0?(s->width_pct?(right-left)*s->width/100:s->width)+(s->border_box?0:extra):dom_layout_intrinsic(id,measure_intrinsic);
+        if(target<1)target=1;
+        if(s->max_width>=0){int max=(s->max_width_pct?(right-left)*s->max_width/100:s->max_width)+(s->border_box?0:extra);if(target>max)target=max;}
+        int minimum=(s->min_width_pct?(right-left)*s->min_width/100:s->min_width)+(s->border_box?0:extra);if(target<minimum)target=minimum;
+        int space=space_pending && lx>left?4:0;
+        int ml=vmargin(s->margin[3]),mr=vmargin(s->margin[1]);
+        if(lx>left && lx+space+ml+target+mr>right){finish_line();space=0;}
+        apply_gap();
+        f->inline_x=lx+space+ml;f->inline_y=ly;f->inline_w=target;
+        f->saved_line_h=line_h;f->saved_below=line_below;f->saved_start=line_start;f->saved_leading=line_leading;f->saved_gap=gap_pending;
+        if((s->bg>=0 || s->bg_image || s->mask || s->opacity<10000 || s->shadows || has_border(s) || s->clip_overflow) && n_boxes<MAX_BOXES) {
+            f->box=n_boxes++;struct box *b=&boxes[f->box];memset(b,0,sizeof(*b));b->fixed=current_fixed;
+            if(f->own_context>=0)paint_contexts[current_context].background=n_paint_commands;
+            paint_append(PAINT_BOX,f->box);
+            b->x=f->inline_x;b->y=ly;b->w=target;b->bg=s->bg;b->radius=s->radius;b->clip=clip_box;b->clip_height=-1;box_background(b,s);
+            for(int k=0;k<4;k++){b->bw[k]=clampi(s->border[k],0,8);b->bc[k]=s->border_color[k];}
+            if(s->clip_overflow)clip_box=f->box;
+        }
+        left=f->inline_x+s->padding[3]+s->border[3];right=f->inline_x+target-s->padding[1]-s->border[1];
+        if(right<left)right=left;
+        lx=left;ly+=s->padding[0]+s->border[0];
+        line_h=line_below=line_leading=0;line_start=n_items;space_pending=false;gap_pending=0;
+        inline_bg=-1;if(s->bg>=0)cur_bg=s->bg;
         break;
     }
     default:
@@ -1056,7 +1242,13 @@ static void style_open(struct frame *f, const struct dom_style *s, const char *t
     f->row_left = left; f->row_right = right;
     f->flex_x = left;
     f->flex_y = f->flex_bottom = ly;
+    f->float_count=0;f->float_left=left;f->float_right=right;f->float_y=f->float_bottom=ly;
     f->flex_count = s->flex_row ? dom_layout_children(id) : 0;
+    f->grid_columns=s->grid_columns;
+    if(s->grid_auto && s->grid_min>0) {
+        f->grid_columns=clampi((right-left+s->column_gap)/(s->grid_min+s->column_gap),1,32);
+        if(s->grid_auto==1 && f->grid_columns>f->flex_count)f->grid_columns=f->flex_count>0?f->flex_count:1;
+    }
 }
 
 /* блок закрылся: высота его фона; картинка фона со светлым текстом поверх — тёмный фон */
@@ -1064,12 +1256,7 @@ static void box_done(struct frame *f) {
     struct box *b = &boxes[f->box];
     b->h = ly - b->y;
     if (b->h < 0) b->h = 0;
-    if (f->s->bg_image && b->bg < 0) {
-        int light = 0, dark = 0;
-        for (int i = f->item_start; i < n_items; i++)
-            if (items[i].kind == IT_TEXT && items[i].bg == TRANSPARENT) { if (luma(items[i].color) > 170) light++; else dark++; }
-        if (light > dark) b->bg = RGB(58, 64, 72);
-    }
+
 }
 
 static void style_close(struct frame *f) {
@@ -1079,8 +1266,10 @@ static void style_close(struct frame *f) {
         finish_line();
         if (f->column) apply_gap(); /* child paragraph margins belong inside the flex item's height */
         int target = f->target_height;
+        if(f->float_count && ly<f->float_bottom)ly=f->float_bottom;
         if (ly < f->content_y+target) ly = f->content_y+target;
         if(s->clip_overflow && s->height>=0)ly=f->content_y+target;
+        if(s->flex_column)flex_finish_column(f);
         if (s->flex_row) {
             if (ly > f->flex_bottom) f->flex_bottom=ly;
             flex_finish_row(f);
@@ -1100,35 +1289,12 @@ static void style_close(struct frame *f) {
         finish_line();
         break;
     case FK_IBLOCK: {
-        if (f->promoted) {
-            finish_line();
-            if (f->box >= 0) {
-                ly += clampi(s->padding[2] + s->border[2], 0, 120);
-                box_done(f);
-            }
-            block(vmargin(s->margin[2]));
-            break;
-        }
-        lx += clampi(s->padding[1] + s->border[1], 0, 64);
-        if ((s->bg >= 0 || has_border(s)) && f->fill_lines == lines_done) {   /* кнопка в одну строку — рисуем фон */
-            int inner = 0;
-            for (int i = f->fill_start; i < n_items; i++) if (items[i].h > inner) inner = items[i].h;
-            if (!inner) inner = 16;
-            int above = clampi(s->padding[0] + s->border[0], 0, 32), below = clampi(s->padding[2] + s->border[2], 0, 32);
-            int save_lx = lx;
-            struct item *it = add_item(IT_FILL, lx - f->fill_x, inner + above);
-            if (it) {
-                it->x = f->fill_x;
-                it->below = below;
-                it->bg = s->bg >= 0 ? (color_t)s->bg : TRANSPARENT;
-                it->color = has_border(s) ? (color_t)(s->border_color[0] >= 0 ? s->border_color[0] : s->border_color[2]) : TRANSPARENT;
-                it->link = cur_link;
-                if (below > line_below) line_below = below;
-            }
-            lx = save_lx;
-        }
-        lx += vmargin(s->margin[1]);
-        if (f->flex_item) space_pending = true;           /* элементы flex-строки не слипаются */
+        finish_line();apply_gap();
+        if(ly<f->content_y+f->target_height)ly=f->content_y+f->target_height;
+        ly+=s->padding[2]+s->border[2];f->inline_h=ly-f->inline_y;
+        if(f->box>=0)box_done(f);
+        left=f->left;right=f->right;lx=f->inline_x;ly=f->inline_y;
+        line_h=f->saved_line_h;line_below=f->saved_below;line_start=f->saved_start;line_leading=f->saved_leading;gap_pending=f->saved_gap;
         break;
     }
     default:
@@ -1144,27 +1310,42 @@ static void style_close(struct frame *f) {
             w=x2-x;h=y2-y;
         }
         struct item *it=&items[n_items++];memset(it,0,sizeof(*it));
-        it->kind=IT_BUTTON;it->fsize=255;it->x=x;it->y=y;it->w=w;it->h=h;it->input=f->button_input;it->clip=clip_box;
+        it->fixed=current_fixed;paint_append(PAINT_ITEM,n_items-1);
+        it->kind=IT_BUTTON;it->inline_owner=-1;it->fsize=255;it->x=x;it->y=y;it->w=w;it->h=h;it->input=f->button_input;it->clip=clip_box;
         it->link=-1;it->node=f->id;inputs[f->button_input].item=it-items;
+    }
+    if(f->kind==FK_IBLOCK && n_items<MAX_ITEMS) {
+        int end=n_items;struct item *atom=add_item(IT_ATOMIC,f->inline_w,f->inline_h);
+        atom->x=f->inline_x;atom->y=f->inline_y;atom->node=f->id;atom->img=f->item_start;atom->color=f->box_start;atom->bg=n_boxes;
+        for(int k=f->item_start;k<end;k++)items[k].inline_owner=end;
+        lx=f->inline_x+f->inline_w+vmargin(s->margin[1]);space_pending=false;
     }
     inline_bg = f->inline_bg;
     cur_bg = f->cur_bg;
-    if (f->column) {
+    if (f->column || f->vertical_item) {
         struct frame *p = f - 1;
         apply_gap();
         if (n_flex_fragments < MAX_ITEMS) {
             struct flex_fragment *r = &flex_fragments[n_flex_fragments++];
             r->parent=p; r->item_begin=f->item_start; r->item_end=n_items;
             r->box_begin=f->box_start; r->box_end=n_boxes; r->box=f->box;
-            r->bottom=ly;
+            r->bottom=ly;r->x=f->border_x;r->y=f->border_y;r->width=f->border_w;r->grow=s->flex_grow;r->fixed_anchor=f->fixed_anchor;
             r->align=s->align_self ? (s->align_self == 4 ? 0 : s->align_self) : p->s->align_items;
             r->stretch=!r->align && s->height < 0;
+        }
+        if(f->vertical_item) {
+            ly+=vmargin(s->margin[2]);p->flex_y=ly+clampi(p->s->row_gap,0,2000);
         }
         if (ly > p->flex_bottom) p->flex_bottom = ly;
         ly = p->flex_bottom;
         left = f->left; right = f->right; lx = left;
         gap_pending = 0;
         line_start = n_items;
+    }
+    if(f->floating) {
+        struct frame *p=f-1;ly+=vmargin(s->margin[2]);if(ly>p->float_bottom)p->float_bottom=ly;
+        left=p->float_left;right=p->float_right;lx=left;ly=p->float_y;gap_pending=0;
+        line_h=line_below=line_leading=0;line_start=n_items;space_pending=false;
     }
     if(f->outflow) {
         int x=f->box>=0?boxes[f->box].x:f->row_left,y=f->position_y;
@@ -1175,18 +1356,26 @@ static void style_close(struct frame *f) {
         if(s->position_edge[0]==CSS_AUTO && s->position_edge[2]!=CSS_AUTO)dy=f->containing_bottom-y-h;
         dx+=(s->translate_pct&1)?s->translate_x*w/100:s->translate_x;
         dy+=(s->translate_pct&2)?s->translate_y*h/100:s->translate_y;
-        for(int i=f->item_start;i<n_items;i++){items[i].x+=dx;items[i].y+=dy;}
-        for(int i=f->box_start;i<n_boxes;i++){boxes[i].x+=dx;boxes[i].y+=dy;}
+        move_fragment(f->item_start,n_items,f->box_start,n_boxes,dx,dy,f->fixed_anchor);
         left=f->left;right=f->right;lx=left;ly=f->flow_y;gap_pending=f->flow_gap;
         line_h=line_below=line_leading=0;line_start=n_items;space_pending=false;
     }
     if(f->kind==FK_IBLOCK) {left=f->left;right=f->right;}
-    clip_box=f->old_clip;
+    if(f->own_context>=0 && (s->mask || s->opacity<10000)) {
+        int effect_box=f->box;
+        if(effect_box<0 && n_items>f->item_start && n_boxes<MAX_BOXES) {
+            effect_box=n_boxes++;struct box *b=&boxes[effect_box];memset(b,0,sizeof(*b));
+            b->bg=-1;b->clip=f->old_clip;b->clip_height=-1;b->fixed=f->fixed_anchor;box_background(b,s);
+            paint_contexts[f->own_context].anchor_first=f->item_start;paint_contexts[f->own_context].anchor_end=n_items;
+        }
+        if(effect_box>=0)paint_contexts[f->own_context].effect_box=effect_box;
+    }
+    clip_box=f->old_clip;current_context=f->old_context;current_fixed=f->old_fixed;
 }
 
 /* разобрать HTML и разложить */
 static void layout_html(const char *s, int n, bool plain) {
-    paint_epoch++;
+    paint_epoch++;paint_reset();
     sel_item = sel_end_item = -1; text_drag = false;
     input_all = false;
     n_flex_fragments = 0;
@@ -1205,7 +1394,7 @@ static void layout_html(const char *s, int n, bool plain) {
     cur_bg = -1;
     cs = plain ? &plain_style : &def_style;
     page_title[0] = 0;
-    if (plain) { left = MARGIN; lx = left; add_text(s, n); finish_line(); doc_h = ly + 16; return; }
+    if (plain) { left = MARGIN; lx = left; add_text(s, n); finish_line(); doc_h = ly + 16; paint_flatten(0);return; }
     int i = 0;
     while (i < n) {
         if (s[i] == '<') {
@@ -1249,14 +1438,15 @@ static void layout_html(const char *s, int n, bool plain) {
                     if (ds) { style_open(f, ds, nm, id); cs = ds; }
                     if (!in_skip) handle_tag(s + i + 1, j - i - 1);
                 } else if (!in_skip) {                     /* <img>, <input>, <br>... */
-                    if(ds && (ds->fixed==1 || ds->fixed==2 || (cs->flex_row && (!strcmp(nm,"img") || !strcmp(nm,"input")))) && node_sp<256) {
+                    if(ds && (ds->mask || ds->opacity<10000 || ds->fixed==1 || ds->fixed==2 || ((cs->flex_row || cs->flex_column || display_kind(ds)==FK_BLOCK || ds->float_side) && (!strcmp(nm,"img") || !strcmp(nm,"input")))) && node_sp<256) {
                         struct frame *f=&frames[node_sp];node_stack[node_sp++]=id;
                         style_open(f,ds,nm,id);layout_image_height=f->target_height;cs=ds;handle_tag(s+i+1,j-i-1);style_close(f);cs=f->prev;node_sp--;
                         i=j+1;continue;
                     }
                     bool blk = ds && display_kind(ds) == FK_BLOCK && strcmp(nm, "hr");
                     if (blk) block(vmargin(ds->margin[0]));
-                    handle_tag(s + i + 1, j - i - 1);
+                    const struct dom_style *saved=cs;if(ds)cs=ds;
+                    handle_tag(s + i + 1, j - i - 1);cs=saved;
                     if (blk) block(vmargin(ds->margin[2]));
                 }
             }
@@ -1270,7 +1460,7 @@ static void layout_html(const char *s, int n, bool plain) {
     }
     while (node_sp > 0) { struct frame *f = &frames[--node_sp]; if (f->s) { style_close(f); cs = f->prev; } }
     finish_line();
-    doc_h = ly + 16;
+    doc_h = ly + 16;paint_flatten(0);
 }
 
 /* ------------------------------------------------------------ адреса */
@@ -1450,6 +1640,12 @@ static void draw_status(void) {
 }
 
 static void draw_img(struct item *it, int y);
+static void draw_background(struct box *b,int y);
+static void draw_background_color(struct box *b,int y);
+static void box_ink_bounds(struct box *b,int y,int *x0,int *y0,int *x1,int *y1);
+static void draw_box_shadows(struct box *b,int y,int inset);
+static int effect_begin(int context,int command);
+static void effect_end(int context);
 static void set_status(const char *s);
 
 static bool page_selection(void) {
@@ -1492,7 +1688,7 @@ static void page_clip_bounds(int clip,int *x0,int *y0,int *x1,int *y1) {
         if(paint_damage_bottom<*y1)*y1=paint_damage_bottom;
     }
     for(int depth=0;clip>=0 && clip<n_boxes && depth<256;depth++) {
-        struct box *b=&boxes[clip];int y=b->y-scroll+VIEW_Y,h=b->clip_height>=0?b->clip_height:b->h;
+        struct box *b=&boxes[clip];int y=b->y-(b->fixed?0:scroll)+VIEW_Y,h=b->clip_height>=0?b->clip_height:b->h;
         if(b->x>*x0)*x0=b->x;
         if(y>*y0)*y0=y;
         if(b->x+b->w<*x1)*x1=b->x+b->w;
@@ -1508,6 +1704,38 @@ static void page_clip(int clip) {
 static int page_clip_contains(int clip,int x,int y) {
     int x0,y0,x1,y1;page_clip_bounds(clip,&x0,&y0,&x1,&y1);return x>=x0 && x<x1 && y>=y0 && y<y1;
 }
+static void draw_css_control(struct item *it,int y,int button) {
+    const struct dom_style *s=dom_style(it->node);
+    if(!s)return;
+    int radius=clampi(s->radius,0,it->h/2),border=0;
+    color_t edge=RGB(185,191,199),bg=s->bg>=0?(color_t)s->bg:button?RGB(243,245,246):C_WHITE;
+    for(int k=0;k<4;k++)if(s->border[k]>border){border=s->border[k];if(s->border_color[k]>=0)edge=s->border_color[k];}
+    if(!border && s->bg<0)border=1;
+    if(border){gfx_round_rect(it->x,y,it->w,it->h,radius,edge);int r=radius-border;if(r<0)r=0;
+        gfx_round_rect(it->x+border,y+border,it->w-2*border,it->h-2*border,r,bg);}
+    else gfx_round_rect(it->x,y,it->w,it->h,radius,bg);
+    struct input *in=&inputs[it->input];
+    int focused=focus_input==it->input;
+    if(focused)gfx_rect(it->x,y,it->w,it->h,UI_ACCENT);
+    int px=s->padding[3]+s->border[3];if(!px)px=4;
+    int pr=s->padding[1]+s->border[1];if(!pr)pr=4;
+    int inner=it->w-px-pr;if(inner<1)return;
+    const char *value=in->value;int placeholder=!button && !*value && it->text;
+    if(placeholder)value=it->text;
+    int font=style_font(s);
+    if(!button && !placeholder)while(*value && text_width(font,it->fsize,value)>inner-2){value++;while(u8cont(*value))value++;}
+    int tw=text_width(font,it->fsize,value),tx=button?it->x+(it->w-tw)/2:it->x+px;
+    int ty=y+(it->h-text_line_h(font,it->fsize))/2;
+    int cx,cy,cw,ch;gfx_clip_get(&cx,&cy,&cw,&ch);
+    int x0=it->x+px>cx?it->x+px:cx,y0=y+border>cy?y+border:cy;
+    int x1=it->x+it->w-pr<cx+cw?it->x+it->w-pr:cx+cw,y1=y+it->h-border<cy+ch?y+it->h-border:cy+ch;
+    gfx_set_clip(x0,y0,x1>x0?x1-x0:0,y1>y0?y1-y0:0);
+    if(!button && focused && input_all)gfx_fill_rect(it->x+px,y+border,inner,it->h-2*border,UI_SELECT);
+    text_draw(font,it->fsize,tx,ty,value,placeholder?RGB(115,120,128):(color_t)s->color);
+    if(!button && focused)gfx_fill_rect(tx+tw,ty,2,text_line_h(font,it->fsize),UI_TEXT);
+    gfx_set_clip(cx,cy,cw,ch);
+}
+
 static void draw_page(void) {
     int dirty_top=paint_damage_bottom>paint_damage_top?paint_damage_top:VIEW_Y;
     int dirty_bottom=paint_damage_bottom>paint_damage_top?paint_damage_bottom:VIEW_Y+VIEW_H;
@@ -1520,36 +1748,35 @@ static void draw_page(void) {
         gfx_text(24, VIEW_Y + 72, "The page loaded, but its content was not built.", UI_DARK, TRANSPARENT);
         gfx_text(24, VIEW_Y + 96, "Ctrl+K: details. Use the Back button to return.", UI_DARK, TRANSPARENT);
     }
-    for (int i = 0; i < n_boxes; i++) {                      /* фон и рамки блоков */
-        struct box *b = &boxes[i];
+    for(int command=0;command<n_paint_order;command++) {
+        struct paint_command *op=&paint_commands[paint_order[command]];
+        if(op->kind==PAINT_BEGIN){if(!effect_begin(op->index,command))command=paint_contexts[op->index].end;continue;}
+        if(op->kind==PAINT_END){effect_end(op->index);continue;}
+        if(op->kind==PAINT_BOX) {
+        struct box *b = &boxes[op->index];
         page_clip(b->clip);
-        int y = b->y - scroll + VIEW_Y;
-        if (y + b->h < dirty_top || y > dirty_bottom || b->h <= 0) continue;
-        if (b->bg >= 0) {
-            int radius=clampi(b->radius,0,(b->w<b->h?b->w:b->h)/2);
-            if (radius) gfx_round_rect(b->x,y,b->w,b->h,radius,b->bg);
-            else gfx_fill_rect(b->x,y,b->w,b->h,b->bg);
-        }
+        int y = b->y - (b->fixed?0:scroll) + VIEW_Y;
+        int bx0,by0,bx1,by1;box_ink_bounds(b,y,&bx0,&by0,&bx1,&by1);
+        if(by1<dirty_top || by0>dirty_bottom || b->h<=0)continue;
+        draw_box_shadows(b,y,0);
+        draw_background_color(b,y);
+        draw_background(b,y);
+        draw_box_shadows(b,y,1);
         if (b->bw[0]) gfx_fill_rect(b->x, y, b->w, b->bw[0], b->bc[0]);
         if (b->bw[2]) gfx_fill_rect(b->x, y + b->h - b->bw[2], b->w, b->bw[2], b->bc[2]);
         if (b->bw[3]) gfx_fill_rect(b->x, y, b->bw[3], b->h, b->bc[3]);
         if (b->bw[1]) gfx_fill_rect(b->x + b->w - b->bw[1], y, b->bw[1], b->h, b->bc[1]);
-    }
-    for (int i = n_items - 1; i >= 0; i--) {                 /* фон inline-block (внешние раньше внутренних) */
-        struct item *it = &items[i];
-        if (it->kind != IT_FILL) continue;
+            continue;
+        }
+        int i=op->index;struct item *it=&items[i];
         page_clip(it->clip);
-        int y = it->y - scroll + VIEW_Y, h = it->h + it->below;
-        if (y + h < dirty_top - 32 || y > dirty_bottom) continue;
-        if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, h, it->bg);
-        if (it->color != TRANSPARENT) gfx_rect(it->x, y, it->w, h, it->color);
-    }
-    for (int i = 0; i < n_items; i++) {
-        struct item *it = &items[i];
-        page_clip(it->clip);
-        int y = it->y - scroll + VIEW_Y;
-        if (y + it->h < dirty_top - 32 || y > dirty_bottom) continue;
+        int y=it->y-(it->fixed?0:scroll)+VIEW_Y;
+        if(y+it->h+it->below<dirty_top-32 || y>dirty_bottom)continue;
         switch (it->kind) {
+        case IT_FILL:
+            if(it->bg!=TRANSPARENT)gfx_fill_rect(it->x,y,it->w,it->h+it->below,it->bg);
+            if(it->color!=TRANSPARENT)gfx_rect(it->x,y,it->w,it->h+it->below,it->color);
+            break;
         case IT_TEXT:
             if (it->bg != TRANSPARENT) gfx_fill_rect(it->x, y, it->w, it->h, it->bg);
             if (page_selection()) {
@@ -1599,6 +1826,7 @@ static void draw_page(void) {
             gfx_text(it->x + 3, y + 2, it->text, it->link >= 0 ? RGB(0, 0, 238) : RGB(120, 120, 110), TRANSPARENT);
             break;
         case IT_INPUT: {
+            if(it->fsize){draw_css_control(it,y,0);break;}
             struct input *in = &inputs[it->input];
             ui_sunken(it->x, y, it->w, it->h, C_WHITE);
             if (focus_input == it->input) gfx_rect(it->x, y, it->w, it->h, UI_ACCENT);
@@ -1611,6 +1839,7 @@ static void draw_page(void) {
             break;
         }
         case IT_BUTTON:
+            if(it->fsize && it->fsize!=255){draw_css_control(it,y,1);break;}
             if (it->fsize!=255) ui_button(it->x, y, it->w, it->h, inputs[it->input].value, false);
             break;
         }
@@ -1634,7 +1863,7 @@ static struct {
 static void redraw(void) {
     int delta=scroll-painted.scroll,step=delta<0?-delta:delta;
     int reuse=painted.valid && painted.pixels==win->pixels && painted.w==W && painted.h==H &&
-        painted.epoch==paint_epoch && step>0 && step<VIEW_H &&
+        painted.epoch==paint_epoch && !page_has_fixed && step>0 && step<VIEW_H &&
         focus_input<0 && painted.focus<0 && !page_selection() && !painted.selection &&
         !editing_addr && !painted.editing && !loading && !painted.loading && !dom_dirty && !painted.dirty;
     if(reuse) {
@@ -2362,7 +2591,7 @@ static void js_status(const char *m) { set_status(m); }
 
 /* ---- картинки: кэш, загрузка, рисование ---- */
 #define IMG_BUDGET (20 << 20)       /* байт пикселей на все картинки */
-static bool img_more;               /* на странице, может быть, есть нескачанные картинки */
+/* img_more: images/backgrounds remain in the queue. */
 static unsigned img_last_relayout;
 
 static void img_drop(struct imgent *e) {
@@ -2422,7 +2651,20 @@ static int b64v(int c) {
 /* data:image/png;base64,.... — картинка прямо в адресе */
 static void img_data_url(struct imgent *e) {
     const char *c = strchr(e->url, ',');
-    if (!c || !strstr(e->url, ";base64")) { e->state = IMG_FAILED; return; }
+    if(!c){e->state=IMG_FAILED;return;}
+    if(!strstr(e->url,";base64")) {
+        int len=strlen(c+1);unsigned char *data=malloc(len+1);if(!data){e->state=IMG_FAILED;return;}
+        int used=0;
+        for(const char *p=c+1;*p;p++) {
+            if(*p=='%' && p[1] && p[2]) {
+                int a=p[1]>='0' && p[1]<='9'?p[1]-'0':p[1]>='a' && p[1]<='f'?p[1]-'a'+10:p[1]>='A' && p[1]<='F'?p[1]-'A'+10:-1;
+                int b=p[2]>='0' && p[2]<='9'?p[2]-'0':p[2]>='a' && p[2]<='f'?p[2]-'a'+10:p[2]>='A' && p[2]<='F'?p[2]-'A'+10:-1;
+                if(a>=0 && b>=0){data[used++]=(a<<4)|b;p+=2;continue;}
+            }
+            data[used++]=*p;
+        }
+        img_store(e,data,used);free(data);return;
+    }
     c++;
     int n = strlen(c);
     unsigned char *d = malloc(n * 3 / 4 + 4);
@@ -2442,7 +2684,7 @@ static int img_find(const char *u, bool create) {
     int empty = -1;
     for (int i = 0; i < IMG_N; i++) {
         if (!imgs[i].url) { if (empty < 0) empty = i; continue; }
-        if (!strcmp(imgs[i].url, u)) { imgs[i].used = ++img_clock; return i; }
+        if (!strcmp(imgs[i].url, u)) { imgs[i].used = ++img_clock;if(imgs[i].state==IMG_QUEUED)img_more=true; return i; }
     }
     if (!create) return -1;
     if (empty < 0) {                                       /* место кончилось: самая давняя не с этой страницы */
@@ -2474,6 +2716,18 @@ static int img_next(void) {
         if (it->kind != IT_IMG || imgs[it->img].state != IMG_QUEUED || !imgs[it->img].url) continue;
         int d = it->y + it->h < scroll ? scroll - it->y : it->y > scroll + VIEW_H ? it->y - scroll : 0;
         if (d < best_d) { best_d = d; best = it->img; if (!d) break; }
+    }
+    for(int i=0;i<n_boxes;i++) {
+        struct box *b=&boxes[i];if(b->w<=0 || b->h<=0)continue;
+        int by=b->y+(b->fixed?scroll:0);
+        int d=by+b->h<scroll?scroll-by-b->h:by>scroll+VIEW_H?by-scroll-VIEW_H:0;
+        for(int pass=0;pass<2;pass++) {
+            const struct css_background *bg=pass?b->mask:b->background;if(!bg)continue;
+            for(int j=0;j<bg->count;j++) {
+                int k=pass?b->mask_images[j]:b->images[j];if(k<0 || imgs[k].state!=IMG_QUEUED || !imgs[k].url)continue;
+                if(d<best_d){best_d=d;best=k;}
+            }
+        }
     }
     return best;
 }
@@ -2531,6 +2785,9 @@ static bool img_pump(void) {
     return true;
 }
 
+#include "lib/browser_background.h"
+#include "lib/browser_effects.h"
+
 /* нарисовать картинку item на экране в (x, y), обрезав по области страницы */
 static void draw_img(struct item *it, int y) {
     struct imgent *e = &imgs[it->img];
@@ -2548,6 +2805,25 @@ static void draw_img(struct item *it, int y) {
         return;
     }
     e->used = ++img_clock;
+    const struct dom_style *style=it->node>=0?dom_style(it->node):NULL;
+    if(style && style->object_fit) {
+        int iw=e->w,ih=e->h;
+        if(style->object_fit==1 || style->object_fit==2 || style->object_fit==4) {
+            int cover=style->object_fit==2;
+            if((long long)w*ih>(long long)h*iw ? cover : !cover){ih=(long long)ih*w/iw;iw=w;}
+            else {iw=(long long)iw*h/ih;ih=h;}
+            if(style->object_fit==4 && iw>e->w){iw=e->w;ih=e->h;}
+        }
+        iw=clampi(iw,1,2000000);ih=clampi(ih,1,2000000);
+        int ox=x+(w-iw)*style->object_pos[0]/100,oy=y+(h-ih)*style->object_pos[1]/100;
+        int x0=clampi(x,cx0,cx1),x1=clampi(x+w,cx0,cx1),y0=clampi(y,cy0,cy1),y1=clampi(y+h,cy0,cy1);
+        for(int yy=y0;yy<y1;yy++)for(int xx=x0;xx<x1;xx++) {
+            if(xx<ox || xx>=ox+iw || yy<oy || yy>=oy+ih)continue;
+            unsigned pixel=e->px[(int)((long long)(yy-oy)*e->h/ih)*e->w+(int)((long long)(xx-ox)*e->w/iw)];
+            background_pixel(xx,yy,pixel);
+        }
+        return;
+    }
     if (!e->sc || e->sw != w || e->sh != h) {              /* копия под размер на странице */
         if (e->sc && e->sc != e->px) free(e->sc);
         e->sc = NULL;
@@ -2586,7 +2862,12 @@ static void early_paint(void) {
     redraw();
 }
 
-static struct dom_host dom_host = { js_fetch, js_status, console_add };
+#ifndef BROWSER_HOST
+#include "lib/browser_profile.h"
+static struct dom_host dom_host = { js_fetch, js_status, console_add, profile_read, profile_write };
+#else
+static struct dom_host dom_host = { js_fetch, js_status, console_add, NULL, NULL };
+#endif
 
 static unsigned last_layout;
 
@@ -2796,19 +3077,21 @@ static void submit_form(int form) {
 /* ------------------------------------------------------------ мышь и клавиши */
 
 static int item_at(int x, int y) {
-    int dy = y - VIEW_Y + scroll, fill = -1;
-    for(int i=n_items-1;i>=0;i--) {
-        struct item *it=&items[i];
-        if(it->kind==IT_BUTTON && it->fsize==255 && page_clip_contains(it->clip,x,y) && x>=it->x && x<it->x+it->w && dy>=it->y && dy<it->y+it->h)return i;
-    }
-    for (int i = 0; i < n_items; i++) {
-        struct item *it = &items[i];
-        if (page_clip_contains(it->clip,x,y) && x >= it->x && x < it->x + it->w && dy >= it->y && dy < it->y + it->h + it->below) {
-            if (it->kind != IT_FILL) return i;
-            if (fill < 0) fill = i;                          /* фон кнопки — если не попали в текст */
+    for(int command=n_paint_order-1;command>=0;command--) {
+        struct paint_command *op=&paint_commands[paint_order[command]];
+        if(op->kind==PAINT_BOX) {
+            struct box *b=&boxes[op->index];int dy=y-VIEW_Y+(b->fixed?0:scroll);
+            if(!b->pointer_none && b->bg>=0 && page_clip_contains(b->clip,x,y) && x>=b->x && x<b->x+b->w && dy>=b->y && dy<b->y+b->h)return -1;
+            continue;
         }
+        if(op->kind!=PAINT_ITEM)continue;
+        int i=op->index;struct item *it=&items[i];int dy=y-VIEW_Y+(it->fixed?0:scroll);
+        if(it->kind==IT_ATOMIC)continue;
+        const struct dom_style *style=it->node>=0?dom_style(it->node):NULL;
+        if(style && style->pointer_none)continue;
+        if(page_clip_contains(it->clip,x,y) && x>=it->x && x<it->x+it->w && dy>=it->y && dy<it->y+it->h+it->below)return i;
     }
-    return fill;
+    return -1;
 }
 
 static void scroll_by(int d) {
@@ -2849,11 +3132,12 @@ static void smooth_scroll_tick(void) {
 /* Locate a UTF-8 character boundary in the nearest rendered text run. */
 static int text_position(int x, int y, int *byte) {
     int best = -1, distance = 0x7fffffff;
-    y += scroll - VIEW_Y;
+    int screen_y=y-VIEW_Y;
     for (int i = 0; i < n_items; i++) {
         struct item *it = &items[i];
         if (it->kind != IT_TEXT || !it->text || !it->text[0]) continue;
-        int dy = y < it->y ? it->y - y : y >= it->y + it->h ? y - it->y - it->h + 1 : 0;
+        int local_y=screen_y+(it->fixed?0:scroll);
+        int dy = local_y < it->y ? it->y - local_y : local_y >= it->y + it->h ? local_y - it->y - it->h + 1 : 0;
         int dx = x < it->x ? it->x - x : x > it->x + it->w ? x - it->x - it->w : 0;
         int d = dy * 4096 + dx;
         if (d < distance) { distance = d; best = i; }

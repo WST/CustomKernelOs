@@ -23,14 +23,14 @@ int dom_view_width = 788, dom_view_height = 520;
 
 /* ------------------------------------------------------------------ свойства */
 
-enum { S_DISPLAY, S_VIS, S_COLOR, S_BG, S_FW, S_FSTYLE, S_FSIZE, S_TDEC, S_TALIGN, S_TTRANS, S_WS, S_LIST,
+enum { S_DISPLAY, S_VIS, S_POINTER, S_COLOR, S_BG, S_FW, S_FSTYLE, S_FSIZE, S_FAMILY, S_SHADOW, S_MASKIMG, S_MASKSIZE, S_MASKPOS, S_MASKREPEAT, S_MASKORIGIN, S_MASKCLIP, S_MASKMODE, S_MASKCOMPOSITE, S_TDEC, S_TALIGN, S_TTRANS, S_WS, S_LIST,
        S_MT, S_MR, S_MB, S_ML, S_PT, S_PR, S_PB, S_PL,
        S_BTW, S_BRW, S_BBW, S_BLW, S_BTC, S_BRC, S_BBC, S_BLC, S_BTS, S_BRS, S_BBS, S_BLS,
-       S_WIDTH, S_MAXW, S_HEIGHT, S_MAXH, S_OVERFLOW, S_POS, S_LEFT, S_TOP, S_CLIP, S_CLIPPATH, S_TINDENT,
-       S_FLEXDIR, S_BGIMG, S_BOXSIZING, S_COLGAP, S_ROWGAP, S_BASIS, S_FLEXWRAP, S_GROW, S_SHRINK, S_JUSTIFY, S_ALIGNITEMS, S_ALIGNSELF, S_MINH, S_LINEHEIGHT, S_GRIDCOLS, S_RADIUS, S_RIGHT, S_BOTTOM, S_OPACITY, S_TRANSLATE, S_TRANSFORM, S_COUNT };
+       S_WIDTH, S_MAXW, S_MINW, S_FLOAT, S_CLEAR, S_ZINDEX, S_HEIGHT, S_MAXH, S_OVERFLOW, S_POS, S_LEFT, S_TOP, S_CLIP, S_CLIPPATH, S_TINDENT,
+       S_FLEXDIR, S_BGIMG, S_BGSIZE, S_BGPOS, S_BGREPEAT, S_BGORIGIN, S_BGCLIP, S_OBJECTFIT, S_OBJECTPOS, S_WORDWRAP, S_WORDBREAK, S_BOXSIZING, S_COLGAP, S_ROWGAP, S_BASIS, S_FLEXWRAP, S_GROW, S_SHRINK, S_JUSTIFY, S_ALIGNITEMS, S_ALIGNSELF, S_MINH, S_LINEHEIGHT, S_GRIDCOLS, S_RADIUS, S_RIGHT, S_BOTTOM, S_OPACITY, S_TRANSLATE, S_TRANSFORM, S_COUNT };
 
 /* как достать значение своего свойства из сокращённой записи */
-enum { SH_NONE, SH_BOX, SH_PAIR, SH_BG, SH_FONT, SH_BORDER, SH_LIST, SH_TDEC, SH_FIRST, SH_FLEX };
+enum { SH_NONE, SH_BOX, SH_PAIR, SH_BG, SH_FONT, SH_BORDER, SH_LIST, SH_TDEC, SH_FIRST, SH_FLEX, SH_BGEXTRA, SH_MASKEXTRA, SH_MASKMODE };
 
 struct pmap { unsigned char slot, sh, idx; };
 struct propdef { const char *name; unsigned char n; struct pmap m[12]; };
@@ -40,11 +40,34 @@ struct propdef { const char *name; unsigned char n; struct pmap m[12]; };
 #define SIDE(w, c, s) 3, { { w, SH_BORDER, 0 }, { c, SH_BORDER, 1 }, { s, SH_BORDER, 2 } }
 
 static const struct propdef props[] = {
+    {"pointer-events",ONE(S_POINTER)},
     { "display", ONE(S_DISPLAY) }, { "visibility", ONE(S_VIS) }, { "color", ONE(S_COLOR) },
-    { "background-color", ONE(S_BG) }, { "background", 2, { { S_BG, SH_BG, 0 }, { S_BGIMG, SH_NONE, 0 } } },
-    { "background-image", ONE(S_BGIMG) },
+    { "background-color", ONE(S_BG) }, { "background", 7, { { S_BG, SH_BG, 0 }, { S_BGIMG, SH_NONE, 0 },
+      {S_BGSIZE,SH_BGEXTRA,0},{S_BGPOS,SH_BGEXTRA,1},{S_BGREPEAT,SH_BGEXTRA,2},
+      {S_BGORIGIN,SH_BGEXTRA,3},{S_BGCLIP,SH_BGEXTRA,4} } },
+    { "background-image", ONE(S_BGIMG) }, {"background-size",ONE(S_BGSIZE)},
+    {"background-position",ONE(S_BGPOS)}, {"background-repeat",ONE(S_BGREPEAT)},
+    {"background-origin",ONE(S_BGORIGIN)}, {"background-clip",ONE(S_BGCLIP)},
+    {"object-fit",ONE(S_OBJECTFIT)}, {"object-position",ONE(S_OBJECTPOS)},
+    {"overflow-wrap",ONE(S_WORDWRAP)}, {"word-wrap",ONE(S_WORDWRAP)}, {"word-break",ONE(S_WORDBREAK)},
+    {"mask",8,{{S_MASKIMG,SH_NONE,0},{S_MASKSIZE,SH_MASKEXTRA,0},{S_MASKPOS,SH_MASKEXTRA,1},
+      {S_MASKREPEAT,SH_MASKEXTRA,2},{S_MASKORIGIN,SH_MASKEXTRA,3},{S_MASKCLIP,SH_MASKEXTRA,4},
+      {S_MASKMODE,SH_MASKMODE,0},{S_MASKCOMPOSITE,SH_MASKMODE,1}}},
+    {"-webkit-mask",8,{{S_MASKIMG,SH_NONE,0},{S_MASKSIZE,SH_MASKEXTRA,0},{S_MASKPOS,SH_MASKEXTRA,1},
+      {S_MASKREPEAT,SH_MASKEXTRA,2},{S_MASKORIGIN,SH_MASKEXTRA,3},{S_MASKCLIP,SH_MASKEXTRA,4},
+      {S_MASKMODE,SH_MASKMODE,0},{S_MASKCOMPOSITE,SH_MASKMODE,1}}},
+    {"mask-image",ONE(S_MASKIMG)},{"-webkit-mask-image",ONE(S_MASKIMG)},
+    {"mask-size",ONE(S_MASKSIZE)},{"-webkit-mask-size",ONE(S_MASKSIZE)},
+    {"mask-position",ONE(S_MASKPOS)},{"-webkit-mask-position",ONE(S_MASKPOS)},
+    {"mask-repeat",ONE(S_MASKREPEAT)},{"-webkit-mask-repeat",ONE(S_MASKREPEAT)},
+    {"mask-origin",ONE(S_MASKORIGIN)},{"-webkit-mask-origin",ONE(S_MASKORIGIN)},
+    {"mask-clip",ONE(S_MASKCLIP)},{"-webkit-mask-clip",ONE(S_MASKCLIP)},
+    {"mask-mode",ONE(S_MASKMODE)},{"mask-composite",ONE(S_MASKCOMPOSITE)},
+    {"-webkit-mask-composite",ONE(S_MASKCOMPOSITE)},
+    {"box-shadow",ONE(S_SHADOW)},{"-webkit-box-shadow",ONE(S_SHADOW)},
+    {"font-family",ONE(S_FAMILY)},
     { "font-weight", ONE(S_FW) }, { "font-style", ONE(S_FSTYLE) }, { "font-size", ONE(S_FSIZE) },
-    { "font", 3, { { S_FW, SH_FONT, 0 }, { S_FSTYLE, SH_FONT, 1 }, { S_FSIZE, SH_FONT, 2 } } },
+    { "font", 4, { { S_FW, SH_FONT, 0 }, { S_FSTYLE, SH_FONT, 1 }, { S_FSIZE, SH_FONT, 2 }, { S_FAMILY, SH_FONT, 3 } } },
     { "text-decoration", 1, { { S_TDEC, SH_TDEC, 0 } } }, { "text-decoration-line", 1, { { S_TDEC, SH_TDEC, 0 } } },
     { "text-align", ONE(S_TALIGN) }, { "text-transform", ONE(S_TTRANS) }, { "white-space", ONE(S_WS) },
     { "list-style-type", ONE(S_LIST) }, { "list-style", 1, { { S_LIST, SH_LIST, 0 } } },
@@ -73,6 +96,8 @@ static const struct propdef props[] = {
     { "border-right-width", ONE(S_BRW) }, { "border-top-color", ONE(S_BTC) }, { "border-bottom-color", ONE(S_BBC) },
     { "border-left-color", ONE(S_BLC) }, { "border-right-color", ONE(S_BRC) }, { "border-top-style", ONE(S_BTS) },
     { "border-bottom-style", ONE(S_BBS) }, { "border-left-style", ONE(S_BLS) }, { "border-right-style", ONE(S_BRS) },
+    { "z-index", ONE(S_ZINDEX) }, { "float", ONE(S_FLOAT) }, { "clear", ONE(S_CLEAR) },
+    { "min-width", ONE(S_MINW) }, { "min-inline-size", ONE(S_MINW) },
     { "width", ONE(S_WIDTH) }, { "max-width", ONE(S_MAXW) }, { "height", ONE(S_HEIGHT) }, { "max-height", ONE(S_MAXH) },
     { "inline-size", ONE(S_WIDTH) }, { "max-inline-size", ONE(S_MAXW) },
     { "overflow", 1, { { S_OVERFLOW, SH_FIRST, 0 } } }, { "overflow-y", ONE(S_OVERFLOW) },
@@ -100,8 +125,8 @@ static const struct propdef props[] = {
 
 /* наследуемые свойства */
 static const unsigned char inherited[S_COUNT] = {
-    [S_VIS] = 1, [S_COLOR] = 1, [S_FW] = 1, [S_FSTYLE] = 1, [S_FSIZE] = 1, [S_TDEC] = 1, [S_TALIGN] = 1,
-    [S_TTRANS] = 1, [S_WS] = 1, [S_LIST] = 1, [S_LINEHEIGHT] = 1,
+    [S_POINTER]=1, [S_FAMILY]=1, [S_VIS] = 1, [S_COLOR] = 1, [S_FW] = 1, [S_FSTYLE] = 1, [S_FSIZE] = 1, [S_TDEC] = 1, [S_TALIGN] = 1,
+    [S_WORDWRAP]=1, [S_WORDBREAK]=1, [S_TTRANS] = 1, [S_WS] = 1, [S_LIST] = 1, [S_LINEHEIGHT] = 1,
 };
 
 #define PROP_HASH 256
@@ -722,8 +747,38 @@ static int value_ok(int slot, const char *v, int n) {
     }
 }
 
+/* Resolve URL tokens while their stylesheet base is still known. Keep URL
+ * spelling/case and skip quoted text and escaped parentheses. */
+static char *declaration_urls(const char *s,int n,const char *base,struct arena **ar) {
+    jsbuf b={0};int start=0;char quote=0;
+    for(int i=0;i<n;i++) {
+        if(s[i]=='\\' && i+1<n){i++;continue;}
+        if(quote){if(s[i]==quote)quote=0;continue;}
+        if(s[i]=='\'' || s[i]=='"'){quote=s[i];continue;}
+        if(i+4>n || lc(s[i])!='u' || lc(s[i+1])!='r' || lc(s[i+2])!='l' || s[i+3]!='(')continue;
+        int j=i+4;while(j<n && is_sp(s[j]))j++;
+        char q=j<n && (s[j]=='\'' || s[j]=='"')?s[j++]:0;
+        jsbuf u={0};
+        while(j<n && (q?s[j]!=q:s[j]!=')')) {
+            if(s[j]=='\\' && j+1<n)j++;
+            jb_addc(&u,s[j++]);
+        }
+        if(q){if(j>=n){jb_free(&u);break;}j++;while(j<n && is_sp(s[j]))j++;}
+        if(j>=n || s[j]!=')'){jb_free(&u);continue;}
+        while(u.n && is_sp(u.p[u.n-1]))u.n--;
+        jb_addc(&u,0);
+        jb_add(&b,s+start,i-start);jb_adds(&b,"url(\"");
+        if(u.n>1) {
+            if(!strncmp(u.p,"data:",5))jb_adds(&b,u.p);
+            else {char full[2048];dn_resolve(base,u.p,full,sizeof(full));jb_adds(&b,full);}
+        }
+        jb_adds(&b,"\")");jb_free(&u);i=j;start=j+1;
+    }
+    jb_add(&b,s+start,n-start);char *out=ar_str(ar,b.p,b.n);jb_free(&b);return out;
+}
+
 /* объявления «a: b; c: d !important» -> блок; ar — где хранить строки */
-static struct dblock *parse_decls(const char *s, int n, struct arena **ar) {
+static struct dblock *parse_decls(const char *s, int n, const char *base, struct arena **ar) {
     struct decl tmp[512];
     int nd = 0;
     int i = 0;
@@ -775,7 +830,7 @@ static struct dblock *parse_decls(const char *s, int n, struct arena **ar) {
         if (ne - ns > 2 && s[ns] == '-' && s[ns + 1] == '-') {   /* --переменная */
             d->prop = -1;
             d->name = ar_str(ar, s + ns, ne - ns);
-            d->val = ar_str(ar, s + vs, ve - vs);
+            d->val = declaration_urls(s+vs,ve-vs,base,ar);
             nd++;
             continue;
         }
@@ -789,7 +844,7 @@ static struct dblock *parse_decls(const char *s, int n, struct arena **ar) {
         for (int k = vs; k + 3 < ve; k++) if (s[k] == 'v' && !strncmp(s + k, "var(", 4)) { has_var = 1; break; }
         if (!has_var && props[p].n == 1 && props[p].m[0].sh == SH_NONE && !value_ok(props[p].m[0].slot, s + vs, ve - vs)) continue;
         d->prop = p;
-        d->val = ar_str(ar, s + vs, ve - vs);
+        d->val = declaration_urls(s+vs,ve-vs,base,ar);
         nd++;
     }
     if (!nd) return NULL;
@@ -862,8 +917,8 @@ static void do_import(const char *s, int n, const char *base, int author, int de
 }
 
 /* одно правило: селекторы через запятую { объявления } */
-static void add_style_rule(const char *sel, int sn, const char *body, int bn, int author) {
-    struct dblock *b = parse_decls(body, bn, &rule_arena);
+static void add_style_rule(const char *sel, int sn, const char *body, int bn, const char *base, int author) {
+    struct dblock *b = parse_decls(body, bn, base, &rule_arena);
     if (!b) return;
     char *s = malloc(sn + 1);
     memcpy(s, sel, sn);
@@ -945,7 +1000,7 @@ static void parse_block(const char *s, int n, const char *base, int author, int 
             } else if (starts(s + i, "@layer") || starts(s + i, "@scope") || starts(s + i, "@document") ||
                        starts(s + i, "@-moz-document")) parse_block(s + bs, be - bs, base, author, depth);
             /* @font-face, @keyframes, @page, @container... — пропускаем */
-        } else add_style_rule(s + i, j - i, s + bs, be - bs, author);
+        } else add_style_rule(s + i, j - i, s + bs, be - bs, base, author);
         i = k;
     }
 }
@@ -996,7 +1051,7 @@ static const char *ua_sheet =
     "u,ins{text-decoration:underline}s,strike,del{text-decoration:line-through}"
     "a:link{color:#0000ee;text-decoration:underline}"
     "center{text-align:center}"
-    "pre,listing,xmp,plaintext{white-space:pre;margin:1em 0}textarea{white-space:pre-wrap}"
+    "pre,code,kbd,samp,tt{font-family:monospace}pre,listing,xmp,plaintext{white-space:pre;margin:1em 0}textarea{white-space:pre-wrap}"
     "hr{margin:.5em 0}big{font-size:larger}small,sub,sup{font-size:smaller}"
     "mark{background-color:#ff0;color:#000}"
     "fieldset{margin:0 2px;padding:.35em .75em .625em;border:2px groove #c0c0c0}"
@@ -1115,13 +1170,23 @@ static int intrinsic_node(dnode *n,int (*measure)(const char *,int,int),int dept
             text[used++]=n->text[i];
         }
         text[used]=0;const struct dom_style *s=css_style(n->parent);
-        return measure(text,s->font_px,s->bold);
+        return measure(text,s->font_px,s->bold|(s->font_family<<1));
     }
     if(n->type!=DN_ELEMENT || css_hidden(n) || !strcmp(n->tag,"script") || !strcmp(n->tag,"style"))return 0;
     const struct dom_style *s=css_style(n);
     if(s->fixed==1 || s->fixed==2)return 0;
     int extra=s->padding[1]+s->padding[3]+s->border[1]+s->border[3];
     if(s->width>=0 && !s->width_pct)return s->width+(s->border_box?0:extra);
+    if(!strcmp(n->tag,"input")) {
+        const char *type=dn_get_attr(n,"type"),*value=dn_get_attr(n,"value");
+        if(type && !strcmp(type,"hidden"))return 0;
+        if(type && (!strcmp(type,"submit") || !strcmp(type,"button")))
+            return measure(value && *value?value:"Submit",s->font_px,s->bold|(s->font_family<<1))+20+extra;
+        const char *size=dn_get_attr(n,"size");int chars=size?atoi(size):24;
+        if(chars<1)chars=1;
+        if(chars>200)chars=200;
+        return chars*8+8+extra;
+    }
     if(!strcmp(n->tag,"svg") || !strcmp(n->tag,"img")) {
         const char *width=dn_get_attr(n,"width"),*src=dn_get_attr(n,"src");
         int w=width?atoi(width):src?measure(src,-1,0):24;return (w>0?w:24)+extra;
@@ -1130,7 +1195,7 @@ static int intrinsic_node(dnode *n,int (*measure)(const char *,int,int),int dept
     for(dnode *k=n->first;k;k=k->next) {
         int w=intrinsic_node(k,measure,depth+1);
         if(!w)continue;
-        if(s->flex_row) {if(count++)line+=s->column_gap;line+=w;}
+        if(s->flex_row || (k->type==DN_ELEMENT && css_style(k)->float_side)) {if(count++)line+=s->column_gap;line+=w;}
         else if(k->type==DN_ELEMENT && css_style(k)->display!=DS_INLINE && css_style(k)->display!=DS_INLINE_BLOCK) {
             if(line>width)width=line;
             line=0;
@@ -1200,7 +1265,8 @@ static void check_rules(struct cascade *c, int idx, dnode *n) {
 /* var(--x, запасное) -> значение; 0 — нет такой переменной */
 static int subst_vars(const char *v, char *out, int max, struct cvar *vars, int depth) {
     int o = 0;
-    while (*v && o < max - 1) {
+    while (*v) {
+        if(o>=max-1)return 0;
         if (v[0] == 'v' && !strncmp(v, "var(", 4)) {
             const char *p = v + 4;
             while (is_sp(*p)) p++;
@@ -1222,22 +1288,14 @@ static int subst_vars(const char *v, char *out, int max, struct cvar *vars, int 
             const char *val = NULL;
             for (struct cvar *k = vars; k; k = k->next)
                 if ((int)strlen(k->name) == nl && !strncmp(k->name, ns, nl)) { val = k->val; break; }
-            char tmp[1024];
-            if (val && depth < 8 && subst_vars(val, tmp, sizeof(tmp), vars, depth + 1)) {
-                int l = strlen(tmp);
-                if (o + l >= max) return 0;
-                memcpy(out + o, tmp, l);
-                o += l;
-            } else if (fb) {
-                char f[1024];
-                if (fbl > 1023) return 0;
-                memcpy(f, fb, fbl);
-                f[fbl] = 0;
-                if (!subst_vars(f, tmp, sizeof(tmp), vars, depth + 1)) return 0;
-                int l = strlen(tmp);
-                if (o + l >= max) return 0;
-                memcpy(out + o, tmp, l);
-                o += l;
+            if (val && depth < 8 && subst_vars(val, out+o, max-o, vars, depth+1)) {
+                o+=strlen(out+o);
+            } else if (fb && depth<8 && fbl<65536) {
+                char *fallback=malloc(fbl+1);if(!fallback)return 0;
+                memcpy(fallback,fb,fbl);fallback[fbl]=0;
+                int valid=subst_vars(fallback,out+o,max-o,vars,depth+1);free(fallback);
+                if(!valid)return 0;
+                o+=strlen(out+o);
             } else return 0;
             v = e;
             continue;
@@ -1249,6 +1307,9 @@ static int subst_vars(const char *v, char *out, int max, struct cvar *vars, int 
 }
 
 /* часть сокращённой записи (margin: 1px 2px -> второе слово и т. д.) */
+#include "css_background.h"
+#include "css_effects.h"
+
 static int sh_part(const char *v, int sh, int idx, char *out, int max) {
     const char *w[24];
     int wl[24];
@@ -1285,28 +1346,12 @@ static int sh_part(const char *v, int sh, int idx, char *out, int max) {
     case SH_FIRST:
         if (!n) return 0;
         PUT(0);
+    case SH_BGEXTRA: return bg_extract(v,idx,out,max,0);
+    case SH_MASKEXTRA: return bg_extract(v,idx,out,max,1);
+    case SH_MASKMODE: return mask_extra(v,idx,out,max);
     case SH_BG:
         if (n == 1 && (word_is(w[0], wl[0], "inherit") || word_is(w[0], wl[0], "initial") || word_is(w[0], wl[0], "unset"))) PUT(0);
         for (int i = n - 1; i >= 0; i--) if (parse_color(w[i], wl[i], &rgb, &a)) PUT(i);
-        for (int i = 0; i < n; i++)                                /* градиент: первый цвет */
-            if (wl[i] > 10 && (strstr(w[i], "gradient(") && strstr(w[i], "gradient(") < w[i] + wl[i])) {
-                char g[512];
-                int gl = wl[i] < 511 ? wl[i] : 511;
-                memcpy(g, w[i], gl);
-                g[gl] = 0;
-                char *p = strchr(g, '(') + 1;
-                const char *ww[32];
-                int wwl[32];
-                char *e = g + gl - 1;
-                if (*e == ')') *e = 0;
-                int m = split_words(p, ww, wwl, 32);
-                for (int j = 0; j < m; j++) if (parse_color(ww[j], wwl[j], &rgb, &a) == 1) {
-                    int l = wwl[j] < max - 1 ? wwl[j] : max - 1;
-                    memcpy(out, ww[j], l);
-                    out[l] = 0;
-                    return 1;
-                }
-            }
         PUTS("transparent");
     case SH_FONT: {
         if (n == 1 && (word_is(w[0], wl[0], "inherit") || word_is(w[0], wl[0], "initial"))) PUT(0);
@@ -1317,7 +1362,7 @@ static int sh_part(const char *v, int sh, int idx, char *out, int max) {
             if (idx == 0 && (word_is(w[i], wl[i], "bold") || word_is(w[i], wl[i], "bolder") || word_is(w[i], wl[i], "lighter") ||
                              (isnum && d >= 100 && d <= 1000))) PUT(i);
             if (idx == 1 && (word_is(w[i], wl[i], "italic") || word_is(w[i], wl[i], "oblique"))) PUT(i);
-            if (idx == 2 && !isnum) {
+            if ((idx == 2 || idx==3) && !isnum) {
                 struct lctx c = { 16, 16, 100 };
                 char t[64];
                 int l = wl[i] < 63 ? wl[i] : 63;
@@ -1325,10 +1370,13 @@ static int sh_part(const char *v, int sh, int idx, char *out, int max) {
                 t[l] = 0;
                 char *sl = strchr(t, '/');
                 if (sl) *sl = 0;
-                if (parse_len(t, strlen(t), &c, &d) == 1 || value_ok(S_FSIZE, t, strlen(t))) PUTS(t);
+                if(parse_len(t,strlen(t),&c,&d)==1 || value_ok(S_FSIZE,t,strlen(t))) {
+                    if(idx==3 && i+1<n)PUTS(w[i+1]);
+                    if(idx==2)PUTS(t);
+                }
             }
         }
-        PUTS("normal");
+        PUTS(idx==3?"sans-serif":"normal");
     }
     case SH_BORDER:
         for (int i = 0; i < n; i++) {
@@ -1363,7 +1411,7 @@ static int sh_part(const char *v, int sh, int idx, char *out, int max) {
 static void initial_style(struct cstyle *c) {
     memset(c, 0, sizeof(*c));
     c->s.display = DS_INLINE;
-    c->s.color = 0x141414;
+    c->s.color = 0x141414;c->s.opacity=10000;
     c->s.bg = -1;
     c->s.font_px = 16;
     c->s.width = c->s.max_width = -1;
@@ -1420,7 +1468,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     }
     const char *inl = dom_css ? dn_get_attr(n, "style") : NULL;
     if (inl && *inl) {                                          /* style="" — сильнее любого селектора */
-        struct dblock *b = parse_decls(inl, strlen(inl), &tmp_arena);
+        struct dblock *b = parse_decls(inl, strlen(inl), d_url, &tmp_arena);
         if (b) apply_block(&c, b, (1ULL << 49) | (0xFFFFFFULL << 24));
     }
 
@@ -1442,15 +1490,21 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         have[s] = 0;
         struct win *w = &c.w[s];
         if (!w->val) continue;
-        char tmp[1024];
+        static char tmp[8192];
         const char *v = w->val;
+        if((s==S_BGIMG || s==S_MASKIMG) && (strlen(v)>=sizeof(vals[s]) || strstr(v,"var("))) {
+            strcpy(vals[s],"image");have[s]=1;continue;
+        }
         if (strstr(v, "var(")) {
             if (!subst_vars(v, tmp, sizeof(tmp), out->vars, 0)) continue;   /* неизвестная переменная — как не задано */
             v = tmp;
         }
         if (w->sh) {
             if (!sh_part(v, w->sh, w->idx, vals[s], sizeof(vals[s]))) continue;
-        } else snprintf(vals[s], sizeof(vals[s]), "%s", v);
+        } else {
+            int length=strlen(v);if(length>=(int)sizeof(vals[s]))continue;
+            memcpy(vals[s],v,length+1);
+        }
         char *p = vals[s];                                      /* обрезать пробелы */
         while (is_sp(*p)) p++;
         if (p != vals[s]) memmove(vals[s], p, strlen(p) + 1);
@@ -1467,14 +1521,16 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
 
     struct dom_style *o = &out->s, *p = &ps->s;
     /* унаследованное */
-    o->color = p->color; o->bold = p->bold; o->italic = p->italic; o->underline = p->underline; o->strike = p->strike;
-    o->align = p->align; o->transform = p->transform; o->pre = p->pre; o->nowrap = p->nowrap; o->list = p->list;
+    o->pointer_none=p->pointer_none; o->font_family=p->font_family; o->color = p->color; o->bold = p->bold; o->italic = p->italic; o->underline = p->underline; o->strike = p->strike;
+    o->align = p->align; o->transform = p->transform; o->pre = p->pre; o->nowrap = p->nowrap; o->wrap_word=p->wrap_word; o->list = p->list;
     o->line_height = p->line_height;
     o->font_px = p->font_px; o->notext = p->notext; out->vis_hidden = ps->vis_hidden;
     /* сброшенное */
-    o->display = DS_INLINE; o->bg = -1; o->hidden = 0; o->flex_row = 0; o->bg_image = 0;
+    o->display = DS_INLINE; o->bg = -1; o->hidden = 0; o->flex_row = o->flex_column = o->flex_reverse = 0; o->bg_image = o->bg_clip = 0; o->background=o->mask=NULL;o->shadows=NULL;o->opacity=10000;o->mask_luminance=0;memset(o->mask_composite,0,sizeof(o->mask_composite));
+    o->object_fit=0;o->object_pos[0]=o->object_pos[1]=50;
+    o->float_side=o->clear_side=0; o->has_z_index=0; o->z_index=0; o->min_width=0; o->min_width_pct=0;
     o->width = o->max_width = -1; o->width_pct = o->max_width_pct = 0;
-    o->height = -1; o->min_height = 0; o->grid_columns = 0; o->radius = 0; o->fixed=0; o->height_pct=o->position_pct=o->translate_pct=0;
+    o->height = -1; o->min_height = 0; o->grid_columns = 0;o->grid_auto=0;o->grid_min=0;memset(o->grid_track,0,sizeof(o->grid_track));memset(o->grid_track_type,0,sizeof(o->grid_track_type)); o->radius = 0; o->fixed=0; o->height_pct=o->position_pct=o->translate_pct=0;
     o->translate_x=o->translate_y=0;
     for(int i=0;i<4;i++)o->position_edge[i]=CSS_AUTO;
     o->flex_grow = 0; o->flex_shrink = 100;
@@ -1487,13 +1543,19 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         if (have[s] == 2 && !inherited[s]) {
             if (s == S_BG) o->bg = p->bg;
             if (s == S_DISPLAY) o->display = p->display;
+            if (s == S_OPACITY) o->opacity=p->opacity;
+            if (s == S_SHADOW) o->shadows=p->shadows;
         }
         if (have[s] == 3 && inherited[s]) {
             if (s == S_COLOR) o->color = init.s.color;
             if (s == S_FW) o->bold = 0;
             if (s == S_FSTYLE) o->italic = 0;
             if (s == S_FSIZE) o->font_px = 16;
+            if (s == S_FAMILY) o->font_family=0;
+            if (s == S_POINTER) o->pointer_none=0;
             if (s == S_LINEHEIGHT) o->line_height = 0;
+            if (s == S_WORDWRAP) o->wrap_word&=~1;
+            if (s == S_WORDBREAK) o->wrap_word&=~2;
             if (s == S_TDEC) o->underline = o->strike = 0;
             if (s == S_TALIGN) o->align = 0;
             if (s == S_TTRANS) o->transform = 0;
@@ -1556,6 +1618,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         else if (starts(v, "disc")) o->list = LS_DISC;
         else if (v[0] == '"' || v[0] == '\'') o->list = LS_DISC;
     }
+    if((v=V(S_POINTER)))o->pointer_none=starts(v,"none");
     if ((v = V(S_VIS))) out->vis_hidden = starts(v, "hidden") || starts(v, "collapse");
 
     /* фон и цвет */
@@ -1567,22 +1630,50 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         if (r == 2) { rgb = p->color; a = 1; r = 1; }
         if (r == 1 && a >= 0.05) { o->bg = blend(rgb, ps->eff_bg, a); out->eff_bg = o->bg; }
     }
-    if ((v = V(S_BGIMG))) {                                     /* картинка фона: её не рисуем, но знаем, что она есть */
-        if (strstr(v, "url(")) o->bg_image = 1;
-        else if (strstr(v, "gradient(") && o->bg < 0) {
-            char g[256];
-            if (sh_part(v, SH_BG, 0, g, sizeof(g)) && parse_color(g, strlen(g), &rgb, &a) == 1 && a >= 0.05) {
-                o->bg = blend(rgb, ps->eff_bg, a);
-                out->eff_bg = o->bg;
-            }
-        }
+    /* Images need a larger buffer than ordinary computed property values.
+     * Inline SVG/data URLs must not be truncated at the old 255-byte boundary. */
+    static char bgvalue[8192];const char *image=NULL;
+    if(have[S_BGIMG]==1 && c.w[S_BGIMG].val) {
+        const char *raw=c.w[S_BGIMG].val;
+        if(strstr(raw,"var(")) {if(subst_vars(raw,bgvalue,sizeof(bgvalue),out->vars,0))image=bgvalue;}
+        else if(strlen(raw)<sizeof(bgvalue)){strcpy(bgvalue,raw);image=bgvalue;}
     }
+    o->background=bg_parse(image,V(S_BGSIZE),V(S_BGPOS),V(S_BGREPEAT),V(S_BGORIGIN),V(S_BGCLIP),&L);
+    o->bg_image=o->background!=NULL;
+    if(V(S_BGCLIP)) {
+        const char *parts[CSS_BG_LAYERS];int lengths[CSS_BG_LAYERS];
+        int count=image?bg_parts(image,parts,lengths,CSS_BG_LAYERS):1;
+        const char *clip=bg_at(V(S_BGCLIP),count>0?count-1:0);
+        if(clip)o->bg_clip=starts(clip,"content-box")?2:starts(clip,"padding-box")?1:0;
+    }
+    if((v=V(S_OBJECTFIT)))o->object_fit=starts(v,"contain")?1:starts(v,"cover")?2:starts(v,"none")?3:starts(v,"scale-down")?4:0;
+    if((v=V(S_OBJECTPOS))) {unsigned char pct=3;bg_pair(v,o->object_pos,&pct,&L,1);if(pct!=3)o->object_pos[0]=o->object_pos[1]=50;}
+    if((v=V(S_WORDWRAP)))o->wrap_word=(o->wrap_word&2)|((starts(v,"anywhere") || starts(v,"break-word"))?1:0);
+    if((v=V(S_WORDBREAK)))o->wrap_word=(o->wrap_word&1)|(starts(v,"break-all")?2:0)|(starts(v,"break-word")?1:0);
     if ((v = V(S_COLOR))) {
         int r = parse_color(v, strlen(v), &rgb, &a);
         if (r == 1) {
             if (a < 0.05) o->notext = 1;                        /* color: transparent — текст «спрятан» */
             else o->color = blend(rgb, out->eff_bg, a);
         }
+    }
+
+    if((v=V(S_FAMILY)))o->font_family=css_font_family(v);
+    if((v=V(S_SHADOW)))o->shadows=css_shadows(v,&L,o->color);
+    static char maskvalue[8192];const char *mask=NULL;
+    if(have[S_MASKIMG]==1 && c.w[S_MASKIMG].val) {
+        const char *raw=c.w[S_MASKIMG].val;
+        if(strstr(raw,"var(")){if(subst_vars(raw,maskvalue,sizeof(maskvalue),out->vars,0))mask=maskvalue;}
+        else if(strlen(raw)<sizeof(maskvalue)){strcpy(maskvalue,raw);mask=maskvalue;}
+    }
+    const char *mask_origin=V(S_MASKORIGIN);if(!mask_origin)mask_origin="border-box";
+    o->mask=bg_parse(mask,V(S_MASKSIZE),V(S_MASKPOS),V(S_MASKREPEAT),mask_origin,V(S_MASKCLIP),&L);
+    for(int i=0;o->mask && i<o->mask->count;i++) {
+        const char *mode=bg_at(V(S_MASKMODE),i),*composite=bg_at(V(S_MASKCOMPOSITE),i);
+        if(mode && starts(mode,"luminance"))o->mask_luminance|=1<<i;
+        if(composite)o->mask_composite[i]=starts(composite,"subtract") || starts(composite,"source-out")?1:
+            starts(composite,"intersect") || starts(composite,"source-in") || starts(composite,"destination-in")?2:
+            starts(composite,"exclude") || starts(composite,"xor")?3:0;
     }
 
     /* display */
@@ -1595,21 +1686,20 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         const char *fd = V(S_FLEXDIR);
         o->flex_row = !fd || starts(fd, "row") || starts(fd, "horizontal") || starts(fd, "wrap") || starts(fd, "nowrap");
         if (fd && starts(fd, "row") && strstr(fd, "column")) o->flex_row = 0;
+        o->flex_column = !o->flex_row;
+        o->flex_reverse=fd && strstr(fd,"reverse");
         const char *wrap = V(S_FLEXWRAP);
         o->flex_wrap = wrap && strstr(wrap, "wrap") && !strstr(wrap, "nowrap");
     }
     if (ps->s.flex_row && (disp == DS_BLOCK || disp == DS_LIST_ITEM || disp == DS_FLEX || disp == DS_GRID || disp == DS_TABLE))
         disp = DS_INLINE_BLOCK;                                 /* элементы flex-строки — в ряд */
+    if ((v=V(S_FLOAT))) o->float_side=starts(v,"left")?1:starts(v,"right")?2:0;
+    if ((v=V(S_CLEAR))) o->clear_side=starts(v,"left")?1:starts(v,"right")?2:starts(v,"both")?3:0;
+    if (ps->s.flex_row || ps->s.flex_column) o->float_side=0;
     o->display = disp;
     if (grid_raw) {
-        o->grid_columns=1;
-        const char *cols=V(S_GRIDCOLS);
-        if (cols && starts(cols,"repeat(")) {
-            double count;
-            if (read_num(cols+7,&count)>0 && count>=1 && count<=64) o->grid_columns=(int)count;
-        } else if (cols && strstr(cols,"fr")) {
-            const char *words[64];int sizes[64]; o->grid_columns=split_words(cols,words,sizes,64);
-        }
+        grid_tracks(o,V(S_GRIDCOLS),&L,0);
+        if(!o->grid_columns){o->grid_columns=1;o->grid_track[0]=100;}
         o->flex_row=1; o->flex_wrap=1;
     }
 
@@ -1659,6 +1749,11 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
         if (r == 1) o->width = clamp_px(d, 0, 20000);
         else if (strchr(v, '%') && read_num(v, &d) && !strstr(v, "calc")) { o->width = clamp_px(d, 0, 100); o->width_pct = 1; }
     }
+    if ((v = V(S_MINW))) {
+        int r = parse_len(v, strlen(v), &(struct lctx){ L.em, L.rem, -1 }, &d);
+        if (r == 1) o->min_width = clamp_px(d, 0, 20000);
+        else if (strchr(v, '%') && read_num(v, &d) && !strstr(v, "calc")) { o->min_width = clamp_px(d, 0, 2000); o->min_width_pct = 1; }
+    }
     if ((v = V(S_MAXW))) {
         int r = parse_len(v, strlen(v), &(struct lctx){ L.em, L.rem, -1 }, &d);
         if (r == 1) o->max_width = clamp_px(d, 0, 20000);
@@ -1668,6 +1763,7 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
     /* спрятан? */
     int hide = disp == DS_NONE || out->vis_hidden;
     const char *pos = V(S_POS);
+    if((v=V(S_ZINDEX)) && read_num(v,&d)==(int)strlen(v)) {o->has_z_index=1;o->z_index=d<-1000000?-1000000:d>1000000?1000000:(int)d;}
     o->fixed=pos?(starts(pos,"fixed")?2:starts(pos,"absolute")?1:starts(pos,"relative")?3:0):0;
     static const int edge_slots[4]={S_TOP,S_RIGHT,S_BOTTOM,S_LEFT};
     for(int i=0;i<4;i++)if((v=V(edge_slots[i]))) {
@@ -1693,7 +1789,11 @@ static void compute(dnode *n, struct cstyle *ps, struct cstyle *out) {
             }
         }
     }
-    if((v=V(S_OPACITY)) && read_num(v,&d)>0 && d<=0) hide=1;
+    if((v=V(S_OPACITY))) {
+        int used=read_num(v,&d),len=strlen(v);
+        if(used==len)o->opacity=clamp_px(d*10000,0,10000);
+        else if(used>0 && used+1==len && v[used]=='%')o->opacity=clamp_px(d*100,0,10000);
+    }
     int abs = pos && (starts(pos, "absolute") || starts(pos, "fixed"));
     double wv = -1, hv = -1, mh = -1, lv = 0, tv = 0;
     if ((v = V(S_WIDTH))) { if (parse_len(v, strlen(v), &L, &d) == 1) wv = d; }
@@ -1788,14 +1888,16 @@ void css_computed(dnode *n, const char *prop, char *out, int max) {
                                        "table-cell", "contents", "none" };
         snprintf(out, max, "%s", s->hidden && s->display != DS_NONE && !c->vis_hidden ? "none" : names[s->display]);
     } else if (!strcmp(prop, "visibility")) snprintf(out, max, "%s", c->vis_hidden ? "hidden" : "visible");
+    else if(!strcmp(prop,"pointer-events"))snprintf(out,max,"%s",s->pointer_none?"none":"auto");
     else if (!strcmp(prop, "color")) RGBS(s->color);
     else if (!strcmp(prop, "background-color")) { if (s->bg < 0) snprintf(out, max, "rgba(0, 0, 0, 0)"); else RGBS(s->bg); }
     else if (!strcmp(prop, "font-size")) snprintf(out, max, "%dpx", s->font_px);
     else if (!strcmp(prop, "font-weight")) snprintf(out, max, "%s", s->bold ? "700" : "400");
     else if (!strcmp(prop, "font-style")) snprintf(out, max, "%s", s->italic ? "italic" : "normal");
     else if (!strcmp(prop, "text-align")) snprintf(out, max, "%s", s->align == 1 ? "center" : s->align == 2 ? "right" : "start");
-    else if (!strcmp(prop, "opacity")) snprintf(out, max, "1");
-    else if (!strcmp(prop, "position")) snprintf(out, max, "static");
+    else if (!strcmp(prop, "opacity")) snprintf(out,max,"%.3g",s->opacity/10000.0);
+    else if(!strcmp(prop,"font-family"))snprintf(out,max,"%s",s->font_family?"monospace":"sans-serif");
+    else if (!strcmp(prop,"position"))snprintf(out,max,"%s",s->fixed==1?"absolute":s->fixed==2?"fixed":s->fixed==3?"relative":"static");
     else if (!strncmp(prop, "margin-", 7) || !strncmp(prop, "padding-", 8)) {
         const short *a = prop[0] == 'm' ? s->margin : s->padding;
         const char *side = strchr(prop, '-') + 1;

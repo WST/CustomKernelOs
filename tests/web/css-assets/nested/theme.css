@@ -1,0 +1,2 @@
+@import "../base.css";
+.asset{width:120px;height:80px;background:var(--tile) center/cover no-repeat}

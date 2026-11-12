@@ -615,7 +615,7 @@ void html_serialize(jsbuf *b, dnode *n, int outer) {
 
 extern int domjs_has_click(dnode *n);
 
-static const char *keep_attrs[] = { "href", "type", "name", "value", "size", "alt", "action", "method", "src", "checked",
+static const char *keep_attrs[] = { "href", "type", "name", "value", "size", "placeholder", "alt", "action", "method", "src", "checked",
                                      "selected", "charset", "content", "http-equiv", "colspan", "start",
                                      "width", "height", "data-src", "data-original", "data-lazy-src", "srcset", NULL };
 

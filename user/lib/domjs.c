@@ -29,7 +29,12 @@ static int n_scripts, n_errors;
 static char last_error[200];
 static char pending_nav[1024];
 static int nav_requested;
-static char storage[2][8192];                    /* localStorage / sessionStorage (JSON) */
+#define STORAGE_ORIGINS 64
+#define STORAGE_QUOTA 32768
+struct storage_origin {char origin[320];char *data[2];};
+static struct storage_origin storage[STORAGE_ORIGINS];
+static int n_storage_origins;
+static char document_origin[320];
 
 typedef void (*bigfn)(void *);
 static void big_call(bigfn fn, void *arg) { js_big_call(fn, arg); }
@@ -50,6 +55,30 @@ static void url_split(const char *u, char *proto, char *host, char *path) {   /*
     while (*e && *e != '/' && *e != '?' && *e != '#') e++;
     snprintf(host, 256, "%.*s", (int)(e - h), h);
     snprintf(path, 1024, "%s", *e ? e : "/");
+}
+
+/* Canonical origin is scheme + host + effective port, never a path prefix.
+ * File storage is scoped to its full file URL; opaque origins have no storage. */
+static int storage_origin_of(const char *url,char out[320]) {
+    char proto[16],host[256],path[1024];url_split(url,proto,host,path);out[0]=0;
+    if(!strcmp(proto,"file:")) {
+        int n=0;while(url[n] && url[n]!='?' && url[n]!='#')n++;if(n>=320)return 0;memcpy(out,url,n);out[n]=0;return 1;
+    }
+    for(char *p=proto;*p;p++)*p=tolower((ju8)*p);
+    if(strcmp(proto,"http:") && strcmp(proto,"https:"))return 0;
+    if(!host[0] || strlen(host)>=255)return 0;
+    char *start=strrchr(host,'@');start=start?start+1:host;
+    for(char *p=start;*p;p++)*p=tolower((ju8)*p);
+    char *port=strrchr(start,':'),*close=strchr(start,']');
+    if(port && (!close || port>close)) {
+        int value=0;if(!port[1])return 0;
+        for(char *p=port+1;*p;p++){if(*p<'0' || *p>'9' || value>6553)return 0;value=value*10+*p-'0';}
+        if(value>65535)return 0;
+        if((!strcmp(proto,"http:") && value==80) || (!strcmp(proto,"https:") && value==443))*port=0;
+        else snprintf(port,256-(port-host),":%d",value);
+    }
+    if(!*start)return 0;
+    snprintf(out,320,"%s//%s",proto,start);return 1;
 }
 
 void dn_resolve(const char *base, const char *rel, char *out, int max) {
@@ -2061,8 +2090,15 @@ NATIVE(My_resolve) {
     return 0;
 }
 
+static int dom_exception(const char *name,const char *message) {
+    jsobj *e=js_make_error("DOMException",message);js_define(e,"name",js_cstr(name),P_WRITE|P_CONF);return js_throw_val(js_objv(e));
+}
 static int url_changed;
-NATIVE(My_setUrl) { UNUSED; jsstr *u; TRY(js_to_string(ARG(0), &u)); snprintf(d_url, sizeof(d_url), "%s", u->s); url_changed = 1; *ret = js_undef(); return 0; }
+NATIVE(My_setUrl) {
+    UNUSED;jsstr *u;TRY(js_to_string(ARG(0),&u));char origin[320];
+    if(!storage_origin_of(u->s,origin) || strcmp(origin,document_origin))return dom_exception("SecurityError","History URL must have the document origin");
+    snprintf(d_url,sizeof(d_url),"%s",u->s);url_changed=1;*ret=js_undef();return 0;
+}
 NATIVE(My_go) {
     UNUSED;
     int d = (int)js_num_nothrow(ARG(0));
@@ -2106,16 +2142,32 @@ NATIVE(My_computed) {
     return 0;
 }
 
-NATIVE(My_store) {
-    UNUSED;
-    jsstr *tag, *v;
-    TRY(js_to_string(ARG(0), &tag));
-    TRY(js_to_string(ARG(1), &v));
-    snprintf(storage[tag->s[0] == 's'], sizeof(storage[0]), "%s", v->s);
-    *ret = js_undef();
-    return 0;
+static struct storage_origin *storage_current(int create) {
+    if(!document_origin[0])return NULL;
+    for(int i=0;i<n_storage_origins;i++)if(!strcmp(storage[i].origin,document_origin))return &storage[i];
+    if(!create || n_storage_origins==STORAGE_ORIGINS)return NULL;
+    struct storage_origin *entry=&storage[n_storage_origins++];strcpy(entry->origin,document_origin);
+    if(d_host && d_host->storage_read) {
+        char *buf=malloc(STORAGE_QUOTA);
+        if(buf){int n=d_host->storage_read(document_origin,buf,STORAGE_QUOTA);if(n>0 && n<STORAGE_QUOTA){buf[n]=0;entry->data[0]=buf;}else free(buf);}
+    }
+    return entry;
 }
-NATIVE(My_load) { UNUSED; jsstr *tag; TRY(js_to_string(ARG(0), &tag)); *ret = js_cstr(storage[tag->s[0] == 's']); return 0; }
+NATIVE(My_store) {
+    UNUSED;jsstr *tag,*v;TRY(js_to_string(ARG(0),&tag));TRY(js_to_string(ARG(1),&v));
+    if(!document_origin[0])return dom_exception("SecurityError","Storage is unavailable for this origin");
+    if(v->len>=STORAGE_QUOTA)return dom_exception("QuotaExceededError","Storage quota exceeded");
+    struct storage_origin *entry=storage_current(1);if(!entry)return dom_exception("QuotaExceededError","Storage origin limit exceeded");
+    char *data=malloc(v->len+1);if(!data)return dom_exception("QuotaExceededError","Storage allocation failed");
+    memcpy(data,v->s,v->len+1);int slot=tag->s[0]=='s';
+    if(!slot && d_host && d_host->storage_write && d_host->storage_write(document_origin,data,v->len)<0){free(data);return dom_exception("QuotaExceededError","Cannot save localStorage profile");}
+    free(entry->data[slot]);entry->data[slot]=data;*ret=js_undef();return 0;
+}
+NATIVE(My_load) {
+    UNUSED;jsstr *tag;TRY(js_to_string(ARG(0),&tag));
+    if(!document_origin[0])return dom_exception("SecurityError","Storage is unavailable for this origin");
+    struct storage_origin *entry=storage_current(1);*ret=js_cstr(entry && entry->data[tag->s[0]=='s']?entry->data[tag->s[0]=='s']:"{}");return 0;
+}
 
 static void console_print(const char *s, int n) { if (d_host && d_host->console) d_host->console(s, n); }
 
@@ -2131,6 +2183,7 @@ static void def_methods(jsobj *p, const char **names, jsnative *fns, int n) {
 }
 
 void domjs_init_realm(void) {
+    storage_origin_of(d_url,document_origin);
     js_set_print(console_print);
     js_set_mark_hook(domjs_mark);
     S_type_ = js_perm("type"); S_target = js_perm("target"); S_currentTarget = js_perm("currentTarget");

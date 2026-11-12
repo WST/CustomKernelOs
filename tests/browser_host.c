@@ -45,8 +45,7 @@ extern int pclose(void *);
 static int host_net;
 int browser_host_fetch(const char *url, char *location, int loc_max, bool *is_html) {
     if (!host_net || (strncmp(url,"https://",8) && strncmp(url,"http://",7))) return -999;
-    (void)loc_max;
-    char command[8192]; int used=snprintf(command,sizeof(command),"curl -sL --max-time 15 --compressed -w '\\n%%{http_code}\\n%%{content_type}' '");
+    char command[8192]; int used=snprintf(command,sizeof(command),"curl -sL --max-time 15 --compressed -w '\\n%%{http_code}\\n%%{content_type}\\n%%{url_effective}' '");
     for(const char *p=url;*p && used<(int)sizeof(command)-12;p++) {
         if(*p=='\'') { memcpy(command+used,"'\\''",4);used+=4; } else command[used++]=*p;
     }
@@ -57,12 +56,22 @@ int browser_host_fetch(const char *url, char *location, int loc_max, bool *is_ht
     int result=pclose(pipe);
     if(result || total>=MAX_PAGE)return -1;
     body[total]=0;location[0]=0;
-    char *type=body+total;while(type>body && type[-1]!='\n')type--;
+    char *effective=body+total;while(effective>body && effective[-1]!='\n')effective--;
+    if(effective==body)return -1;
+    char final_url[2048];if(strlen(effective)>=sizeof(final_url))return -1;
+    strcpy(final_url,effective);effective[-1]=0;
+    char *type=effective-1;while(type>body && type[-1]!='\n')type--;
     snprintf(resp_ctype,sizeof(resp_ctype),"%s",type);
     char *code=type-1;while(code>body && code[-1]!='\n')code--;
     int status_code=atoi(code);
     body_len=code>body?code-body-1:0;body[body_len]=0;
     *is_html=strstr(resp_ctype,"html")!=NULL;
+    /* Expose curl's canonical URL as a redirect so relative resources use the
+     * final document/stylesheet origin, just as the native HTTP path does. */
+    if(strcmp(final_url,url)) {
+        if((int)strlen(final_url)>=loc_max)return -1;
+        strcpy(location,final_url);return 302;
+    }
     return status_code;
 }
 
@@ -261,6 +270,18 @@ int BROWSER_HOST_MAIN(int argc, char **argv) {
             fwrite(html,1,len,file); fclose(file); continue;
         }
         if (!strcmp(c,"console")) { printf("%.*s\n",console_len,console_buf);continue; }
+        if(!strcmp(c,"inspect-layout")) {
+            for(int k=0;k<n_items;k++)if(items[k].kind==IT_TEXT || items[k].kind==IT_ATOMIC) {
+                struct item *it=&items[k];const struct dom_style *s=dom_style(it->node);
+                printf("layout %d kind=%d node=%d x=%d y=%d w=%d h=%d width=%d min=%d pct=%d text=%.60s\n",k,it->kind,it->node,it->x,it->y,it->w,it->h,s?s->width:0,s?s->min_width:0,s?s->width_pct:0,it->text?it->text:"");
+            }
+            continue;
+        }
+        if (!strcmp(c,"assert-text") && i+1<argc) {
+            const char *expected=argv[++i];
+            if(!compat_text(expected)){printf("FAIL: missing text %s; console: %.*s\n",expected,console_len,console_buf);return 1;}
+            continue;
+        }
         if (!strcmp(c, "assert-no-errors")) {
             if (dom_last_error()[0]) { printf("FAIL: %s\n", dom_last_error()); return 1; }
             continue;

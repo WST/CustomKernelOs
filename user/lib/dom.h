@@ -14,7 +14,9 @@ struct dom_host {
     int  (*fetch)(const char *url, const char *method, const char *body, int body_len,
                   char **data, int *len, int *status, char *ctype, int ctype_max);
     void (*status)(const char *msg);            /* показать в строке состояния */
-    void (*console)(const char *s, int n);      /* вывод console.log */
+    void (*console)(const char *s, int n);
+    int (*storage_read)(const char *origin,char *out,int max); /* length, 0 missing, negative error */
+    int (*storage_write)(const char *origin,const char *data,int len); /* atomic localStorage snapshot */
 };
 
 extern int dom_scripting;                       /* 1 — JavaScript включён */
@@ -28,37 +30,59 @@ enum { DS_INLINE, DS_BLOCK, DS_LIST_ITEM, DS_INLINE_BLOCK, DS_FLEX, DS_GRID, DS_
        DS_CONTENTS, DS_NONE };
 enum { LS_DISC, LS_CIRCLE, LS_SQUARE, LS_DECIMAL, LS_ALPHA, LS_NONE };
 #define CSS_AUTO (-30000)                       /* margin: auto */
+#define CSS_BG_LAYERS 4
+#define CSS_GRADIENT_STOPS 8
+struct css_bg_layer {
+    const char *url;
+    short size[2], pos[2], angle;
+    unsigned char size_pct, pos_pct, mode, repeat, origin, clip, nstops;
+    short stops[CSS_GRADIENT_STOPS];
+    unsigned colors[CSS_GRADIENT_STOPS]; /* straight ARGB */
+};
+struct css_background { int count; struct css_bg_layer layer[CSS_BG_LAYERS]; };
+#define CSS_SHADOWS 4
+struct css_shadow {short x,y,blur,spread;unsigned color;unsigned char inset;};
+struct css_shadows {int count;struct css_shadow layer[CSS_SHADOWS];};
 struct dom_style {
     unsigned char display;
-    unsigned char bold, italic, underline, strike;
+    unsigned char bold, italic, underline, strike, font_family;
+    unsigned short opacity; /* 0..10000, rendering quantizes to 8-bit coverage */
     unsigned char align;                        /* 0 влево, 1 по центру, 2 вправо */
     unsigned char transform;                    /* 1 ПРОПИСНЫЕ, 2 строчные, 3 Каждое Слово */
     unsigned char pre;                          /* white-space: pre / pre-wrap / pre-line */
-    unsigned char nowrap;
+    unsigned char nowrap, wrap_word;
     unsigned char list;                         /* LS_... */
     unsigned char notext;                       /* текст не показывать (font-size:0, text-indent:-9999px) */
-    unsigned char hidden;                       /* элемент не показывать совсем */
-    unsigned char flex_row;                     /* flex-контейнер в строку: дети встают в ряд */
-    unsigned char width_pct, max_width_pct;
-    unsigned char bg_image;                     /* фон — картинка (её не показываем) */
+    unsigned char pointer_none, hidden;                       /* элемент не показывать совсем */
+    unsigned char flex_row, flex_column, flex_reverse;                     /* flex-контейнер в строку: дети встают в ряд */
+    unsigned char width_pct, max_width_pct, min_width_pct;
+    const struct css_background *background,*mask;
+    const struct css_shadows *shadows;
+    unsigned char mask_luminance,mask_composite[CSS_BG_LAYERS];
+    unsigned char bg_image, bg_clip;                     /* имеются фоновые изображения; область background-clip */
     unsigned char border_box;
-    unsigned char flex_wrap;
+    unsigned char flex_wrap, float_side, clear_side;
     unsigned char justify, align_items, align_self; /* 0 start/stretch, 1 center, 2 end, 3 between, 4 around, 5 evenly */
     short flex_grow, flex_shrink;                /* factors multiplied by 100 */
     short height, min_height;                  /* -1 auto; pixels, not inherited */
     short line_height;                         /* 0 normal; negative = unitless factor * -100 */
+    unsigned char grid_auto,grid_track_type[32];
+    short grid_min,grid_track[32];
     short grid_columns;                         /* repeat(N,minmax(0,1fr)) or equal fr tracks */
     short radius;
+    unsigned char object_fit;
+    short object_pos[2];
     unsigned char fixed;                        /* 1 absolute, 2 fixed, 3 relative */
     unsigned char height_pct, position_pct, translate_pct;
     short position_edge[4], translate_x, translate_y;
-    unsigned char clip_overflow;
+    unsigned char clip_overflow, has_z_index;
+    int z_index;
     short column_gap, row_gap;
     int   color, bg;
     short font_px;
     short margin[4], padding[4], border[4];
     int   border_color[4];
-    short width, max_width;                     /* -1 — не задано */
+    short width, max_width, min_width;                     /* -1 — не задано */
 };
 /* стиль узла с номером id (из data-n) после dom_serialize; NULL — нет */
 const struct dom_style *dom_style(int id);
