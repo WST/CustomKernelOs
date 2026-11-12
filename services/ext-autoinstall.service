@@ -1,0 +1,9 @@
+[Unit]
+Description=Install selected ext packages at boot
+
+[Service]
+Type=simple
+ExecStart=/bin/ext auto run --boot
+User=root
+Restart=no
+StandardInput=null

@@ -1251,3 +1251,10 @@ VBE framebuffer, live-файловая система в RAM, USB HID клави
 512 МиБ RAM, для 512 МиБ — 1 ГиБ RAM.
 Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
 Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).
+
+## Пакеты при загрузке
+
+`EXT_AUTOINSTALL_PACKAGES="openssh lua"` в `.env` задаёт список для нового Live-образа.
+Внутри MyOS: `ext auto add openssh`, `ext auto list`, `ext auto run`, `ext auto status`.
+Установка выполняется в фоне через `ext-autoinstall.service`.
+[Настройка и поведение](docs/ext-autoinstall.md).
