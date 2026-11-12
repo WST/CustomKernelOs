@@ -8,7 +8,9 @@ static unsigned gpu_overlay_hash[5];
 
 static void gpu_reset(void) {
     struct gfx_info2 gi;
-    gpu_scene = gfx_info2(&gi) == 0 && (gi.caps & GFX_CAP_COMPOSITOR);
+    bool valid=gfx_info2(&gi)==0;
+    gpu_scene=valid && (gi.caps&GFX_CAP_COMPOSITOR);
+    screen_copy_accelerated=valid && (gi.caps&GFX_CAP_GPU_ON);
     gpu_wallpaper_ready = false;
     memset(gpu_overlay_hash, 0, sizeof(gpu_overlay_hash));
     memset(gpu_frame_hash, 0, sizeof(gpu_frame_hash));

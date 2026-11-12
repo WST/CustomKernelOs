@@ -323,7 +323,7 @@ static int metadata_command(const char *cmd,int argc,char **argv) {
         if(argc!=4)return FS_EINVAL;
         ret=fs_resolve_nofollow(FS_ROOT,argv[3],&ino);struct fs_stat st;
         if(!ret)ret=fs_stat(ino,&st);
-        if(!ret)say("mode=%04o uid=%u gid=%u size=%u inode=%u\n",st.mode,st.uid,st.gid,st.size,ino);
+        if(!ret)say("mode=%04o uid=%u gid=%u size=%u inode=%u type=%u\n",st.mode,st.uid,st.gid,st.size,ino,st.type);
         return ret;
     }
     if(!strcmp(cmd,"chmod")) {

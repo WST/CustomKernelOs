@@ -342,7 +342,7 @@ static int load_image(const char *path,u32 cwd,int argc,char **argv,struct image
     fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,im);fs_namespace_unlock();return ret;
 }
 
-static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent) {
+static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent, bool service_root) {
     struct image im;
     int err = load_image(path, cwd, argc, argv, &im);
     if (err) return err;
@@ -370,6 +370,13 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
             task_process(t)->fds[i] = file_dup(task_process(parent)->fds[i]);
         }
     }
+    /* Only the service manager requests this, after validating its root-owned unit.
+     * Set the identity before publishing the task to any CPU. */
+    if (service_root) {
+        t->authenticated=true;
+        t->uid=t->real_uid=t->saved_uid=0;
+        t->gid=t->real_gid=t->saved_gid=0;
+    }
     if (input) { file_close(task_process(t)->fds[0]); task_process(t)->fds[0] = file_dup(input); }
     if (log) {
         for (int i = 1; i <= 2; i++) { file_close(task_process(t)->fds[i]); task_process(t)->fds[i] = file_dup(log); }
@@ -381,15 +388,15 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
 }
 
 int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
-    return spawn(path, cwd, argc, argv, fg, NULL, NULL, NULL);
+    return spawn(path, cwd, argc, argv, fg, NULL, NULL, NULL, false);
 }
-int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input) {
-    return spawn(path, FS_ROOT, argc, argv, true, log, input, NULL);
+int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input, bool root) {
+    return spawn(path, FS_ROOT, argc, argv, true, log, input, NULL, root);
 }
 
 int proc_spawn_child(const char *path, int argc, char **argv, struct file *input) {
     struct task *parent = task_process(task_current());
-    return spawn(path, task_process(parent)->cwd, argc, argv, true, NULL, input, parent);
+    return spawn(path, task_process(parent)->cwd, argc, argv, true, NULL, input, parent, false);
 }
 
 /* ---------------------------------------------------------------- fork

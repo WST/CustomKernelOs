@@ -1,0 +1,33 @@
+--- a/src/files.c
++++ b/src/files.c
+@@ -972,6 +972,8 @@
+ /* Execute the given command in a shell. */
+ void execute_command(const char *command)
+ {
++	statusline(ALERT, "External commands are unavailable in the MyOS port");
++	return;
+ #if defined(HAVE_FORK) && defined(HAVE_PIPE) && defined(HAVE_WAITPID)
+ 	int from_fd[2], to_fd[2];
+ 		/* The pipes through which text will be written and read. */
+@@ -1657,8 +1659,8 @@
+ 
+ 	/* Set the backup's timestamps to those of the original file.
+ 	 * Failure is unimportant: saving the file apparently worked. */
+-	filetimes[0] = fileinfo.st_atim;
+-	filetimes[1] = fileinfo.st_mtim;
++	filetimes[0].tv_sec = fileinfo.st_atime; filetimes[0].tv_nsec = 0;
++	filetimes[1].tv_sec = fileinfo.st_mtime; filetimes[1].tv_nsec = 0;
+ 	IGNORE_CALL_RESULT(futimens(descriptor, filetimes));
+ 
+ 	if (fclose(backup_file) == 0) {
+--- a/src/nano.c
++++ b/src/nano.c
+@@ -989,6 +989,8 @@
+ /* When permitted, put nano to sleep. */
+ void do_suspend(void)
+ {
++	statusline(ALERT, "Job suspension is unavailable in MyOS");
++	return;
+ 	if (in_restricted_mode())
+ 		return;
+ 

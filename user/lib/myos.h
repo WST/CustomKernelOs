@@ -242,6 +242,8 @@ int  pty_open(int fds[2]);
 #define TTYCTL_SETSIZE 1
 #define TTYCTL_GETSIZE 2
 #define TTYCTL_GETFG   3
+#define TTYCTL_GETOFLAGS 5
+#define TTYCTL_SETOFLAGS 6
 #define TTYCTL_GETMODE 4
 int  ttyctl(int fd, int op, int arg);
 int  kblayout(int l);           /* раскладка: -1 узнать, 0 US, 1 русская -> текущая */

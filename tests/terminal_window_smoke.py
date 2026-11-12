@@ -23,7 +23,7 @@ def wait(marker, after=0):
     end = time.monotonic()+40
     while time.monotonic()<end:
         s=text()
-        assert 'PANIC' not in s and 'Segmentation fault' not in s, s[-3000:]
+        assert 'PANIC' not in s and 'Segmentation fault' not in s and 'TERMINAL WINDOW FAIL' not in s, s[-3000:]
         if marker in s[after:]: return
         if p.poll() is not None: raise AssertionError(p.stderr.read())
         time.sleep(.1)

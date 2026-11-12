@@ -9,7 +9,7 @@ def run(*args):
 with tempfile.TemporaryDirectory(prefix='myos-storage-') as directory:
     directory=pathlib.Path(directory);disk=directory/'data.img';boot=directory/'boot.img';log=directory/'serial'
     with disk.open('wb') as stream:stream.truncate(64*1048576)
-    run('make','-j4','build/os.img','build/user/storagecheck','install','DISK='+str(disk))
+    run('make','-j4','build/os.img','build/user/storagecheck','install','DISK='+str(disk),'EXT_AUTOINSTALL_PACKAGES=','SSH_AUTHORIZED_KEY=','SSH_AUTHORIZED_KEY_FILE=')
     run(B/'myfs',disk,'put',B/'user/storagecheck','/bin/storagecheck')
     shutil.copyfile(B/'os.img',boot)
     q=None

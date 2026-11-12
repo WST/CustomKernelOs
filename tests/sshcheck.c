@@ -19,9 +19,20 @@ static void rights_test(void) {
     if(c){int fd=*(int*)CMSG_DATA(c);CHECK(write(fd,"z",1)==1);CHECK(read(p[0],&ch,1)==1&&ch=='z');close(fd);}
     close(p[0]);close(sv[0]);close(sv[1]);
 }
+static void pty_output_test(void) {
+    int master,slave;struct termios modes;char bytes[8];
+    CHECK(openpty(&master,&slave,NULL,NULL,NULL)==0);
+    CHECK(tcgetattr(slave,&modes)==0 && (modes.c_oflag&(OPOST|ONLCR))==(OPOST|ONLCR));
+    CHECK(write(slave,"a\nb\n",4)==4);CHECK(read(master,bytes,6)==6 && !memcmp(bytes,"a\r\nb\r\n",6));
+    cfmakeraw(&modes);CHECK(tcsetattr(slave,TCSANOW,&modes)==0);
+    CHECK(tcgetattr(slave,&modes)==0 && modes.c_oflag==0);
+    CHECK(write(slave,"\r\n",2)==2);CHECK(read(master,bytes,2)==2 && !memcmp(bytes,"\r\n",2));
+    close(master);close(slave);
+}
 int main(int argc,char **argv) {
     if(argc>1&&!strcmp(argv[1],"cloexec")){struct stat st;CHECK(fstat(12,&st)==-1&&errno==EBADF);return failures?1:0;}
     rights_test();
+    pty_output_test();
     int sync[2],code=0;CHECK(pipe(sync)==0);int cp=fork();
     if(!cp){close(sync[1]);char v;CHECK(read(sync[0],&v,1)==1);CHECK(thread_mutex_lock(&cow_lock)==0);CHECK(thread_mutex_unlock(&cow_lock)==0);exit(failures?1:0);}
     close(sync[0]);CHECK(thread_mutex_lock(&cow_lock)==0);cow_stamp++;

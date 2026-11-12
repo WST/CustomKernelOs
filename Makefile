@@ -402,7 +402,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libgfx.so /lib/libgfx.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
-	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
+	@for f in user/*.c user/ext-auto.inc; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/cc/*.c user/cc/cc.h; do $(BUILD)/myfs $(DISK) put $$f /src/cc/$$(basename $$f) >/dev/null || exit 1; done
 	@echo "==> шрифты Ubuntu в /lib/fonts"
 	@for f in fonts/*.ttf; do $(BUILD)/myfs $(DISK) put $$f /lib/fonts/$$(basename $$f) >/dev/null || exit 1; done
@@ -414,6 +414,9 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@for f in services/*.service; do \
 	  $(BUILD)/myfs $(DISK) cat /etc/services/$$(basename $$f) >/dev/null 2>&1 || \
 	  $(BUILD)/myfs $(DISK) put $$f /etc/services/$$(basename $$f) >/dev/null || exit 1; done
+
+	@python3 tools/configure_ext_auto.py --disk "$(DISK)"
+	@python3 tools/configure_ssh_keys.py --disk "$(DISK)"
 
 # ------------------------------------------------------------------ запуск
 
@@ -939,3 +942,55 @@ $(BUILD)/user/storagecheck: $(BUILD)/user/storagecheck.o $(ULIB) user/user.ld
 .PHONY: storage-smoketest
 storage-smoketest: storage-recoverytest
 	python3 tests/storage_smoke.py
+
+.PHONY: desktopdragtest
+desktopdragtest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined -Iuser/include -Iuser/lib tests/desktop_drag_test.c -Wl,--gc-sections -o $(BUILD)/desktop-drag-test
+	./$(BUILD)/desktop-drag-test
+
+$(BUILD)/user/dragcheck.o: tests/desktop_dragcheck.c user/desktop.c user/desktop_gpu.inc user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/dragcheck: $(BUILD)/user/dragcheck.o $(BUILD)/user/l_img.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
+.PHONY: desktopdrag-smoke
+desktopdrag-smoke: usb-image $(BUILD)/os.img $(BUILD)/user/dragcheck
+	python3 tests/desktop_drag_smoke.py
+
+$(BUILD)/user/ext.o: user/ext-auto.inc
+
+$(BUILD)/user/extautolock.o: tests/ext_auto_lock.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/extautolock: $(BUILD)/user/extautolock.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: extautotest
+extautotest: $(BUILD)/myfs
+	python3 tests/ext_auto_config_test.py
+	python3 tests/ext_auto_smoke.py
+
+.PHONY: sshkeytest
+sshkeytest: $(BUILD)/myfs
+	python3 tests/ssh_key_config_test.py
+
+.PHONY: ptytest
+ptytest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined tests/pty_output.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/pty-output-test
+	./$(BUILD)/pty-output-test
+
+$(BUILD)/user/nanocheck.o: tests/nanocheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/nanocheck: $(BUILD)/user/nanocheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: nano-build nanotest
+nano-build: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/mlib/libc.a
+	python3 tests/nano_build.py
+nanotest: nano-build
+	python3 tests/nano_smoke.py
+
+.PHONY: nano-sshtest
+nano-sshtest: nano-build openssh-tests-ready
+	python3 tests/openssh_smoke.py --nano
+
+.PHONY: nano-networktest
+nano-networktest: nano-build
+	python3 tests/nano_smoke.py --network

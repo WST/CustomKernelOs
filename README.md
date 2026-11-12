@@ -10,7 +10,11 @@
 `chmod`, `chown`, `stat` и `ls -l`. [Настройка и миграция MyFS](docs/permissions.md).
 
 **OpenSSH через ext** — клиент и сервер, установка `ext install openssh`.
+Установщик включает и запускает `sshd.service`; управление через `systemctl`.
 [Профиль порта, настройка и ограничения](docs/openssh.md).
+
+**GNU nano через ext** — терминальный редактор, `ext install nano`.
+UTF-8, поиск, отмена изменений и работа по SSH. [Установка и клавиши](docs/nano.md).
 
 **Запуск оконных приложений**: рабочий стол использует прямой `spawn`,
 без копирования своих графических буферов через `fork`.
@@ -1250,3 +1254,14 @@ VBE framebuffer, live-файловая система в RAM, USB HID клави
 512 МиБ RAM, для 512 МиБ — 1 ГиБ RAM.
 Нужен Legacy/CSM; изменения файлов в live-режиме теряются при выключении.
 Инструкция и ограничения: [docs/hardware.md](docs/hardware.md).
+
+## Пакеты при загрузке
+
+`EXT_AUTOINSTALL_PACKAGES="openssh lua"` в `.env` задаёт список для нового Live-образа.
+Внутри MyOS: `ext auto add openssh`, `ext auto list`, `ext auto run`, `ext auto status`.
+Установка выполняется в фоне через `ext-autoinstall.service`.
+[Настройка и поведение](docs/ext-autoinstall.md).
+
+Для входа root по SSH задайте публичный Ed25519-ключ в `SSH_AUTHORIZED_KEY`
+или путь к `.pub` в `SSH_AUTHORIZED_KEY_FILE`: сборщик добавит его в
+`/root/.ssh/authorized_keys`. [Настройка ключей](docs/openssh.md#свой-публичный-ключ-в-образе).

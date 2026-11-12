@@ -193,8 +193,8 @@ int myos_ssh_fcntl(int fd,int cmd,...){va_list ap;va_start(ap,cmd);int v[2];v[0]
     if(cmd==F_DUPFD) {for(int i=v[1];i<16;i++){struct stat st;if(fstat(i,&st)<0&&errno==EBADF)return posix(dup2(fd,i));}errno=EMFILE;return -1;}
     return ctl(7,fd,v);
 }
-int tcgetattr(int fd,struct termios *t){int v[2]={0,0};if(ctl(11,fd,v)<0)return -1;int m=v[1];memset(t,0,sizeof(*t));t->c_iflag=ICRNL|IXON;t->c_oflag=OPOST|ONLCR;t->c_cflag=CS8|CREAD;t->c_lflag=(m&TTY_RAW?0:ICANON|ECHO)|(m&TTY_NOSIG?0:ISIG);t->c_cc[VINTR]=3;t->c_cc[VEOF]=4;t->c_cc[VERASE]=127;t->c_cc[VKILL]=21;t->c_cc[VMIN]=1;t->c_ispeed=t->c_ospeed=B38400;return 0;}
-int tcsetattr(int fd,int how,const struct termios *t){(void)how;if(!isatty(fd)){errno=ENOTTY;return -1;}int m=(t->c_lflag&(ICANON|ECHO))==(ICANON|ECHO)?0:TTY_RAW;if(!(t->c_lflag&ISIG))m|=TTY_NOSIG;int v[2];v[0]=1;v[1]=m;return ctl(11,fd,v);}
+int tcgetattr(int fd,struct termios *t){int v[2]={0,0};if(ctl(11,fd,v)<0)return -1;int m=v[1];memset(t,0,sizeof(*t));t->c_iflag=ICRNL|IXON;int output=ttyctl(fd,TTYCTL_GETOFLAGS,0);t->c_oflag=output<0?(OPOST|ONLCR):output;t->c_cflag=CS8|CREAD;t->c_lflag=(m&TTY_RAW?0:ICANON|ECHO)|(m&TTY_NOSIG?0:ISIG);t->c_cc[VINTR]=3;t->c_cc[VEOF]=4;t->c_cc[VERASE]=127;t->c_cc[VKILL]=21;t->c_cc[VMIN]=1;t->c_ispeed=t->c_ospeed=B38400;return 0;}
+int tcsetattr(int fd,int how,const struct termios *t){(void)how;if(!isatty(fd)){errno=ENOTTY;return -1;}int m=(t->c_lflag&(ICANON|ECHO))==(ICANON|ECHO)?0:TTY_RAW;if(!(t->c_lflag&ISIG))m|=TTY_NOSIG;int v[2];v[0]=1;v[1]=m;if(ctl(11,fd,v)<0)return -1;if(ttyctl(fd,TTYCTL_GETOFLAGS,0)>=0)return posix(ttyctl(fd,TTYCTL_SETOFLAGS,t->c_oflag&(OPOST|ONLCR)));return 0;}
 speed_t cfgetispeed(const struct termios *t){return t->c_ispeed;}
 speed_t cfgetospeed(const struct termios *t){return t->c_ospeed;}
 int cfsetispeed(struct termios *t,speed_t s){t->c_ispeed=s;return 0;}
