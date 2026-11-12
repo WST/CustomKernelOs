@@ -921,3 +921,21 @@ netboot-usb-smoke:
 
 envtest:
 	python3 tests/env_config_test.py
+
+# Disk-cache eviction, close error propagation and AHCI DMA recovery.
+.PHONY: storage-recoverytest
+storage-recoverytest: | $(BUILD)
+	$(HOSTCC) -std=gnu17 -O1 -g -fno-builtin -DHOST_TEST -Ikernel tests/block_cache_test.c kernel/block.c kernel/string.c -o $(BUILD)/block-cache-test
+	./$(BUILD)/block-cache-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/close_flush_test.c -Wl,--gc-sections -o $(BUILD)/close-flush-test
+	./$(BUILD)/close-flush-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/ahci_recovery_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/ahci-recovery-test
+	./$(BUILD)/ahci-recovery-test
+
+$(BUILD)/user/storagecheck.o: tests/storagecheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/storagecheck: $(BUILD)/user/storagecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: storage-smoketest
+storage-smoketest: storage-recoverytest
+	python3 tests/storage_smoke.py

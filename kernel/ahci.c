@@ -25,6 +25,8 @@
 
 static volatile u8 *mmio;
 static u32 data_page[4];
+static struct pci_dev controller;
+static bool dma_failed;
 static struct {
     int index;
     u32 page;
@@ -32,8 +34,16 @@ static struct {
     char model[41];
 } unit[2];
 
+#ifdef HOST_TEST
+/* Register hooks model command completion and failed engines in host tests. */
+u32 ahci_test_read(u32 off);
+void ahci_test_write(u32 off, u32 value);
+static u32 rd(u32 off) { return ahci_test_read(off); }
+static void wr(u32 off, u32 value) { ahci_test_write(off, value); }
+#else
 static u32 rd(u32 off) { return *(volatile u32 *)(mmio + off); }
 static void wr(u32 off, u32 value) { *(volatile u32 *)(mmio + off) = value; }
+#endif
 static u32 port_off(int port) { return PORT_BASE + (u32)port * PORT_STRIDE; }
 
 bool ahci_present(int u) { return u >= 0 && u < 2 && unit[u].index >= 0; }
@@ -73,7 +83,56 @@ static bool start_port(int port) {
     return true;
 }
 
+/* AHCI 1.3.1 section 6.2.2: clear ST and wait for CR before reusing
+ * a command slot. A still-busy device also requires COMRESET. Failed I/O
+ * is reported to the caller; only a subsequent request uses the recovered port. */
+static int command_failed(int slot) {
+    int port = unit[slot].index;
+    u32 base = port_off(port);
+    if (!stop_port(port)) goto quarantine;
+    wr(base + 0x30, 0xffffffffu);
+    wr(base + 0x10, 0xffffffffu);
+    if (rd(base + 0x20) & 0x88) {
+        /* Receive the reset signature FIS so PxTFD can leave BSY. */
+        wr(base + 0x18, rd(base + 0x18) | CMD_FRE);
+        u32 control = rd(base + 0x2c) & ~0xfu;
+        wr(base + 0x2c, control | 1u);
+        task_sleep_ticks(1); /* >= 1 ms COMRESET assertion */
+        wr(base + 0x2c, control);
+        u32 began = timer_ticks();
+        while ((rd(base + 0x28) & 0xf) != 3 || (rd(base + 0x20) & 0x88)) {
+            if ((i32)(timer_ticks() - began) >= (i32)TIMER_HZ) goto quarantine;
+            task_sleep_ticks(1);
+        }
+    }
+    if (rd(base + 0x38) || rd(base + 0x34) || !start_port(port)) goto quarantine;
+    return -1;
+
+quarantine:
+    /* All ports share the bounce pages. If an engine cannot be quiesced,
+     * prevent further bus mastering and retain every DMA page. Keep device
+     * mappings intact so block.c cannot fall back to an unrelated IDE disk. */
+    dma_failed = true;
+    u32 cmd = pci_read(controller.bus, controller.dev, controller.func, 0x04);
+    pci_write(controller.bus, controller.dev, controller.func, 0x04,
+              (cmd & 0xffffu) & ~4u);
+    (void)pci_read(controller.bus, controller.dev, controller.func, 0x04);
+    kprintf("AHCI port %d: recovery failed; controller DMA disabled\n", port);
+    return -1;
+}
+
+static bool command_ready(int slot) {
+    if (dma_failed) return false;
+    u32 base = port_off(unit[slot].index);
+    if (rd(base + 0x38) || rd(base + 0x34)) {
+        command_failed(slot);
+        return false;
+    }
+    return true;
+}
+
 static int issue(int slot, u8 command, u32 lba, u32 count, bool to_device) {
+    if (!command_ready(slot)) return -1;
     u32 base = port_off(unit[slot].index);
     volatile u8 *ct = (volatile u8 *)(unit[slot].page + 1280);
     for (int i = 0; i < 256; i++) ct[i] = 0;
@@ -109,11 +168,11 @@ static int issue(int slot, u8 command, u32 lba, u32 count, bool to_device) {
     for (int i = 0; i < 256 && (rd(base + 0x38) & 1); i++)
         ;
     while (rd(base + 0x38) & 1) {
-        if (rd(base + 0x10) & IS_FATAL) return -1;
-        if ((i32)(timer_ticks() - began) >= 30 * (i32)TIMER_HZ) return -1;
+        if (rd(base + 0x10) & IS_FATAL) return command_failed(slot);
+        if ((i32)(timer_ticks() - began) >= 30 * (i32)TIMER_HZ) return command_failed(slot);
         task_sleep_ticks(1);
     }
-    if ((rd(base + 0x20) & 0x89) || (rd(base + 0x10) & IS_FATAL)) return -1;
+    if ((rd(base + 0x20) & 0x89) || (rd(base + 0x10) & IS_FATAL)) return command_failed(slot);
     return 0;
 }
 
@@ -177,9 +236,11 @@ bool ahci_init(void) {
     return false;
 #endif
     struct pci_dev dev;
+    dma_failed = false;
     /* This QEMU reports programming interface 2 for an AHCI 1.0 register map.
      * The version register, not the interface byte, decides whether we drive it. */
     if (!pci_find_class(0x01, 0x06, &dev)) return false;
+    controller = dev;
     u32 bar = pci_read(dev.bus, dev.dev, dev.func, 0x24);
     if ((bar & 1) || ((bar & 6) == 4 && pci_read(dev.bus, dev.dev, dev.func, 0x28))) return false;
     u32 phys = bar & ~0xfu;
@@ -214,6 +275,7 @@ bool ahci_init(void) {
         if (!setup_port(port, slot)) {
             kprintf("AHCI port %d: identify failed\n", port);
             unit[slot].index = -1;
+            if (dma_failed) break;
             continue;
         }
         kprintf("AHCI port %d: %s, %u KB\n", port, unit[slot].model, unit[slot].sectors / 2);
@@ -233,6 +295,8 @@ int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
     if (!count || count > 32 || !ahci_present(slot) || lba >= unit[slot].sectors ||
         count > unit[slot].sectors - lba)
         return -1;
+    /* Check before touching shared data pages, not only inside issue(). */
+    if (!command_ready(slot)) return -1;
     copy_out(buf, count * 512);
     return issue(slot, 0x35, lba, count, true);
 }

@@ -111,12 +111,14 @@ static int flush_from(int unit,u32 lba) {
 }
 static int claim_slot(void) {
     for (int i=0;i<CACHE_SLOTS;i++) if (!cache[i].valid) return i;
-    int oldest=-1;
+    int clean=-1, dirty=-1;
     for (int i=0;i<CACHE_SLOTS;i++) {
-        if (!cache[i].valid || !cache[i].dirty) continue;
-        if (oldest<0 || cache[i].age<cache[oldest].age) oldest=i;
+        int *oldest=cache[i].dirty ? &dirty : &clean;
+        if (*oldest<0 || (i32)(cache[i].age-cache[*oldest].age)<0) *oldest=i;
     }
-    if (oldest<0) { cache[0].valid=false; return 0; }
+    /* Reuse the oldest clean sector before writing back any dirty data. */
+    if (clean>=0) return clean;
+    int oldest=dirty;
     if (flush_from(cache[oldest].unit,cache[oldest].lba)) return -1;
     return oldest;
 }
