@@ -154,6 +154,9 @@ static int syscall3(int n, int a, int b, int c) {
     case SYS_READLINK: return __syscall(85, a, b, c);
     case SYS_READDIR: return linux_dir_at((const char *)a, b, (struct dirent_info *)c);
     case SYS_REBOOT: return -38;                /* тесты на Linux не выключают машину */
+    case SYS_MMAP: return __syscall(90, a);     /* старый mmap: в ebx указатель на шесть полей */
+    case SYS_MUNMAP: return __syscall(91, a, b);
+    case SYS_MPROTECT: return __syscall(125, a, b, c);
     default: return -38;
     }
 }
