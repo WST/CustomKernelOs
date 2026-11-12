@@ -320,7 +320,11 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
             if (equal(tok, "struct")) ty = struct_union_decl(&tok, tok->next, TY_STRUCT);
             else if (equal(tok, "union")) ty = struct_union_decl(&tok, tok->next, TY_UNION);
             else if (equal(tok, "enum")) ty = enum_specifier(&tok, tok->next);
-            else { ty = ty2; tok = tok->next; }
+            else {
+                /* У функции typedef — свой узел: declarator пишет в него имя. */
+                ty = ty2->kind == TY_FUNC ? copy_type(ty2) : ty2;
+                tok = tok->next;
+            }
             counter += OTHER;
             seen = true;
             continue;
@@ -1742,10 +1746,9 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
     return tok;
 }
 
-static bool is_function(Token *tok) {
+static bool is_function(Token *tok, Type *basety) {
     if (equal(tok, ";")) return false;
-    Type dummy = {0};
-    Type *ty = declarator(&tok, tok, &dummy);
+    Type *ty = declarator(&tok, tok, basety);
     return ty->kind == TY_FUNC;
 }
 
@@ -1767,7 +1770,7 @@ Obj *parse(Token *tok) {
         VarAttr attr = {0};
         Type *basety = declspec(&tok, tok, &attr);
         if (attr.is_typedef) { tok = parse_typedef(tok, basety); continue; }
-        if (is_function(tok)) { tok = function(tok, basety, &attr); continue; }
+        if (is_function(tok, basety)) { tok = function(tok, basety, &attr); continue; }
         tok = global_variable(tok, basety, &attr);
     }
     (void)is_const_expr;
