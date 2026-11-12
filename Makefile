@@ -280,6 +280,17 @@ $(BUILD)/user/pic/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include
 $(BUILD)/user/libsqlite3.so: $(SQL_PIC) $(BUILD)/user/libc.so $(BUILD)/user/libm.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libsqlite3.so -Wl,--hash-style=sysv -o $@ $(SQL_PIC) -L$(BUILD)/user -lm -lc
 
+# libffi.so — libffi 3.8.0. Вызов по System V собирает gas, замыкание лежит в mmap.
+FFI_INC := -Iuser/lib/ffi
+FFI_CSRC := prep_cif types ffi closures
+FFI_PIC := $(patsubst %,$(BUILD)/user/pic/f_%.o,$(FFI_CSRC))
+$(BUILD)/user/pic/f_%.o: user/lib/ffi/%.c user/include/ffi.h user/include/ffitarget.h user/include/sys/mman.h $(wildcard user/lib/ffi/*.h) | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC $(FFI_INC) -c $< -o $@
+$(BUILD)/user/pic/f_sysv.o: user/lib/ffi/sysv.S user/lib/ffi/fficonfig.h user/include/ffi.h user/lib/ffi/internal.h | $(BUILD)/user/pic
+	$(CC) -m32 -nostdinc -fPIC $(FFI_INC) -Iuser/include -c $< -o $@
+$(BUILD)/user/libffi.so: $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libffi.so -Wl,--hash-style=sysv -o $@ $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o -L$(BUILD)/user -lc
+
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -453,9 +464,24 @@ $(CCROOT)/lib/libsqlite3.a: $(SQL_LINUX)
 $(BUILD)/mlib/libsqlite3.a: $(SQL_MYOS)
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+FFI_LINUX := $(patsubst %,$(BUILD)/libobj-linux/f_%.o,$(FFI_CSRC))
+FFI_MYOS  := $(patsubst %,$(BUILD)/libobj-myos/f_%.o,$(FFI_CSRC))
+$(BUILD)/libobj-linux/f_%.o: user/lib/ffi/%.c user/include/ffi.h user/include/ffitarget.h user/include/sys/mman.h $(wildcard user/lib/ffi/*.h) $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux $(FFI_INC) -c $< -o $@
+$(BUILD)/libobj-myos/f_%.o: user/lib/ffi/%.c user/include/ffi.h user/include/ffitarget.h user/include/sys/mman.h $(wildcard user/lib/ffi/*.h) $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) $(FFI_INC) -c $< -o $@
+$(BUILD)/ffi-sysv.o: user/lib/ffi/sysv.S user/lib/ffi/fficonfig.h user/include/ffi.h user/lib/ffi/internal.h | $(BUILD)
+	$(CC) -m32 -nostdinc -fno-pie -fno-pic -D__MYOS_CC__ $(FFI_INC) -Iuser/include -c $< -o $@
+$(CCROOT)/lib/libffi.a: $(FFI_LINUX) $(BUILD)/ffi-sysv.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libffi.a: $(FFI_MYOS) $(BUILD)/ffi-sysv.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a $(CCROOT)/lib/libexpat.a $(CCROOT)/lib/libsqlite3.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libexpat.a $(BUILD)/mlib/libsqlite3.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a $(CCROOT)/lib/libexpat.a $(CCROOT)/lib/libsqlite3.a $(CCROOT)/lib/libffi.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libexpat.a $(BUILD)/mlib/libsqlite3.a $(BUILD)/mlib/libffi.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -473,7 +499,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -520,6 +546,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libpthread.so /lib/libpthread.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libexpat.so /lib/libexpat.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libsqlite3.so /lib/libsqlite3.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libffi.so /lib/libffi.so >/dev/null || exit 1
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -738,6 +765,12 @@ sqlitetest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libsqlite3.so
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/sqlite.c -lsqlite3 -o $(BUILD)/sqlite-test
 	@./$(BUILD)/sqlite-test
 	@readelf -d $(BUILD)/user/libsqlite3.so | grep -q libsqlite3.so
+
+# libffi: вызов int и double, плюс замыкание в исполняемой странице.
+ffitest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libffi.so
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/ffi.c -lffi -o $(BUILD)/ffi-test
+	@./$(BUILD)/ffi-test
+	@readelf -d $(BUILD)/user/libffi.so | grep -q libffi.so
 
 # libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)
