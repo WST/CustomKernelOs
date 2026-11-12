@@ -18,6 +18,7 @@ int block_read(int id, u32 sector, void *buf);
 int block_write(int id, u32 sector, const void *buf);
 int block_write_through(int id, u32 sector, const void *buf);
 int block_flush(void);
+void block_flush_idle(void); /* не ждёт, если диск уже занят ожидающей задачей */
 void block_cache_invalidate(void); /* drop cached sectors; dirty ones are discarded */
 bool block_partitioned(void);
 #ifdef HOST_TEST

@@ -423,9 +423,12 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 
 # ------------------------------------------------------------------ запуск
 
-# index=0 — primary master (загрузка), index=1 — primary slave (MyFS)
+# index=0 — primary master, с него BIOS грузит ядро. Системный том — AHCI port 0.
+# Второй диск DATA_DISK остаётся IDE secondary master (/dev/sdc).
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
-               -drive format=raw,file=$(DISK),index=1,media=disk
+               -drive if=none,id=sysdisk,file=$(DISK),format=raw \
+               -device ich9-ahci,id=ahci \
+               -device ide-hd,drive=sysdisk,bus=ahci.0
 QEMU_MEM ?= 256M
 QEMU_CPUS ?= 4
 QEMU_CPU ?=

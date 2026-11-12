@@ -316,7 +316,7 @@ static void task_entry(void) {
 static void idle_loop(void *arg) {
     (void)arg;
     for (;;) {
-        block_flush();
+        block_flush_idle();
         task_reap();
         smp_idle();
     }
@@ -636,6 +636,17 @@ void mutex_lock(struct mutex *m) {
     m->depth++;
     current->holding = m;
     irq_restore(f);
+}
+
+bool mutex_trylock(struct mutex *m) {
+    if (!current) return true;
+    u32 f = irq_save();
+    if (m->owner && m->owner != current) { irq_restore(f); return false; }
+    m->owner = current;
+    m->depth++;
+    current->holding = m;
+    irq_restore(f);
+    return true;
 }
 
 void mutex_unlock(struct mutex *m) {

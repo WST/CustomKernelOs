@@ -1,5 +1,8 @@
 #include "block.h"
 #include "ata.h"
+#ifndef HOST_TEST
+#include "ahci.h"
+#endif
 #include "string.h"
 #include "task.h"
 #ifndef HOST_TEST
@@ -60,6 +63,7 @@ static u32 sectors(int u) {
 #ifdef HOST_TEST
     return u==0 ? ata_sectors() : 0;
 #else
+    if (ahci_present(u)) return ahci_sectors(u);
     return ata_unit_sectors(u);
 #endif
 }
@@ -67,6 +71,7 @@ static int device_read(int u,u32 lba,void *buf) {
 #ifdef HOST_TEST
     return u==0 ? ata_read(lba,buf) : -1;
 #else
+    if (ahci_present(u)) return ahci_read(u,lba,buf);
     return ata_unit_read(u,lba,buf);
 #endif
 }
@@ -78,6 +83,7 @@ static int device_write_run(int u,u32 lba,const void *buf,u32 n) {
     for (u32 i=0;i<n;i++) if (ata_write(lba+i,p+i*512)) return -1;
     return 0;
 #else
+    if (ahci_present(u)) return ahci_write(u,lba,buf,n);
     return ata_unit_write_sectors(u,lba,(void *)buf,n);
 #endif
 }
@@ -151,18 +157,34 @@ static int cache_load(int unit,u32 lba,void *buf) {
     mutex_unlock(&block_lock);
     return rc;
 }
-int block_flush(void) {
-    mutex_lock(&block_lock);
+static int flush_locked(void) {
     int rc=0;
-    if (!cache || !run_buf) { mutex_unlock(&block_lock); return 0; }
+    if (!cache || !run_buf) return 0;
     for (;;) {
         int i=-1;
         for (int n=0;n<CACHE_SLOTS;n++) if (cache[n].valid && cache[n].dirty) { i=n; break; }
         if (i<0) break;
         if (flush_from(cache[i].unit,cache[i].lba)) { rc=-1; break; }
     }
+    return rc;
+}
+int block_flush(void) {
+    mutex_lock(&block_lock);
+    int rc=flush_locked();
     mutex_unlock(&block_lock);
     return rc;
+}
+void block_flush_idle(void) {
+    /* The idle task must not sleep on this lock. The owner may itself be
+     * asleep inside an ATA command, waiting for the timer, and a waiter
+     * here would run with interrupts cleared. */
+#ifndef HOST_TEST
+    if (!mutex_trylock(&block_lock)) return;
+    flush_locked();
+    mutex_unlock(&block_lock);
+#else
+    block_flush();
+#endif
 }
 void block_cache_invalidate(void) {
     mutex_lock(&block_lock);
