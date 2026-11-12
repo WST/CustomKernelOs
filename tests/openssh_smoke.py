@@ -10,7 +10,7 @@ if ext_mode:(b/'openssh-ext-image.txt').write_text(str(image))
 def run(*args):return subprocess.run([str(a) for a in args],check=True,stdout=subprocess.DEVNULL)
 if not resume:
  with image.open('wb') as f:f.truncate(128*1024*1024)
- run('make','-j4','build/os.img','install','DISK='+str(image))
+ run('make','-j4','build/os.img','install','DISK='+str(image),'EXT_AUTOINSTALL_PACKAGES=','SSH_AUTHORIZED_KEY=','SSH_AUTHORIZED_KEY_FILE=')
  def put(local,remote):run(b/'myfs',image,'put',local,remote)
  for d in ['/etc/ssh','/var/empty','/root/.ssh']:run(b/'myfs',image,'mkdir',d)
  if ext_mode:
@@ -46,7 +46,7 @@ if not resume:
  if not identity.exists():run('ssh-keygen','-q','-t','ed25519','-N','','-f',identity)
  put(identity,'/root/.ssh/id_ed25519')
  run(b/'myfs',image,'chmod','0600','/root/.ssh/id_ed25519')
- put(str(identity)+'.pub','/root/.ssh/authorized_keys')
+ subprocess.run([sys.executable,'tools/configure_ssh_keys.py','--disk',str(image)],check=True,env=dict(os.environ,SSH_AUTHORIZED_KEY='',SSH_AUTHORIZED_KEY_FILE=str(identity)+'.pub'))
 else:
  run('make','build/os.img')
  boot=image.with_name('boot.img');shutil.copyfile(b/'os.img',boot)

@@ -416,6 +416,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	  $(BUILD)/myfs $(DISK) put $$f /etc/services/$$(basename $$f) >/dev/null || exit 1; done
 
 	@python3 tools/configure_ext_auto.py --disk "$(DISK)"
+	@python3 tools/configure_ssh_keys.py --disk "$(DISK)"
 
 # ------------------------------------------------------------------ запуск
 
@@ -945,3 +946,7 @@ $(BUILD)/user/extautolock: $(BUILD)/user/extautolock.o $(BUILD)/user/libmyos.a u
 extautotest: $(BUILD)/myfs
 	python3 tests/ext_auto_config_test.py
 	python3 tests/ext_auto_smoke.py
+
+.PHONY: sshkeytest
+sshkeytest: $(BUILD)/myfs
+	python3 tests/ssh_key_config_test.py

@@ -1258,3 +1258,7 @@ VBE framebuffer, live-файловая система в RAM, USB HID клави
 Внутри MyOS: `ext auto add openssh`, `ext auto list`, `ext auto run`, `ext auto status`.
 Установка выполняется в фоне через `ext-autoinstall.service`.
 [Настройка и поведение](docs/ext-autoinstall.md).
+
+Для входа root по SSH задайте публичный Ed25519-ключ в `SSH_AUTHORIZED_KEY`
+или путь к `.pub` в `SSH_AUTHORIZED_KEY_FILE`: сборщик добавит его в
+`/root/.ssh/authorized_keys`. [Настройка ключей](docs/openssh.md#свой-публичный-ключ-в-образе).
