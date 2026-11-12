@@ -955,3 +955,21 @@ sshkeytest: $(BUILD)/myfs
 ptytest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined tests/pty_output.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/pty-output-test
 	./$(BUILD)/pty-output-test
+
+$(BUILD)/user/nanocheck.o: tests/nanocheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/nanocheck: $(BUILD)/user/nanocheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: nano-build nanotest
+nano-build: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/mlib/libc.a
+	python3 tests/nano_build.py
+nanotest: nano-build
+	python3 tests/nano_smoke.py
+
+.PHONY: nano-sshtest
+nano-sshtest: nano-build openssh-tests-ready
+	python3 tests/openssh_smoke.py --nano
+
+.PHONY: nano-networktest
+nano-networktest: nano-build
+	python3 tests/nano_smoke.py --network

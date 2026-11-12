@@ -1,0 +1,25 @@
+name nano
+descr GNU nano 9.3 terminal text editor (MyOS ANSI/UTF-8 port)
+workdir /tmp/ext/nano
+fetch https://ftp.gnu.org/gnu/nano/nano-9.3.tar.gz nano-9.3.tar.gz
+tar xzf nano-9.3.tar.gz nano-9.3/src nano-9.3/COPYING
+workdir /tmp/ext/nano/nano-9.3
+mkdir /ext/bin
+mkdir /ext/share/nano
+mkdir myos-include/sys
+copy config.h config.h
+copy myos-posix.h myos-posix.h
+copy myos-posix.c myos-posix.c
+copy myos-curses.c myos-curses.c
+copy Makefile Makefile
+copy curses.h myos-include/curses.h
+copy term.h myos-include/term.h
+copy termios.h myos-include/termios.h
+copy getopt.h myos-include/getopt.h
+copy langinfo.h myos-include/langinfo.h
+copy wchar.h myos-include/wchar.h
+copy wctype.h myos-include/wctype.h
+copy sys_wait.h myos-include/sys/wait.h
+copy revision.h src/revision.h
+patch -p1 myos.patch
+make

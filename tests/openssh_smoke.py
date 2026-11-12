@@ -1,7 +1,8 @@
 """Boot a fresh test disk; native SSH ABI and OpenSSH client/server validation."""
 from pathlib import Path
-import subprocess,re,time,shutil,os,tempfile,sys,select
+import subprocess,re,time,shutil,os,tempfile,sys,select,pty,fcntl,termios,struct,signal
 ROOT=Path(__file__).resolve().parents[1]
+nano_mode='--nano' in sys.argv
 b=ROOT/'build';resume='--resume-ext' in sys.argv;ext_mode='--ext' in sys.argv or resume
 image=Path((b/'openssh-ext-image.txt').read_text().strip()) if resume else (Path(tempfile.mkdtemp(prefix='myos-openssh-disk-'))/'disk.img' if ext_mode else b/'openssh-test.img')
 bins=b/'openssh-native/bin'
@@ -27,6 +28,7 @@ if not resume:
   fixture=b/'openssh-service-fixture.inst';fixture.write_text('name openssh\nworkdir /tmp/ext/openssh-native-fixture\ncopy service-test.mk Makefile\nmake\n')
   make_fixture=b/'openssh-service-fixture.mk';make_fixture.write_text('all:\n\t/ext/bin/openssh-setup\n')
   put(fixture,'/ext/instructions/openssh/setup.inst');put(make_fixture,'/ext/instructions/openssh/service-test.mk')
+ if nano_mode:put(b/'nano-port/nano','/ext/bin/nano')
  put(b/'openssh-native/sshcheck','/bin/sshcheck')
  config=b/'openssh-test.conf';config.write_text('''Port 22
  AddressFamily inet
@@ -122,6 +124,41 @@ try:
  assert rendered.returncode==0 and b'\r\n' in rendered.stdout,(rendered.stdout,rendered.stderr)
  assert b'\n' not in rendered.stdout.replace(b'\r\n',b''),rendered.stdout
  print('SSH PTY line endings are CRLF; non-PTY output remains byte-exact: PASS',flush=True)
+
+ if nano_mode:
+  result=ssh('nano --version')
+  assert result.returncode==0 and 'version 9.3' in result.stdout,(result.returncode,result.stdout,result.stderr)
+  print('GNU nano remote version: PASS',flush=True)
+  terminal,slave=pty.openpty()
+  fcntl.ioctl(slave,termios.TIOCSWINSZ,struct.pack('HHHH',24,80,0,0))
+  editor=subprocess.Popen(['ssh']+keyopts+['-tt','root@127.0.0.1','nano /tmp/nano-ssh.txt'],stdin=slave,stdout=slave,stderr=slave)
+  os.close(slave)
+  output=b''
+  def nano_wait(marker):
+   global output
+   deadline=time.monotonic()+30
+   while time.monotonic()<deadline:
+    if marker in output:return
+    ready,_,_=select.select([terminal],[],[],.1)
+    if ready:
+     chunk=os.read(terminal,8192)
+     if not chunk:raise AssertionError('nano SSH closed: '+repr(output))
+     output+=chunk
+   raise AssertionError('nano SSH missing '+repr(marker)+': '+repr(output))
+  try:
+   nano_wait(b'GNU nano')
+   output=b'';os.write(terminal,'SSH: Привет'.encode());time.sleep(.3)
+   output=b'';fcntl.ioctl(terminal,termios.TIOCSWINSZ,struct.pack('HHHH',30,100,0,0));os.kill(editor.pid,signal.SIGWINCH);nano_wait(b'GNU nano')
+   output=b'';os.write(terminal,b'\x0f');nano_wait(b'Write to File')
+   output=b'';os.write(terminal,b'\r');nano_wait(b'Wrote')
+   os.write(terminal,b'\x18');assert editor.wait(timeout=30)==0
+  finally:
+   if editor.poll() is None:editor.terminate();editor.wait(timeout=5)
+   os.close(terminal)
+  result=ssh('cat /tmp/nano-ssh.txt')
+  assert result.returncode==0 and result.stdout=='SSH: Привет\n',(result.stdout,result.stderr)
+  print('GNU nano over SSH PTY: UTF-8 edit, resize, save, exit and byte-exact file: PASS',flush=True)
+
  result=ssh('ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 echo SSH_CLIENT_PASS')
  assert result.returncode==0 and 'SSH_CLIENT_PASS' in result.stdout,result.stderr+'\n'+result.stdout+'\n'+text()[-7000:]
  print('Native SSH client to native SSH server: PASS',flush=True)

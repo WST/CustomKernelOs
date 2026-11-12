@@ -1,0 +1,3 @@
+name nano
+rm /ext/bin/nano
+rm /ext/share/nano/COPYING
