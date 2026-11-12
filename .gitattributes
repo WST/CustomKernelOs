@@ -1,0 +1,2 @@
+# The build runs under Unix/WSL; keep text inputs and generated templates in LF.
+* text=auto eol=lf

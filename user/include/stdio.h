@@ -47,6 +47,7 @@ int vfprintf(FILE *f, const char *fmt, va_list ap);
 int fprintf(FILE *f, const char *fmt, ...);
 int vprintf(const char *fmt, va_list ap);
 int sprintf(char *buf, const char *fmt, ...);
+int sscanf(const char *s, const char *fmt, ...);
 int vsprintf(char *buf, const char *fmt, va_list ap);
 ssize_t getline(char **line, size_t *n, FILE *stream);
 int setvbuf(FILE *f, char *buf, int mode, size_t size);

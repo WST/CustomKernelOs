@@ -171,13 +171,13 @@ ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 PROGRAMS := $(filter-out ldso,$(basename $(notdir $(wildcard user/*.c)))) cc
 UBINS    := $(addprefix $(BUILD)/user/,$(PROGRAMS))
 
-ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
+ULIB_OBJS := $(BUILD)/user/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o $(BUILD)/user/zlib.o $(BUILD)/user/gfx.o $(BUILD)/user/vec.o $(BUILD)/user/font.o $(BUILD)/user/win.o
 ULIB := $(BUILD)/user/libmyos.a
 
 $(ULIB): $(ULIB_OBJS)
 	rm -f $@ && $(AR) rcs $@ $^
 
-$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/setjmp.o: user/lib/setjmp.S | $(BUILD)/user
@@ -185,6 +185,9 @@ $(BUILD)/user/setjmp.o: user/lib/setjmp.S | $(BUILD)/user
 
 $(BUILD)/user/alloca.o: user/lib/alloca.S | $(BUILD)/user
 	$(CC) -m32 -c $< -o $@
+
+$(BUILD)/user/zlib.o: user/lib/zlib.c user/include/zlib.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/gfx.o: user/lib/gfx.c user/lib/gfx.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
@@ -214,7 +217,7 @@ DYNLDFLAGS := -m elf_i386 -nostdlib -s --gc-sections -dynamic-linker /lib/ld.so 
 $(BUILD)/user/crt0.o: user/lib/crt0.asm | $(BUILD)/user
 	$(NASM) -f elf32 $< -o $@
 
-$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S
 
 $(BUILD)/user/pic/%.o: user/lib/%.c user/lib/myos.h | $(BUILD)/user/pic
@@ -231,6 +234,136 @@ $(BUILD)/user/pic/win.o: user/lib/win.h user/lib/gfx.h
 
 $(BUILD)/user/libgfx.so: $(PIC_GFX) $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libgfx.so -Wl,--hash-style=sysv -o $@ $(PIC_GFX) -L$(BUILD)/user -lc
+
+$(BUILD)/user/pic/zlib.o: user/include/zlib.h
+$(BUILD)/user/libz.so: $(BUILD)/user/pic/zlib.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libz.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/zlib.o -L$(BUILD)/user -lc
+
+# libm.so — единственная математика: src/math musl (float и double).
+MUSL_MATH_SRC := $(wildcard user/lib/musl-math/*.c)
+MUSL_PIC := $(patsubst user/lib/musl-math/%.c,$(BUILD)/user/pic/m_%.o,$(MUSL_MATH_SRC))
+$(BUILD)/user/pic/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fexcess-precision=standard -fPIC -Iuser/lib/musl-math -c $< -o $@
+$(BUILD)/user/libm.so: $(MUSL_PIC) $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libm.so -Wl,--hash-style=sysv -o $@ $(MUSL_PIC) -L$(BUILD)/user -lc
+
+$(BUILD)/user/pic/libdl.o: user/lib/libdl.c user/include/dlfcn.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
+$(BUILD)/user/libdl.so: $(BUILD)/user/pic/libdl.o
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libdl.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/libdl.o
+
+$(BUILD)/user/pic/libpthread.o: user/lib/libpthread.c user/include/pthread.h user/lib/myos.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
+$(BUILD)/user/libpthread.so: $(BUILD)/user/pic/libpthread.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libpthread.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/libpthread.o -L$(BUILD)/user -lc
+
+# libexpat.so — Expat 2.10.0. isnan берётся из libm.
+EXPAT_PARTS := xmlparse xmltok xmlrole xcs
+EXPAT_PIC := $(patsubst %,$(BUILD)/user/pic/e_%.o,$(EXPAT_PARTS))
+$(BUILD)/user/pic/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/include/expat.h user/include/expat_external.h user/include/stdint.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC -Iuser/lib/expat -c $< -o $@
+$(BUILD)/user/libexpat.so: $(EXPAT_PIC) $(BUILD)/user/libc.so $(BUILD)/user/libm.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libexpat.so -Wl,--hash-style=sysv -o $@ $(EXPAT_PIC) -L$(BUILD)/user -lm -lc
+
+# libsqlite3.so — SQLite 3.54.1. Своего VFS нет в исходнике, его даёт os_myos.c.
+SQL_FLAGS := -DSQLITE_OS_OTHER=1 -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_OMIT_WAL=1 -DSQLITE_OMIT_SHARED_CACHE=1 -DSQLITE_DISABLE_LFS
+SQL_PARTS := sqlite3 os_myos
+SQL_PIC := $(patsubst %,$(BUILD)/user/pic/s_%.o,$(SQL_PARTS))
+$(BUILD)/user/pic/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include/stdint.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC $(SQL_FLAGS) -c $< -o $@
+$(BUILD)/user/libsqlite3.so: $(SQL_PIC) $(BUILD)/user/libc.so $(BUILD)/user/libm.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libsqlite3.so -Wl,--hash-style=sysv -o $@ $(SQL_PIC) -L$(BUILD)/user -lm -lc
+
+# libffi.so — libffi 3.8.0. Вызов по System V собирает gas, замыкание лежит в mmap.
+FFI_INC := -Iuser/lib/ffi
+FFI_CSRC := prep_cif types ffi closures
+FFI_PIC := $(patsubst %,$(BUILD)/user/pic/f_%.o,$(FFI_CSRC))
+$(BUILD)/user/pic/f_%.o: user/lib/ffi/%.c user/include/ffi.h user/include/ffitarget.h user/include/sys/mman.h $(wildcard user/lib/ffi/*.h) | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fPIC $(FFI_INC) -c $< -o $@
+$(BUILD)/user/pic/f_sysv.o: user/lib/ffi/sysv.S user/lib/ffi/fficonfig.h user/include/ffi.h user/lib/ffi/internal.h | $(BUILD)/user/pic
+	$(CC) -m32 -nostdinc -fPIC $(FFI_INC) -Iuser/include -c $< -o $@
+$(BUILD)/user/libffi.so: $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libffi.so -Wl,--hash-style=sysv -o $@ $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o -L$(BUILD)/user -lc
+
+# OpenSSL 3.6.5. Собирает gcc хоста, без ассемблера: cc эти объекты не линкует
+# (R_386_GOT32X). Сокеты включены — libcurl вешает на них HTTPS. Общую
+# библиотеку собираем сами, на нашу libc.so.
+OSSL_SRC := user/lib/openssl
+OSSL_BLD := $(BUILD)/openssl
+OSSL_FLAGS := linux-x86 no-asm no-threads no-thread-pool no-dgram no-dso no-module \
+	no-apps no-docs no-tests no-engine no-quic no-comp no-afalgeng no-devcryptoeng \
+	no-pinshared no-sse2 no-shared no-ui-console --with-rand-seed=devrandom \
+	-std=gnu11 -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx \
+	-DNO_SYSLOG -DMYOS_HOST_LIBC -D__STDC_NO_ATOMICS__ \
+	-I$(abspath user/include) -I$(abspath user/lib) \
+	--prefix=$(abspath $(OSSL_BLD))/prefix
+$(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
+	rm -rf $(OSSL_BLD)
+	mkdir -p $(OSSL_BLD)
+	cd $(OSSL_BLD) && perl $(abspath $(OSSL_SRC))/Configure $(OSSL_FLAGS)
+	$(MAKE) -C $(OSSL_BLD) -j$(shell nproc)
+	touch $@
+$(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libcrypto.so -Wl,--hash-style=sysv -Wl,-z,defs \
+		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libcrypto.a -Wl,--no-whole-archive -L$(BUILD)/user -lc
+$(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libssl.so -Wl,--hash-style=sysv -Wl,-z,defs \
+		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libssl.a -Wl,--no-whole-archive -L$(BUILD)/user -lcrypto -lc
+
+# curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста.
+# Объекты с R_386_GOT32X, поэтому cc их не линкует. .so собираем сами.
+CURL_SRC := user/lib/curl
+CURL_BLD := $(BUILD)/curl
+CURL_DEPS := $(BUILD)/curl-deps
+# CCROOT ниже по файлу, поэтому путь пишем через BUILD. Архивы — order-only:
+# на чистой сборке они должны появиться раньше configure, но правка libc
+# не должна заново конфигурировать весь curl.
+$(CURL_BLD)/.built: $(CURL_SRC)/configure $(OSSL_BLD)/.built | $(BUILD)/ccroot/lib/libc.a $(BUILD)/ccroot/lib/libz.a
+	rm -rf $(CURL_BLD) $(CURL_DEPS)
+	mkdir -p $(CURL_DEPS)/include/openssl $(CURL_DEPS)/lib $(CURL_BLD)
+	cp $(OSSL_SRC)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
+	cp $(OSSL_BLD)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
+	ln -s $(abspath $(OSSL_BLD))/libssl.a $(CURL_DEPS)/lib/libssl.a
+	ln -s $(abspath $(OSSL_BLD))/libcrypto.a $(CURL_DEPS)/lib/libcrypto.a
+	ln -s $(abspath user/include/zlib.h) $(CURL_DEPS)/include/zlib.h
+	ln -s $(abspath $(CCROOT)/lib/libz.a) $(CURL_DEPS)/lib/libz.a
+	echo 'void exit(int); int main(void); void _start(void) { exit(main()); }' > $(BUILD)/curl-crt.c
+	$(CC) -m32 -c -nostdinc -Iuser/include -o $(BUILD)/curl-crt.o $(BUILD)/curl-crt.c
+	printf '%s\n' '#!/bin/bash' \
+	  'root=$(abspath .)' \
+	  'link=1' 'args=()' \
+	  'for a in "$$@"; do' \
+	  '  case "$$a" in -c|-E|-S|-M) link=0 ;; -lc|-lpthread|-ldl|-lrt|-lm|-lresolv) continue ;; esac' \
+	  '  args+=("$$a")' \
+	  'done' \
+	  'for a in "$${args[@]}"; do' \
+	  '  if [[ $$a == -lz ]]; then args+=(-Wl,--defsym=gzread=0); break; fi' \
+	  'done' \
+	  'base=(gcc -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx -D_POSIX_C_SOURCE=200809L -I"$$root/user/include" -I"$$root/user/lib")' \
+	  'if [[ $$link -eq 1 ]]; then exec "$${base[@]}" "$${args[@]}" -nostdlib "$$root/build/curl-crt.o" "$$root/build/ccroot/lib/libc.a"; fi' \
+	  'exec "$${base[@]}" "$${args[@]}"' > $(BUILD)/curl-cc
+	chmod +x $(BUILD)/curl-cc
+	cd $(CURL_BLD) && PKG_CONFIG=/bin/false $(abspath $(CURL_SRC))/configure --host=i686-pc-linux-gnu \
+	  CC=$(abspath $(BUILD)/curl-cc) --disable-shared --enable-static \
+	  --disable-ftp --disable-file --disable-ipfs --disable-ldap --disable-ldaps \
+	  --disable-rtsp --disable-dict --disable-telnet --disable-tftp --disable-pop3 \
+	  --disable-imap --disable-smtp --disable-gopher --disable-mqtt \
+	  --disable-manual --disable-docs --disable-ipv6 --disable-threaded-resolver \
+	  --disable-unix-sockets --disable-alt-svc --disable-hsts --disable-ares \
+	  --without-libpsl --without-brotli --without-zstd --without-nghttp2 \
+	  --without-libidn2 --without-nghttp3 --without-ngtcp2 --without-quiche \
+	  --without-libssh2 --without-libssh --without-gnutls --without-mbedtls \
+	  --without-wolfssl --without-rustls \
+	  --with-openssl=$(abspath $(CURL_DEPS)) --with-zlib=$(abspath $(CURL_DEPS))
+	$(MAKE) -C $(CURL_BLD)/lib -j$(shell nproc)
+	touch $@
+$(BUILD)/user/libcurl.so: $(CURL_BLD)/.built $(BUILD)/user/libssl.so $(BUILD)/user/libz.so $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libcurl.so -Wl,--hash-style=sysv -Wl,-z,defs \
+		-o $@ -Wl,--whole-archive $(CURL_BLD)/lib/.libs/libcurl.a -Wl,--no-whole-archive \
+		-L$(BUILD)/user -lssl -lcrypto -lz -lc
+
+$(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 
 $(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
@@ -266,7 +399,7 @@ $(BUILD)/user/l_domjs.o: user/lib/dom_prelude.h
 
 # прелюдия (часть окружения браузера на JS) -> строка Си
 user/lib/dom_prelude.h: user/lib/dom_prelude.js
-	sed -e '/^ *\/\//d' -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	sed -e 's/\r$$//' -e '/^ *\/\//d' -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
 
 $(BUILD)/user/js.o: user/lib/js.h
 
@@ -280,8 +413,8 @@ $(BUILD)/user/l_svg.o: user/lib/svg.c user/lib/svg.h user/lib/gfx.h user/lib/js.
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/browser.o: user/lib/img.h user/lib/svg.h
 
-$(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
-	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) -L$(BUILD)/user -lc -lgfx
+$(BUILD)/user/browser: $(BUILD)/user/browser.o $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) $(BUILD)/user/l_img.o $(BUILD)/user/l_svg.o $(JS_OBJS) $(DOM_OBJS) $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 
 # Native browser paint/scroll benchmark (not installed by default).
 $(BUILD)/user/browser-paint.o: tests/browser_paint.c user/browser.c user/lib/dom.h user/lib/gfx.h | $(BUILD)/user
@@ -308,14 +441,16 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
-CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/math.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
+CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
+CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/lib
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
+	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
+	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
 	@cp $(CC_LIBSRC) $(CCROOT)/lib/
 	@touch $@
 
@@ -327,7 +462,7 @@ $(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
 	@mkdir -p $(@D)
 	$(BUILD)/cc-host -B $(CCROOT) -c $< -o $@
 
-$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c user/lib/math.c
+$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c
 
 $(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
 	rm -f $@ && $(AR) rcs $@ $^
@@ -339,9 +474,85 @@ $(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/user/setjmp.o $(BUILD
 $(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
+$(CCROOT)/lib/libz.a: $(BUILD)/libobj-linux/zlib.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libz.a: $(BUILD)/libobj-myos/zlib.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+MUSL_LINUX := $(patsubst user/lib/musl-math/%.c,$(BUILD)/libobj-linux/m_%.o,$(MUSL_MATH_SRC))
+MUSL_MYOS  := $(patsubst user/lib/musl-math/%.c,$(BUILD)/libobj-myos/m_%.o,$(MUSL_MATH_SRC))
+$(BUILD)/libobj-linux/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -Iuser/lib/musl-math -c $< -o $@
+$(BUILD)/libobj-myos/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -Iuser/lib/musl-math -c $< -o $@
+$(CCROOT)/lib/libm.a: $(MUSL_LINUX)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libm.a: $(MUSL_MYOS)
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/libobj-linux/libdl.o: user/lib/libdl.c user/include/dlfcn.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -DDL_STUB -c $< -o $@
+$(BUILD)/libobj-myos/libdl.o: user/lib/libdl.c user/include/dlfcn.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -DDL_STUB -c $< -o $@
+$(CCROOT)/lib/libdl.a: $(BUILD)/libobj-linux/libdl.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libdl.a: $(BUILD)/libobj-myos/libdl.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/libobj-linux/libpthread.o $(BUILD)/libobj-myos/libpthread.o: user/include/pthread.h user/lib/myos.h
+$(CCROOT)/lib/libpthread.a: $(BUILD)/libobj-linux/libpthread.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libpthread.a: $(BUILD)/libobj-myos/libpthread.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+EXPAT_LINUX := $(patsubst %,$(BUILD)/libobj-linux/e_%.o,$(EXPAT_PARTS))
+EXPAT_MYOS  := $(patsubst %,$(BUILD)/libobj-myos/e_%.o,$(EXPAT_PARTS))
+$(BUILD)/libobj-linux/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/include/expat.h user/include/expat_external.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -Iuser/lib/expat -c $< -o $@
+$(BUILD)/libobj-myos/e_%.o: user/lib/expat/%.c $(wildcard user/lib/expat/*.h) user/include/expat.h user/include/expat_external.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -Iuser/lib/expat -c $< -o $@
+$(CCROOT)/lib/libexpat.a: $(EXPAT_LINUX)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libexpat.a: $(EXPAT_MYOS)
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+SQL_LINUX := $(patsubst %,$(BUILD)/libobj-linux/s_%.o,$(SQL_PARTS))
+SQL_MYOS  := $(patsubst %,$(BUILD)/libobj-myos/s_%.o,$(SQL_PARTS))
+$(BUILD)/libobj-linux/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux $(SQL_FLAGS) -c $< -o $@
+$(BUILD)/libobj-myos/s_%.o: user/lib/sqlite/%.c user/include/sqlite3.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) $(SQL_FLAGS) -c $< -o $@
+$(CCROOT)/lib/libsqlite3.a: $(SQL_LINUX)
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libsqlite3.a: $(SQL_MYOS)
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
+FFI_LINUX := $(patsubst %,$(BUILD)/libobj-linux/f_%.o,$(FFI_CSRC))
+FFI_MYOS  := $(patsubst %,$(BUILD)/libobj-myos/f_%.o,$(FFI_CSRC))
+$(BUILD)/libobj-linux/f_%.o: user/lib/ffi/%.c user/include/ffi.h user/include/ffitarget.h user/include/sys/mman.h $(wildcard user/lib/ffi/*.h) $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux $(FFI_INC) -c $< -o $@
+$(BUILD)/libobj-myos/f_%.o: user/lib/ffi/%.c user/include/ffi.h user/include/ffitarget.h user/include/sys/mman.h $(wildcard user/lib/ffi/*.h) $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) $(FFI_INC) -c $< -o $@
+$(BUILD)/ffi-sysv.o: user/lib/ffi/sysv.S user/lib/ffi/fficonfig.h user/include/ffi.h user/lib/ffi/internal.h | $(BUILD)
+	$(CC) -m32 -nostdinc -fno-pie -fno-pic -D__MYOS_CC__ $(FFI_INC) -Iuser/include -c $< -o $@
+$(CCROOT)/lib/libffi.a: $(FFI_LINUX) $(BUILD)/ffi-sysv.o
+	rm -f $@ && $(AR) rcs $@ $^
+$(BUILD)/mlib/libffi.a: $(FFI_MYOS) $(BUILD)/ffi-sysv.o
+	@mkdir -p $(@D)
+	rm -f $@ && $(AR) rcs $@ $^
 
-CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a
-MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a
+CCROOT_READY := $(CCROOT)/.stamp $(CCROOT)/lib/libc.a $(CCROOT)/lib/libgfx.a $(CCROOT)/lib/libz.a $(CCROOT)/lib/libm.a $(CCROOT)/lib/libdl.a $(CCROOT)/lib/libpthread.a $(CCROOT)/lib/libexpat.a $(CCROOT)/lib/libsqlite3.a $(CCROOT)/lib/libffi.a
+MLIBS        := $(BUILD)/mlib/libc.a $(BUILD)/mlib/libgfx.a $(BUILD)/mlib/libz.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libdl.a $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libexpat.a $(BUILD)/mlib/libsqlite3.a $(BUILD)/mlib/libffi.a
 
 # ------------------------------------------------------------------ утилита myfs (хост)
 
@@ -359,7 +570,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -395,11 +606,29 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in libc.c regex.c math.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/netinet >/dev/null 2>&1 || true
+	@for f in user/include/netinet/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/netinet/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/arpa >/dev/null 2>&1 || true
+	@for f in user/include/arpa/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/arpa/$$(basename $$f) >/dev/null || exit 1; done
+	@for f in libc.c regex.c zlib.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libc.so /lib/libc.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libgfx.so /lib/libgfx.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libz.so /lib/libz.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libm.so /lib/libm.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libdl.so /lib/libdl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libpthread.so /lib/libpthread.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libexpat.so /lib/libexpat.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libsqlite3.so /lib/libsqlite3.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libffi.so /lib/libffi.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcrypto.so /lib/libcrypto.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libssl.so /lib/libssl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcurl.so /lib/libcurl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) mkdir /include/openssl >/dev/null 2>&1 || true
+	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; $(BUILD)/myfs $(DISK) put $$f /include/openssl/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) mkdir /include/curl >/dev/null 2>&1 || true
+	@for f in $(CURL_SRC)/include/curl/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/curl/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c user/ext-auto.inc; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -500,7 +729,7 @@ jstest: user/lib/dom_prelude.h | $(BUILD)
 
 # Картинки и сертификаты на образцах (нужен python3 с Pillow и cryptography: pip install pillow cryptography)
 imgtest: | $(BUILD)
-	$(HOSTCC) -std=gnu17 -O1 -w -Iuser/lib -DIMG_HOST tests/img_test.c user/lib/img.c -o $(BUILD)/img-test
+	$(HOSTCC) -std=gnu17 -O1 -w -Iuser/lib -DIMG_HOST tests/img_test.c user/lib/img.c user/lib/zlib.c -o $(BUILD)/img-test
 	python3 tests/img/make.py $(BUILD)/imgt
 	@fails=0; while read n w h t; do ./$(BUILD)/img-test $(BUILD)/imgt/$$n $(BUILD)/imgt/$$n.rgba $$w $$h $$t || fails=1; done < $(BUILD)/imgt/cases.txt; \
 	    [ $$fails = 0 ] && echo "images: OK"
@@ -513,26 +742,26 @@ x509test: | $(BUILD)
 # Весь браузер (загрузка, DOM, JS, CSS, раскладка, картинки) на Linux с AddressSanitizer:
 #   build/browser-host страница.html [w 1280] [scroll] [click] [keys] [images] [timers 500] [shot f.ppm]
 # Optimized host benchmark; sanitizer builds are used separately by browsertest.
-$(BUILD)/browser-smooth-test: tests/browser_smooth_test.c tests/browser_host.c tests/browser_compat.h user/browser.c $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/svg.c | $(BUILD)
-	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/lib \
+$(BUILD)/browser-smooth-test: tests/browser_smooth_test.c tests/browser_host.c tests/browser_compat.h user/browser.c $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/zlib.c user/lib/svg.c | $(BUILD)
+	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/include -Iuser/lib \
 	    tests/browser_smooth_test.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
+	    user/lib/img.c user/lib/zlib.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
 .PHONY: smoothtest
 smoothtest: $(BUILD)/browser-smooth-test
 	./$(BUILD)/browser-smooth-test
 
-$(BUILD)/browser-bench: tests/browser_host.c tests/browser_compat.h user/browser.c user/lib/dom_prelude.h $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/svg.c | $(BUILD)
-	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/lib \
+$(BUILD)/browser-bench: tests/browser_host.c tests/browser_compat.h user/browser.c user/lib/dom_prelude.h $(wildcard user/lib/*.h) $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c user/lib/tls.c user/lib/x509.c user/lib/img.c user/lib/zlib.c user/lib/svg.c | $(BUILD)
+	gcc -m32 -std=gnu17 -O2 -g -DMYOS_HOST_LIBC -fno-builtin -nostdinc -w -Iuser/include -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
+	    user/lib/img.c user/lib/zlib.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $@
 .PHONY: browserbench
 browserbench: $(BUILD)/browser-bench
 	./$(BUILD)/browser-bench tests/web/layout.html w 1920 h 600 bench 500
 
 browsertest: user/lib/dom_prelude.h | $(BUILD)
-	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/lib \
+	gcc -m32 -std=gnu17 -O1 -g -DMYOS_HOST_LIBC -fsanitize=address,undefined -fno-omit-frame-pointer -fno-builtin -nostdinc -w -Iuser/include -Iuser/lib \
 	    tests/browser_host.c user/lib/win.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/tls.c user/lib/x509.c \
-	    user/lib/img.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
+	    user/lib/img.c user/lib/zlib.c user/lib/svg.c $(JS_SRC) user/lib/dom.c user/lib/domjs.c user/lib/css.c -o $(BUILD)/browser-host
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/t1.html scroll w 1280 scroll w 480 click keys timers 200
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host tests/web/css.html scroll w 1000 images
 	ASAN_OPTIONS=detect_leaks=0 ./$(BUILD)/browser-host --clipboard-test
@@ -549,6 +778,7 @@ gfxtest: | $(BUILD)
 
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
 cctest: $(BUILD)/cc-host $(CCROOT_READY)
+	python3 tests/cc_crlf.py $(BUILD)/cc-host $(CCROOT)
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
@@ -594,14 +824,75 @@ exttest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/download $(BUILD)/user/e
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/ext.c -o $(BUILD)/ext-linux
 	@./$(BUILD)/ext-linux --selftest
 
+# libpthread: cc принимает pthread.h, -lpthread находит .so. Сами потоки — только в госте.
+pthreadtest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libpthread.so $(BUILD)/mlib/libpthread.a
+	@$(BUILD)/cc-host -B $(CCROOT) -c tests/pthread_test.c -o $(BUILD)/pthread-test.o
+	@$(BUILD)/cc-host -B $(CCROOT) -linux -L $(BUILD)/user tests/pthread_test.c -lpthread -o $(BUILD)/pthread-link
+	@readelf -d $(BUILD)/pthread-link | grep -q libpthread.so
+
+# libdl: -ldl находит библиотеку. Без загрузчика dlopen возвращает ошибку.
+dltest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/dl_test.c -ldl -o $(BUILD)/dl-test
+	@./$(BUILD)/dl-test
+
+# libexpat: короткий документ разбирается, битый XML даёт ошибку.
+expattest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libexpat.so
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/expat.c -lexpat -o $(BUILD)/expat-test
+	@./$(BUILD)/expat-test
+	@readelf -d $(BUILD)/user/libexpat.so | grep -q libexpat.so
+
+# libsqlite3: строка переживает закрытие базы и читается снова.
+sqlitetest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libsqlite3.so
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/sqlite.c -lsqlite3 -o $(BUILD)/sqlite-test
+	@./$(BUILD)/sqlite-test
+	@readelf -d $(BUILD)/user/libsqlite3.so | grep -q libsqlite3.so
+
+# libffi: вызов int и double, плюс замыкание в исполняемой странице.
+ffitest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libffi.so
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/ffi.c -lffi -o $(BUILD)/ffi-test
+	@./$(BUILD)/ffi-test
+	@readelf -d $(BUILD)/user/libffi.so | grep -q libffi.so
+
+# SHA-256 «abc» через libcrypto. Тест линкует gcc: в объектах OpenSSL есть R_386_GOT32X.
+ossltest: $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(CCROOT)/lib/libc.a
+	@$(CC) -m32 -nostdlib -nostdinc -no-pie -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-mmx -std=gnu11 \
+		-I$(OSSL_BLD)/include -I$(OSSL_SRC)/include -Iuser/include -Iuser/lib \
+		tests/sha256.c $(OSSL_BLD)/libcrypto.a $(CCROOT)/lib/libc.a -o $(BUILD)/sha256-test
+	@./$(BUILD)/sha256-test
+	@readelf -d $(BUILD)/user/libcrypto.so | grep -q libcrypto.so
+	@readelf -d $(BUILD)/user/libssl.so | grep -q libssl.so
+
+# GET http://127.0.0.1 и https://127.0.0.1. Это не гостевой httpd: его нет, пока виртуальная машина держит диск.
+curltest: $(BUILD)/user/libcurl.so $(CCROOT)/lib/libc.a $(CCROOT)/lib/libz.a
+	@$(CC) -m32 -nostdlib -nostdinc -no-pie -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-mmx -std=gnu11 \
+		-D_POSIX_C_SOURCE=200809L -I$(CURL_SRC)/include -Iuser/include -Iuser/lib \
+		tests/curlget.c $(CURL_BLD)/lib/.libs/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
+		$(CCROOT)/lib/libz.a $(CCROOT)/lib/libc.a -o $(BUILD)/curlget-test
+	@python3 tests/curl_test.py $(BUILD)/curlget-test
+	@readelf -d $(BUILD)/user/libcurl.so | grep -q libcurl.so
+
+# libm: pow находится и без -lm, потому что cc подключает libm сам.
+lmtest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/cc/libm.c -o $(BUILD)/lm-libc
+	@./$(BUILD)/lm-libc
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/cc/libm.c -lm -o $(BUILD)/lm-test
+	@./$(BUILD)/lm-test
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/libm_full.c -lm -o $(BUILD)/lm-full
+	@./$(BUILD)/lm-full
+
+# libz: round-trip, куски входа и повтор после deflateReset.
+ztest: $(BUILD)/cc-host $(CCROOT_READY)
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/zlib_test.c -lz -o $(BUILD)/zlib-test
+	@./$(BUILD)/zlib-test
+
 # gzip на хосте: тот же cc, что работает внутри системы, плюс сверка с GNU gzip.
 gztest: $(BUILD)/cc-host $(CCROOT_READY)
-	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -o $(BUILD)/gzip-linux
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/gzip.c -lz -o $(BUILD)/gzip-linux
 	@sh tests/gzip.sh $(BUILD)/gzip-linux
 
 # tar на хосте: тот же cc, синтетические архивы и настоящий исходник zlib.
 tartest: $(BUILD)/cc-host $(CCROOT_READY)
-	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -o $(BUILD)/tar-linux
+	@$(BUILD)/cc-host -B $(CCROOT) -linux user/tar.c -lz -o $(BUILD)/tar-linux
 	@sh tests/tar.sh $(BUILD)/tar-linux
 
 # Небольшой make: правила, шаблоны, переменные. Тот же cc, что внутри системы.

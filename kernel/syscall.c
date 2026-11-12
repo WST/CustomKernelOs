@@ -34,6 +34,7 @@
 #include "block.h"
 #include "account.h"
 #include "services.h"
+#include "reboot.h"
 
 #define SBRK_LIMIT INTERP_BASE      /* выше кучи — загрузчик, общая память и стек */
 #define PATH_MAX   FS_PATH_MAX      /* 1023 символа пути и завершающий нуль */
@@ -954,6 +955,48 @@ static int sys_service(u32 op, u32 uname) {
     return -EINVAL;
 }
 
+/* cond: слово seq и адрес объекта как канал ожидания. Сигнал увеличивает seq,
+ * поэтому пробуждение между чтением seq и засыпанием не теряется. */
+static int sys_cond_wait(struct task *t, u32 cond, u32 mutex) {
+    if ((cond & 3) || (mutex & 3) || !user_buf_ok(cond, 4, true) || !user_buf_ok(mutex, 4, true))
+        return -EINVAL;
+    u32 flags = irq_save();
+    volatile u32 *seq = (u32 *)cond;
+    volatile u32 *lock = (u32 *)mutex;
+    int ret = 0;
+    u32 seen;
+    if (*lock != t->id) { irq_restore(flags); return -EPERM; }
+    seen = *seq;
+    *lock = 0;
+    task_wakeup((void *)mutex);
+    while (*seq == seen) {
+        if (t->kill_pending) { ret = -EINTR; break; }
+        if (!user_buf_ok(cond, 4, true)) { ret = -EFAULT; break; }
+        task_wait((void *)cond);
+    }
+    if (!ret) {
+        while (*lock) {
+            if (*lock == t->id) { ret = -EBUSY; break; }
+            if (t->kill_pending) { ret = -EINTR; break; }
+            if (!user_buf_ok(mutex, 4, true)) { ret = -EFAULT; break; }
+            task_wait((void *)mutex);
+        }
+        if (!ret) *lock = t->id;
+    }
+    irq_restore(flags);
+    return ret;
+}
+
+static int sys_cond_wake(u32 cond, u32 all) {
+    if ((cond & 3) || !user_buf_ok(cond, 4, true)) return -EINVAL;
+    u32 flags = irq_save();
+    (*(volatile u32 *)cond)++;
+    if (all) task_wakeup((void *)cond);
+    else task_wake_one((void *)cond);
+    irq_restore(flags);
+    return 0;
+}
+
 static int sys_time(u32 uout) {
     if (!user_buf_ok(uout, sizeof(struct rtc_time), true)) return -EFAULT;
     rtc_read((struct rtc_time *)uout);
@@ -987,11 +1030,14 @@ void syscall_dispatch(struct regs *r) {
         else ret=task_thread_join(a,(int *)b);
         break;
     case SYS_THREAD_MUTEX: {
-        if ((a&3) || !user_buf_ok(a,4,true) || b>1) {ret=-EINVAL;break;}
+        if ((a&3) || !user_buf_ok(a,4,true) || b>2) {ret=-EINVAL;break;}
         u32 flags=irq_save(); volatile u32 *lock=(u32 *)a;
-        if (b) {
+        if (b == 1) {
             if (*lock!=t->id) ret=-EPERM;
             else { *lock=0; task_wakeup((void *)a); ret=0; }
+        } else if (b == 2) {
+            if (*lock) ret=-EBUSY;
+            else { *lock=t->id; ret=0; }
         } else {
             ret=0;
             while (*lock) {
@@ -1189,6 +1235,21 @@ void syscall_dispatch(struct regs *r) {
     case SYS_SOCKCTL:     { struct sock *s = get_sock(a); ret = s ? sock_ctl(s, (int)b, c) : -EBADF; break; }
     case SYS_CLIPBOARD: ret = sys_clipboard(a, b, c); break;
     case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
+    case SYS_REBOOT:
+        if (!task_process(t)->authenticated || task_process(t)->uid != 0) { ret=-EPERM; break; }
+        if (a != RB_POWEROFF && a != RB_REBOOT) { ret = -EINVAL; break; }
+        machine_reset((int)a);
+    case SYS_THREAD_CTL:
+        if (a == TC_SET_TCB) {
+            if ((b & 3) || !user_buf_ok(b, 4, true)) ret = -EFAULT;
+            else { t->tcb = b; ret = 0; }
+        } else if (a == TC_GET_TCB) ret = (int)t->tcb;
+        else if (a == TC_SET_STACK) ret = task_thread_set_stack(b, c, d);
+        else if (a == TC_DETACH) ret = task_thread_detach(b);
+        else if (a == TC_COND_WAIT) ret = sys_cond_wait(t, b, c);
+        else if (a == TC_COND_WAKE) ret = sys_cond_wake(b, c);
+        else ret = -EINVAL;
+        break;
     }
     r->eax = (u32)ret;
 

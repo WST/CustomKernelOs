@@ -11,7 +11,7 @@
  *   GIF  — первый кадр, прозрачный цвет, черезстрочные;
  *   JPEG — обычные (baseline) и прогрессивные, серые, YCbCr с любым прореживанием, CMYK;
  *   BMP  — 1/4/8/16/24/32 бита без сжатия.
- * Всё написано с нуля (user/lib/img.c): inflate для PNG, LZW для GIF, Хаффман и
+ * Всё написано с нуля (user/lib/img.c и libz): inflate для PNG, LZW для GIF, Хаффман и
  * обратное ДКП для JPEG. Только int, без 64-битных чисел. */
 #ifndef IMG_H
 #define IMG_H
@@ -32,7 +32,7 @@ int  img_size(const unsigned char *data, int len, int *w, int *h);   /* разм
 /* уменьшить/увеличить (усреднение при уменьшении, билинейно при увеличении): malloc */
 unsigned *img_scale(const unsigned *src, int sw, int sh, int dw, int dh);
 
-/* zlib (inflate): распаковать в out (не больше max байт) -> сколько вышло или -1 */
+/* zlib/deflate через libz: распаковать в out (не больше max байт) -> сколько вышло или -1 */
 int  img_inflate(const unsigned char *in, int len, unsigned char *out, int max, int zlib_header);
 
 #endif

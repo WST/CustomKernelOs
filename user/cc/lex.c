@@ -197,27 +197,99 @@ static bool convert_int(Token *tok) {
     return true;
 }
 
+#ifndef CC_HOST
+double strtod(const char *nptr, char **end);
+#endif
+
+/* Десятичная дробь через strtod: поразрядное умножение на 0.1 ошибается на
+ * несколько ulp, и 1/DBL_EPSILON перестаёт быть степенью двойки. */
 static double parse_double(char *p, char **end) {
-    double v = 0;
-    while (isdigit(*p)) v = v * 10 + (*p++ - '0');
+    return strtod(p, end);
+}
+
+static int hex_digit(int c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static int bit128(unsigned long long hi, unsigned long long lo, int n) {
+    if (n < 64) return (int)((lo >> n) & 1);
+    return (int)((hi >> (n - 64)) & 1);
+}
+
+/* 0x1.8p1. Показатель p обязателен. Мантисса до 32 шестнадцатеричных цифр. */
+static bool convert_hex_float(Token *tok) {
+    char *p = tok->loc;
+    char *end = tok->loc + tok->len;
+    char *s;
+    unsigned char digs[32];
+    int nd = 0, nint = 0, exp = 0, sign = 1;
+    unsigned long long hi = 0, lo = 0;
+    int top, base, shift;
+    double v;
+    if (p + 2 >= end || p[0] != '0' || (p[1] != 'x' && p[1] != 'X')) return false;
+    for (s = p + 2; s < end; s++) if (*s == '.' || *s == 'p' || *s == 'P') break;
+    if (s == end) return false;
+    p += 2;
+    while (hex_digit(*p) >= 0) {
+        if (nd < 32) digs[nd++] = (unsigned char)hex_digit(*p);
+        p++;
+    }
+    nint = nd;
     if (*p == '.') {
         p++;
-        double f = 0.1;
-        while (isdigit(*p)) { v += (*p++ - '0') * f; f /= 10; }
+        while (hex_digit(*p) >= 0) {
+            if (nd < 32) digs[nd++] = (unsigned char)hex_digit(*p);
+            p++;
+        }
     }
-    if (*p == 'e' || *p == 'E') {
-        p++;
-        int sign = 1, e = 0;
-        if (*p == '+') p++;
-        else if (*p == '-') { sign = -1; p++; }
-        while (isdigit(*p)) e = e * 10 + (*p++ - '0');
-        while (e--) v = sign > 0 ? v * 10 : v / 10;
+    if (!nd || (*p != 'p' && *p != 'P')) error_tok(tok, "invalid hexadecimal floating constant");
+    p++;
+    if (*p == '+') p++;
+    else if (*p == '-') { sign = -1; p++; }
+    if (*p < '0' || *p > '9') error_tok(tok, "invalid hexadecimal floating constant");
+    while (*p >= '0' && *p <= '9') exp = exp * 10 + (*p++ - '0');
+    if (sign < 0) exp = -exp;
+    exp -= 4 * (nd - nint);
+    for (int i = 0; i < nd; i++) {
+        unsigned long long carry = digs[i];
+        hi = (hi << 4) | (lo >> 60);
+        lo = (lo << 4) | carry;
     }
-    *end = p;
-    return v;
+    if (!hi && !lo) v = 0;
+    else {
+        top = hi ? 127 : 63;
+        while (top >= 0 && !bit128(hi, lo, top)) top--;
+        shift = top - 52;
+        if (shift > 0) {
+            unsigned long long sig = (lo >> shift) | (shift < 64 ? hi << (64 - shift) : 0);
+            int rbit = bit128(hi, lo, shift - 1);
+            int sbit = 0;
+            for (int b = 0; b < shift - 1; b++) if (bit128(hi, lo, b)) sbit = 1;
+            if (rbit && (sbit || (sig & 1))) sig++;
+            if (sig == (1ULL << 53)) { sig >>= 1; top++; }
+            v = (double)sig;
+            base = exp + top - 52;
+        } else {
+            v = (double)lo;
+            base = exp;
+        }
+        if (base > 0) while (base--) v *= 2;
+        else while (base++) v *= 0.5;
+    }
+    tok->fval = v;
+    tok->ty = ty_double;
+    if (*p == 'f' || *p == 'F') { tok->fval = (float)v; tok->ty = ty_float; p++; }
+    else if (*p == 'l' || *p == 'L') p++;
+    if (p != end) error_tok(tok, "invalid hexadecimal floating constant");
+    tok->kind = TK_NUM;
+    return true;
 }
 
 void convert_pp_number(Token *tok) {
+    if (convert_hex_float(tok)) return;
     if (convert_int(tok)) return;
     char *end;
     double v = parse_double(tok->loc, &end);
@@ -293,6 +365,7 @@ static void remove_backslash_newline(char *p) {
     int i = 0, j = 0, n = 0;
     while (p[i]) {
         if (p[i] == '\\' && p[i + 1] == '\n') { i += 2; n++; }
+        else if (p[i] == '\\' && p[i+1] == '\r' && p[i+2] == '\n') { i+=3; n++; }
         else if (p[i] == '\n') { p[j++] = p[i++]; for (; n > 0; n--) p[j++] = '\n'; }
         else p[j++] = p[i++];
     }

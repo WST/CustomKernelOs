@@ -13,6 +13,7 @@
 #include "task.h"
 #include "demo.h"
 #include "process.h"
+#include "reboot.h"
 #include "block.h"
 
 #define LINE_MAX 200
@@ -342,18 +343,14 @@ static void cmd_reboot(char *a) {
     (void)a;
     block_flush();
     kprintf("Rebooting...\n");
-    while (inb(0x64) & 2) ;     /* ждём, пока контроллер 8042 освободится */
-    outb(0x64, 0xFE);           /* импульс на линию RESET процессора */
-    for (;;) __asm__ volatile ("hlt");
+    machine_reset(RB_REBOOT);
 }
 
 static void cmd_halt(char *a) {
     (void)a;
     kprintf("System halted. It is now safe to turn off your computer.\n");
     block_flush();
-    /* ACPI-выключение в QEMU (порт 0x604); на реальном железе просто стоим */
-    __asm__ volatile ("outw %0, %1" : : "a"((u16)0x2000), "Nd"((u16)0x604));
-    for (;;) __asm__ volatile ("cli; hlt");
+    machine_reset(RB_POWEROFF);
 }
 
 /* ======================================================== файловые команды */
