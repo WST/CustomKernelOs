@@ -68,35 +68,39 @@ bool ata_init(void) {
 u32 ata_unit_sectors(int u) { return u>=0 && u<2 ? units[u].sectors : 0; }
 u32 ata_sectors(void) { return ata_unit_sectors(0); }
 const char *ata_model(void) { return units[0].model; }
-static int setup(int u,u32 lba,u8 cmd) {
-    if(!ata_unit_sectors(u) || lba>=units[u].sectors) return -1;
+static int setup(int u,u32 lba,u8 cmd,u8 count) {
+    if(!count || !ata_unit_sectors(u) || lba>=units[u].sectors || (u32)count>units[u].sectors-lba) return -1;
     u16 b=units[u].base;
     /* Select first: status/error belongs to the selected drive. */
     outb(b+6,0xe0|units[u].slave|((lba>>24)&15)); delay(u);
     if(wait(u,false)<0) return -1;
-    outb(b+2,1); outb(b+3,lba); outb(b+4,lba>>8); outb(b+5,lba>>16);
+    outb(b+2,count); outb(b+3,lba); outb(b+4,lba>>8); outb(b+5,lba>>16);
     outb(b+7,cmd); delay(u); return wait(u,true);
 }
-int ata_unit_read(int u,u32 lba,void *buf) {
+/* count is 1..32. PIO repeats DRQ once per sector; a count register of 0 means 256.
+ * FLUSH CACHE is not sent: QEMU turns it into an image fsync and the status
+ * poll then occupies the CPU for the whole write. */
+static int pio(int u,u32 lba,void *buf,u32 count,bool write) {
+    if(!count || count>32) return -1;
     if (live) {
-        if (u || lba>=units[0].sectors) return -1;
-        memcpy(buf,(const void *)(live->root_phys+lba*512),512); return 0;
+        if (u || lba>=units[0].sectors || count>units[0].sectors-lba) return -1;
+        u8 *disk=(u8 *)live->root_phys+lba*512;
+        if (write) memcpy(disk,buf,count*512); else memcpy(buf,disk,count*512);
+        return 0;
     }
-    if(setup(u,lba,0x20)<0) return -1;
-    u16 *p=buf; for(int i=0;i<256;i++) p[i]=inw(units[u].base);
+    if(setup(u,lba,write?0x30:0x20,(u8)count)<0) return -1;
+    u8 *p=buf;
+    for(u32 s=0;s<count;s++) {
+        if(s && wait(u,true)<0) return -1;
+        if(write) { const u16 *w=(const u16 *)p; for(int i=0;i<256;i++) outw(units[u].base,w[i]); }
+        else { u16 *w=(u16 *)p; for(int i=0;i<256;i++) w[i]=inw(units[u].base); }
+        p+=512;
+    }
     delay(u); return wait(u,false);
 }
-int ata_unit_write(int u,u32 lba,const void *buf) {
-    if (live) {
-        if (u || lba>=units[0].sectors) return -1;
-        memcpy((void *)(live->root_phys+lba*512),buf,512); return 0;
-    }
-    if(setup(u,lba,0x30)<0) return -1;
-    const u16 *p=buf; for(int i=0;i<256;i++) outw(units[u].base,p[i]);
-    /* Сектор принят, когда команда записи сняла BSY. FLUSH CACHE здесь не
-     * посылаем: QEMU выполняет её через fsync образа, и опрос статуса держит
-     * процессор занятым всё время большой записи. */
-    delay(u); return wait(u,false);
-}
+int ata_unit_read(int u,u32 lba,void *buf) { return pio(u,lba,buf,1,false); }
+int ata_unit_write(int u,u32 lba,const void *buf) { return pio(u,lba,(void *)buf,1,true); }
+int ata_unit_read_sectors(int u,u32 lba,void *buf,u32 count) { return pio(u,lba,buf,count,false); }
+int ata_unit_write_sectors(int u,u32 lba,const void *buf,u32 count) { return pio(u,lba,(void *)buf,count,true); }
 int ata_read(u32 lba,void *buf) { return ata_unit_read(0,lba,buf); }
 int ata_write(u32 lba,const void *buf) { return ata_unit_write(0,lba,buf); }

@@ -225,6 +225,7 @@ static int sys_close(u32 fd) {
     struct file *f=p->fds[fd]; p->fds[fd]=NULL; p->cloexec&=~(1u<<fd);
     irq_restore(flags);
     if (!f) return -EBADF;
+    block_flush();
     file_close(f); return 0;
 }
 

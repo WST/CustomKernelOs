@@ -12,6 +12,7 @@
  * мы загружаем его CR3 и пишем вершину его стека ядра в TSS (esp0): когда в
  * программе случится прерывание, процессор перейдёт именно на этот стек. */
 #include "task.h"
+#include "block.h"
 #include "tty.h"
 #include "ipc.h"
 #include "heap.h"
@@ -315,6 +316,7 @@ static void task_entry(void) {
 static void idle_loop(void *arg) {
     (void)arg;
     for (;;) {
+        block_flush();
         task_reap();
         smp_idle();
     }
