@@ -34,7 +34,15 @@ with tempfile.TemporaryDirectory(prefix='myos-nano-') as folder:
         send('ext install nano','installed nano',600 if network else 300)
         send('nano --version','GNU nano, version 9.3')
         send('nano /tmp/nano-console.txt',None);time.sleep(1)
-        q.stdin.write('screendump '+str((B/'nano-console.ppm').resolve())+'\n');q.stdin.flush();time.sleep(.3);save_png(B/'nano-console.ppm',B/'nano-console.png')
+        ppm=B/'nano-console.ppm';ppm.unlink(missing_ok=True)
+        q.stdin.write('screendump '+str(ppm.resolve())+'\n');q.stdin.flush()
+        deadline=time.monotonic()+10
+        while True:
+            try:
+                save_png(ppm,B/'nano-console.png');break
+            except (AssertionError,ValueError,OSError):
+                if time.monotonic()>=deadline:raise
+                time.sleep(.05)
         start=len(text());key('ctrl-x');wait('root:/',start)
         send('nanocheck','NANO EDIT PASS',60)
         send('ext install nano','already installed nano')

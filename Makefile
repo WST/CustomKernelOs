@@ -420,9 +420,12 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so | $(DISK)
 
 # ------------------------------------------------------------------ запуск
 
-# index=0 — primary master (загрузка), index=1 — primary slave (MyFS)
+# index=0 — primary master, с него BIOS грузит ядро. Системный том — AHCI port 0.
+# Второй диск DATA_DISK остаётся IDE secondary master (/dev/sdc).
 QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
-               -drive format=raw,file=$(DISK),index=1,media=disk
+               -drive if=none,id=sysdisk,file=$(DISK),format=raw \
+               -device ich9-ahci,id=ahci \
+               -device ide-hd,drive=sysdisk,bus=ahci.0
 QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 ifneq ($(strip $(DATA_DISK)),)
@@ -921,6 +924,24 @@ netboot-usb-smoke:
 
 envtest:
 	python3 tests/env_config_test.py
+
+# Disk-cache eviction, close error propagation and AHCI DMA recovery.
+.PHONY: storage-recoverytest
+storage-recoverytest: | $(BUILD)
+	$(HOSTCC) -std=gnu17 -O1 -g -fno-builtin -DHOST_TEST -Ikernel tests/block_cache_test.c kernel/block.c kernel/string.c -o $(BUILD)/block-cache-test
+	./$(BUILD)/block-cache-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/close_flush_test.c -Wl,--gc-sections -o $(BUILD)/close-flush-test
+	./$(BUILD)/close-flush-test
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/ahci_recovery_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/ahci-recovery-test
+	./$(BUILD)/ahci-recovery-test
+
+$(BUILD)/user/storagecheck.o: tests/storagecheck.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/storagecheck: $(BUILD)/user/storagecheck.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: storage-smoketest
+storage-smoketest: storage-recoverytest
+	python3 tests/storage_smoke.py
 
 .PHONY: desktopdragtest
 desktopdragtest: | $(BUILD)

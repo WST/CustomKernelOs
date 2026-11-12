@@ -1,7 +1,7 @@
 /* tar — распаковка ustar и чтение оглавления.
  * Флаги как у GNU tar: tar xf a.tar, tar xzf a.tar.gz, -C, -v, -k,
  * --strip-components, длинные имена GNU и заголовки pax (path, linkpath, size).
- * .tar.gz разжимается на диск потоком: в памяти только окно deflate в 32 КиБ.
+ * .tar.gz разжимается в кольцо в 32 КиБ и сразу разбирается, без файла в /tmp.
  * Обычный tar читается потоком. Жёстких ссылок нет: содержимое копируется.
  * Устройства и FIFO пропускаются с сообщением. */
 #include "myos.h"
@@ -118,36 +118,38 @@ static void gz_crc_init(void) {
     gz_crc_ready = 1;
 }
 
-/* Окно deflate — последние 32 КиБ. Остальной результат сразу пишется в файл. */
+/* Окно deflate и кольцо выхода — по 32 КиБ. Парсер забирает байты из кольца,
+ * поэтому несжатый архив не записывается на диск. */
+#define GZ_RING 32768
+#define PH_MEMBER 0
+#define PH_BLOCK  1
+#define PH_STORED 2
+#define PH_CODES  3
+#define PH_MATCH  4
+
 struct gz_out {
-    int fd;
-    unsigned char chunk[4096];
-    int chunk_n;
-    unsigned member;
-    unsigned crc;
-    int err;
+    unsigned char ring[GZ_RING];
+    unsigned rpos, rlen;
+    unsigned member, crc;
+    int phase, finished, err, members, final_block;
+    int stored_left, match_left;
+    unsigned match_dist;
+    short lcount[16], lsym[288], dcount[16], dsym[32];
 };
 
-static int gz_flush(struct gz_out *o) {
-    int off = 0;
-    while (off < o->chunk_n) {
-        int w = write(o->fd, o->chunk + off, (size_t)(o->chunk_n - off));
-        if (w <= 0) { o->err = 1; return -1; }
-        off += w;
-    }
-    o->chunk_n = 0;
-    return 0;
-}
+static const char *gz_msg;
+static int gz_msg_printed;
+
+static void gz_fail(const char *m) { if (!gz_msg) gz_msg = m; }
 
 static int gz_put(struct gz_out *o, unsigned char c) {
-    if (o->err) return -1;
+    o->ring[(o->rpos + o->rlen) & (GZ_RING - 1)] = c;
+    o->rlen++;
     gz_win[o->member & (GZ_WIN - 1)] = c;
     o->crc = gz_crc_table[(o->crc ^ c) & 255] ^ (o->crc >> 8);
     o->member++;
     if (opt_verbose && (o->member & ((4u << 20) - 1)) == 0)
         fprintf(stderr, "tar: decompressed %u MiB\n", o->member >> 20);
-    o->chunk[o->chunk_n++] = c;
-    if (o->chunk_n == (int)sizeof o->chunk) return gz_flush(o);
     return 0;
 }
 
@@ -171,63 +173,94 @@ static const unsigned char gz_clen_order[19] = {
     16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15
 };
 
-static int gz_block(struct gz_br *b, struct gz_out *o, int *final) {
+static int gz_load_fixed(struct gz_out *o) {
+    static short fcount[16], fsym[288], fdcount[16], fdsym[32];
+    static int ready;
+    int i;
+    if (!ready) {
+        unsigned char fl[288], fd[32];
+        for (i = 0; i < 144; i++) fl[i] = 8;
+        for (; i < 256; i++) fl[i] = 9;
+        for (; i < 280; i++) fl[i] = 7;
+        for (; i < 288; i++) fl[i] = 8;
+        for (i = 0; i < 32; i++) fd[i] = 5;
+        if (gz_construct(fcount, fsym, fl, 288) < 0) return -1;
+        if (gz_construct(fdcount, fdsym, fd, 32) < 0) return -1;
+        ready = 1;
+    }
+    memcpy(o->lcount, fcount, sizeof o->lcount);
+    memcpy(o->lsym, fsym, sizeof o->lsym);
+    memcpy(o->dcount, fdcount, sizeof o->dcount);
+    memcpy(o->dsym, fdsym, sizeof o->dsym);
+    return 0;
+}
+
+static int gz_u32(struct gz_br *b, unsigned *out);
+
+/* Конец блока deflate. У последнего блока следом идут CRC и длина. */
+static int gz_end_block(struct gz_br *b, struct gz_out *o) {
+    if (o->final_block) {
+        unsigned want, isize;
+        b->acc = 0;
+        b->bits = 0;
+        if (gz_u32(b, &want) < 0 || gz_u32(b, &isize) < 0) { gz_fail("unexpected end of file"); return -1; }
+        if (want != ~o->crc) { gz_fail("crc error"); return -1; }
+        if (isize != o->member) { gz_fail("length error"); return -1; }
+        o->phase = PH_MEMBER;
+        o->final_block = 0;
+        return 0;
+    }
+    o->phase = PH_BLOCK;
+    return 0;
+}
+
+static int gz_start_block(struct gz_br *b, struct gz_out *o) {
     int type, len, nlen, sym, i;
-    short lcount[16], lsym[288], dcount[16], dsym[32];
-    unsigned char llen[288], dlen[32], clen[19];
-    *final = gz_getbits(b, 1);
+    o->final_block = gz_getbits(b, 1);
     type = gz_getbits(b, 2);
-    if (b->err || type == 3) return -1;
+    if (b->err) { gz_fail("unexpected end of file"); return -1; }
+    if (type == 3) { gz_fail("invalid compressed data"); return -1; }
     if (type == 0) {
         gz_align(b);
         b->acc = 0;
         b->bits = 0;
         len = gz_getbits(b, 16);
         nlen = gz_getbits(b, 16);
-        if (b->err || nlen != (len ^ 0xFFFF)) return -1;
+        if (b->err) { gz_fail("unexpected end of file"); return -1; }
+        if (nlen != (len ^ 0xFFFF)) { gz_fail("invalid compressed data"); return -1; }
         b->acc = 0;
         b->bits = 0;
-        while (len-- > 0) {
-            int c = gz_byte(b, NULL);
-            if (c < 0 || gz_put(o, (unsigned char)c) < 0) return -1;
-        }
+        o->stored_left = len;
+        o->phase = PH_STORED;
         return 0;
     }
     if (type == 1) {
-        static short fcount[16], fsym[288], fdcount[16], fdsym[32];
-        static int ready;
-        if (!ready) {
-            unsigned char fl[288], fd[32];
-            for (i = 0; i < 144; i++) fl[i] = 8;
-            for (; i < 256; i++) fl[i] = 9;
-            for (; i < 280; i++) fl[i] = 7;
-            for (; i < 288; i++) fl[i] = 8;
-            for (i = 0; i < 32; i++) fd[i] = 5;
-            if (gz_construct(fcount, fsym, fl, 288) < 0) return -1;
-            if (gz_construct(fdcount, fdsym, fd, 32) < 0) return -1;
-            ready = 1;
-        }
-        memcpy(lcount, fcount, sizeof lcount);
-        memcpy(lsym, fsym, sizeof lsym);
-        memcpy(dcount, fdcount, sizeof dcount);
-        memcpy(dsym, fdsym, sizeof dsym);
+        if (gz_load_fixed(o) < 0) { gz_fail("invalid compressed data"); return -1; }
     } else {
         int nlit, ndist, nclen, nlen_tot;
+        unsigned char llen[288], dlen[32], clen[19];
+        short ccount[16], csym[19];
         memset(clen, 0, sizeof clen);
         memset(llen, 0, sizeof llen);
         memset(dlen, 0, sizeof dlen);
         nlit = gz_getbits(b, 5) + 257;
         ndist = gz_getbits(b, 5) + 1;
         nclen = gz_getbits(b, 4) + 4;
-        if (b->err || nlit > 286 || ndist > 32 || nclen > 19) return -1;
+        if (b->err || nlit > 286 || ndist > 32 || nclen > 19) {
+            gz_fail(b->err ? "unexpected end of file" : "invalid compressed data");
+            return -1;
+        }
         for (i = 0; i < nclen; i++) clen[gz_clen_order[i]] = (unsigned char)gz_getbits(b, 3);
-        if (b->err || gz_construct(lcount, lsym, clen, 19) < 0) return -1;
+        if (b->err || gz_construct(ccount, csym, clen, 19) < 0) {
+            gz_fail(b->err ? "unexpected end of file" : "invalid compressed data");
+            return -1;
+        }
         nlen_tot = nlit + ndist;
         i = 0;
         while (i < nlen_tot) {
             int rep, what;
-            sym = gz_decode(b, lcount, lsym);
-            if (sym < 0 || sym > 18) return -1;
+            sym = gz_decode(b, ccount, csym);
+            if (sym < 0 || sym > 18) { gz_fail(b->err ? "unexpected end of file" : "invalid compressed data"); return -1; }
             if (sym < 16) {
                 if (i < nlit) llen[i] = (unsigned char)sym;
                 else dlen[i - nlit] = (unsigned char)sym;
@@ -235,7 +268,7 @@ static int gz_block(struct gz_br *b, struct gz_out *o, int *final) {
                 continue;
             }
             if (sym == 16) {
-                if (i == 0) return -1;
+                if (i == 0) { gz_fail("invalid compressed data"); return -1; }
                 what = i <= nlit ? llen[i - 1] : dlen[i - nlit - 1];
                 rep = 3 + gz_getbits(b, 2);
             } else if (sym == 17) {
@@ -245,43 +278,21 @@ static int gz_block(struct gz_br *b, struct gz_out *o, int *final) {
                 what = 0;
                 rep = 11 + gz_getbits(b, 7);
             }
-            if (b->err || i + rep > nlen_tot) return -1;
+            if (b->err || i + rep > nlen_tot) {
+                gz_fail(b->err ? "unexpected end of file" : "invalid compressed data");
+                return -1;
+            }
             while (rep--) {
                 if (i < nlit) llen[i] = (unsigned char)what;
                 else dlen[i - nlit] = (unsigned char)what;
                 i++;
             }
         }
-        if (gz_construct(lcount, lsym, llen, nlit) < 0) return -1;
-        if (gz_construct(dcount, dsym, dlen, ndist) < 0) return -1;
+        if (gz_construct(o->lcount, o->lsym, llen, nlit) < 0) { gz_fail("invalid compressed data"); return -1; }
+        if (gz_construct(o->dcount, o->dsym, dlen, ndist) < 0) { gz_fail("invalid compressed data"); return -1; }
     }
-    for (;;) {
-        int length, ds, dist, j;
-        sym = gz_decode(b, lcount, lsym);
-        if (sym < 0 || sym > 285) return -1;
-        if (sym < 256) {
-            if (gz_put(o, (unsigned char)sym) < 0) return -1;
-            continue;
-        }
-        if (sym == 256) return 0;
-        length = gz_len_base[sym - 257] + gz_getbits(b, gz_len_extra[sym - 257]);
-        ds = gz_decode(b, dcount, dsym);
-        if (ds < 0 || ds > 29 || b->err) return -1;
-        dist = gz_dist_base[ds] + gz_getbits(b, gz_dist_extra[ds]);
-        if (b->err || dist < 1 || dist > GZ_WIN || (unsigned)dist > o->member || length < 3) return -1;
-        for (j = 0; j < length; j++) {
-            unsigned char c = gz_win[(o->member - (unsigned)dist) & (GZ_WIN - 1)];
-            if (gz_put(o, c) < 0) return -1;
-        }
-    }
-}
-
-static int gz_inflate(struct gz_br *b, struct gz_out *o) {
-    int final = 0;
-    while (!final) if (gz_block(b, o, &final) < 0) return -1;
-    b->acc = 0;
-    b->bits = 0;
-    return o->err ? -1 : 0;
+    o->phase = PH_CODES;
+    return 0;
 }
 
 static int gz_u32(struct gz_br *b, unsigned *out) {
@@ -294,63 +305,113 @@ static int gz_u32(struct gz_br *b, unsigned *out) {
     return 0;
 }
 
-/* 0 — поток разжат в outfd. Память не растёт вместе с архивом. */
-static int gunzip_stream(struct gz_br *in, int outfd, const char **err) {
-    struct gz_out o;
-    int members = 0;
-    gz_crc_init();
-    memset(&o, 0, sizeof o);
-    o.fd = outfd;
-    for (;;) {
-        int eof = 0, magic, method, flg, skip, xlen;
-        unsigned want, isize;
-        magic = gz_byte(in, &eof);
-        if (eof) {
-            if (!members) { *err = "not in gzip format"; return -1; }
-            break;
-        }
-        if (magic < 0) { *err = "unexpected end of file"; return -1; }
-        if (magic != 0x1f) {
-            if (!members) { *err = "not in gzip format"; return -1; }
-            break;
-        }
-        magic = gz_byte(in, NULL);
-        if (magic != 0x8b) {
-            *err = members ? "invalid compressed data" : "not in gzip format";
-            return -1;
-        }
-        method = gz_byte(in, NULL);
-        flg = gz_byte(in, NULL);
-        if (method < 0 || flg < 0) { *err = "unexpected end of file"; return -1; }
-        if (method != 8) { *err = "unknown compression method"; return -1; }
-        if (flg & 0xE0) { *err = "reserved gzip flags"; return -1; }
-        for (skip = 0; skip < 6; skip++) if (gz_byte(in, NULL) < 0) { *err = "unexpected end of file"; return -1; }
-        if (flg & 4) {
-            int lo = gz_byte(in, NULL), hi = gz_byte(in, NULL);
-            if (lo < 0 || hi < 0) { *err = "unexpected end of file"; return -1; }
-            xlen = lo | (hi << 8);
-            while (xlen--) if (gz_byte(in, NULL) < 0) { *err = "unexpected end of file"; return -1; }
-        }
-        if (flg & 8) while ((skip = gz_byte(in, NULL)) > 0) {}
-        if (skip < 0) { *err = "unexpected end of file"; return -1; }
-        if (flg & 16) while ((skip = gz_byte(in, NULL)) > 0) {}
-        if (skip < 0) { *err = "unexpected end of file"; return -1; }
-        if (flg & 2) {
-            if (gz_byte(in, NULL) < 0 || gz_byte(in, NULL) < 0) { *err = "unexpected end of file"; return -1; }
-        }
-        o.member = 0;
-        o.crc = 0xFFFFFFFFu;
-        if (gz_inflate(in, &o) < 0) {
-            *err = o.err ? "cannot write temporary file" : in->err ? "unexpected end of file" : "invalid compressed data";
-            return -1;
-        }
-        if (gz_u32(in, &want) < 0 || gz_u32(in, &isize) < 0) { *err = "unexpected end of file"; return -1; }
-        if (want != ~o.crc) { *err = "crc error"; return -1; }
-        if (isize != o.member) { *err = "length error"; return -1; }
-        members++;
+/* Заголовок очередного члена gzip. 0 — можно читать блоки, finished — поток кончился. */
+static int gz_open_member(struct gz_br *b, struct gz_out *o) {
+    int eof = 0, magic, method, flg, skip, xlen;
+    magic = gz_byte(b, &eof);
+    if (eof) {
+        if (!o->members) { gz_fail("not in gzip format"); return -1; }
+        o->finished = 1;
+        return 0;
     }
-    if (gz_flush(&o) < 0) { *err = "cannot write temporary file"; return -1; }
-    *err = NULL;
+    if (magic < 0) { gz_fail("unexpected end of file"); return -1; }
+    if (magic != 0x1f) {
+        if (!o->members) { gz_fail("not in gzip format"); return -1; }
+        o->finished = 1;
+        return 0;
+    }
+    magic = gz_byte(b, NULL);
+    if (magic != 0x8b) {
+        gz_fail(o->members ? "invalid compressed data" : "not in gzip format");
+        return -1;
+    }
+    method = gz_byte(b, NULL);
+    flg = gz_byte(b, NULL);
+    if (method < 0 || flg < 0) { gz_fail("unexpected end of file"); return -1; }
+    if (method != 8) { gz_fail("unknown compression method"); return -1; }
+    if (flg & 0xE0) { gz_fail("reserved gzip flags"); return -1; }
+    for (skip = 0; skip < 6; skip++) if (gz_byte(b, NULL) < 0) { gz_fail("unexpected end of file"); return -1; }
+    if (flg & 4) {
+        int lo = gz_byte(b, NULL), hi = gz_byte(b, NULL);
+        if (lo < 0 || hi < 0) { gz_fail("unexpected end of file"); return -1; }
+        xlen = lo | (hi << 8);
+        while (xlen--) if (gz_byte(b, NULL) < 0) { gz_fail("unexpected end of file"); return -1; }
+    }
+    if (flg & 8) while ((skip = gz_byte(b, NULL)) > 0) {}
+    if (skip < 0) { gz_fail("unexpected end of file"); return -1; }
+    if (flg & 16) while ((skip = gz_byte(b, NULL)) > 0) {}
+    if (skip < 0) { gz_fail("unexpected end of file"); return -1; }
+    if (flg & 2) {
+        if (gz_byte(b, NULL) < 0 || gz_byte(b, NULL) < 0) { gz_fail("unexpected end of file"); return -1; }
+    }
+    o->member = 0;
+    o->crc = 0xFFFFFFFFu;
+    o->phase = PH_BLOCK;
+    o->members++;
+    return 0;
+}
+
+/* Один шаг: 1 — в кольцо положен байт, 0 — состояние сдвинулось, 2 — поток кончился. */
+static int gz_step(struct gz_br *b, struct gz_out *o) {
+    if (o->phase == PH_MEMBER) {
+        if (gz_open_member(b, o) < 0) return -1;
+        return o->finished ? 2 : 0;
+    }
+    if (o->phase == PH_BLOCK) return gz_start_block(b, o);
+    if (o->phase == PH_STORED) {
+        int c;
+        if (o->stored_left == 0) return gz_end_block(b, o);
+        c = gz_byte(b, NULL);
+        if (c < 0) { gz_fail("unexpected end of file"); return -1; }
+        gz_put(o, (unsigned char)c);
+        o->stored_left--;
+        if (o->stored_left == 0 && gz_end_block(b, o) < 0) return -1;
+        return 1;
+    }
+    if (o->phase == PH_MATCH) {
+        unsigned char c = gz_win[(o->member - o->match_dist) & (GZ_WIN - 1)];
+        gz_put(o, c);
+        if (--o->match_left == 0) o->phase = PH_CODES;
+        return 1;
+    }
+    {
+        int sym = gz_decode(b, o->lcount, o->lsym);
+        int length, ds, dist;
+        if (sym < 0 || sym > 285) {
+            gz_fail(b->err ? "unexpected end of file" : "invalid compressed data");
+            return -1;
+        }
+        if (sym < 256) {
+            gz_put(o, (unsigned char)sym);
+            return 1;
+        }
+        if (sym == 256) return gz_end_block(b, o);
+        length = gz_len_base[sym - 257] + gz_getbits(b, gz_len_extra[sym - 257]);
+        ds = gz_decode(b, o->dcount, o->dsym);
+        if (ds < 0 || ds > 29 || b->err) {
+            gz_fail(b->err ? "unexpected end of file" : "invalid compressed data");
+            return -1;
+        }
+        dist = gz_dist_base[ds] + gz_getbits(b, gz_dist_extra[ds]);
+        if (b->err || dist < 1 || dist > GZ_WIN || (unsigned)dist > o->member || length < 3) {
+            gz_fail(b->err ? "unexpected end of file" : "invalid compressed data");
+            return -1;
+        }
+        o->match_left = length;
+        o->match_dist = (unsigned)dist;
+        o->phase = PH_MATCH;
+        return 0;
+    }
+}
+
+/* Доливает кольцо, пока в нём есть место. Ошибка оставляет уже разжатые байты на месте. */
+static int gz_pump(struct gz_br *b, struct gz_out *o) {
+    if (o->err) return -1;
+    while (o->rlen < GZ_RING && !o->finished) {
+        int r = gz_step(b, o);
+        if (r < 0) { o->err = 1; return -1; }
+        if (r == 2) return 0;
+    }
     return 0;
 }
 
@@ -358,11 +419,22 @@ static int gunzip_stream(struct gz_br *in, int outfd, const char **err) {
 
 struct src {
     int fd;
+    struct gz_br *gz;
+    struct gz_out *gzout;
     const unsigned char *mem;
     unsigned memlen, mempos;
     unsigned char peek[512];
     int peek_len, peek_off;
 };
+
+static void short_archive(void) {
+    if (gz_msg) {
+        fprintf(stderr, "tar: %s: %s\n", opt_file ? opt_file : "archive", gz_msg);
+        gz_msg_printed = 1;
+    } else {
+        fprintf(stderr, "tar: unexpected end of file\n");
+    }
+}
 
 static int src_read(struct src *s, void *buf, int n) {
     unsigned char *p = buf;
@@ -384,6 +456,25 @@ static int src_read(struct src *s, void *buf, int n) {
             if (!take) break;
             memcpy(p + got, s->mem + s->mempos, (size_t)take);
             s->mempos += (unsigned)take;
+            got += take;
+            continue;
+        }
+        if (s->gz) {
+            struct gz_out *o = s->gzout;
+            unsigned pos, first;
+            if (!o->rlen) {
+                if (gz_pump(s->gz, o) < 0) return -1;
+                if (!o->rlen) break;
+            }
+            take = n - got;
+            if ((unsigned)take > o->rlen) take = (int)o->rlen;
+            pos = o->rpos & (GZ_RING - 1);
+            first = GZ_RING - pos;
+            if ((unsigned)take < first) first = (unsigned)take;
+            memcpy(p + got, o->ring + pos, first);
+            if ((unsigned)take > first) memcpy(p + got + first, o->ring, (size_t)((unsigned)take - first));
+            o->rpos += (unsigned)take;
+            o->rlen -= (unsigned)take;
             got += take;
             continue;
         }
@@ -649,12 +740,15 @@ static int copy_file(const char *src, const char *dst) {
     return 0;
 }
 
+#define WRITE_CHUNK (32 * 1024)
+static unsigned char io_buf[WRITE_CHUNK];
+
 static int skip_bytes(struct src *s, unsigned size) {
     unsigned rest = (size + 511u) & ~511u;
-    unsigned char buf[512];
     while (rest) {
-        if (src_exact(s, buf, 512) < 0) return -1;
-        rest -= 512;
+        unsigned n = rest > WRITE_CHUNK ? WRITE_CHUNK : rest;
+        if (src_exact(s, io_buf, (int)n) < 0) return -1;
+        rest -= n;
     }
     return 0;
 }
@@ -683,16 +777,16 @@ static int write_member(struct src *s, const char *path, unsigned size,unsigned 
     }
     rest = (size + 511u) & ~511u;
     while (rest) {
-        unsigned char buf[512];
-        unsigned n;
-        if (src_exact(s, buf, 512) < 0) { if (fd >= 0) close(fd); return -2; }
+        unsigned n = rest > WRITE_CHUNK ? WRITE_CHUNK : rest;
+        unsigned chunk;
+        if (src_exact(s, io_buf, (int)n) < 0) { if (fd >= 0) close(fd); return -2; }
         if (!err && filled < size) {
-            n = 512;
-            if (filled + n > size) n = size - filled;
-            if (write_full(fd, buf, n) < 0) err = -1;
+            chunk = n;
+            if (filled + chunk > size) chunk = size - filled;
+            if (write_full(fd, io_buf, chunk) < 0) err = -1;
         }
-        filled += 512;
-        rest -= 512;
+        filled += n;
+        rest -= n;
     }
     if (fd >= 0) close(fd);
     return err;
@@ -773,7 +867,7 @@ static int run_archive(struct src *s) {
         const char *np, *lp;
         (void)sum_unused;
         if (src_exact(s, h, 512) < 0) {
-            fprintf(stderr, "tar: unexpected end of file\n");
+            short_archive();
             return 1;
         }
         header_sum(h, &sum_unused, &zero);
@@ -807,7 +901,7 @@ static int run_archive(struct src *s) {
             rest = (size + 511u) & ~511u;
             while (rest) {
                 unsigned char blk[512];
-                if (src_exact(s, blk, 512) < 0) { free(body); fprintf(stderr, "tar: unexpected end of file\n"); return 1; }
+                if (src_exact(s, blk, 512) < 0) { free(body); short_archive(); return 1; }
                 if (filled < size) {
                     unsigned n = filled + 512 > size ? size - filled : 512;
                     memcpy(body + filled, blk, n);
@@ -852,7 +946,7 @@ static int run_archive(struct src *s) {
         have_longname = have_longlink = 0;
         saved_clear(&local);
         if (!name_wanted(raw)) {
-            if (skip_bytes(s, size) < 0) { fprintf(stderr, "tar: unexpected end of file\n"); return 1; }
+            if (skip_bytes(s, size) < 0) { short_archive(); return 1; }
             continue;
         }
         pr = place_name(dest, NAME_CAP, raw, opt_strip, opt_absolute);
@@ -931,7 +1025,7 @@ static int run_archive(struct src *s) {
             show('-', mode, size, dest, NULL);
             {
                 int wr = write_member(s,dest,size,mode);
-                if (wr == -2) { fprintf(stderr, "tar: unexpected end of file\n"); return 1; }
+                if (wr == -2) { short_archive(); return 1; }
                 if (wr < 0) { warn_sys(dest, -1); rc = 1; }
             }
         } else {
@@ -1068,11 +1162,9 @@ static int old_style(const char *s) {
 int main(int argc, char **argv) {
     int i = 1, fd = -1, nfirst, rc;
     unsigned char first[512];
-    char tmpname[32];
-    const char *err = NULL;
     struct src src;
     struct gz_br zin;
-    tmpname[0] = 0;
+    static struct gz_out gz_stream;
     if (argc > 1 && argv[1][0] != '-' && old_style(argv[1])) {
         if (parse_cluster(argv[1], &i, argc, argv) < 0) return 2;
         i++;
@@ -1108,34 +1200,16 @@ int main(int argc, char **argv) {
     if (nfirst >= 2 && first[0] == 0x1f && first[1] == 0x8b) opt_gzip = 1;
     else if (opt_gzip) { fprintf(stderr, "tar: %s: not in gzip format\n", opt_file); return 2; }
     if (opt_gzip) {
-        int tfd;
-        snprintf(tmpname, sizeof tmpname, "/tmp/tar.%u", (unsigned)getpid());
-        tfd = open(tmpname, O_RDWR | O_CREAT | O_TRUNC);
-        if (tfd < 0) { warn_sys(tmpname, -1); if (fd > 0) close(fd); return 2; }
+        gz_crc_init();
         memset(&zin, 0, sizeof zin);
+        memset(&gz_stream, 0, sizeof gz_stream);
         zin.fd = fd;
         if (nfirst > (int)sizeof zin.pre) nfirst = (int)sizeof zin.pre;
         if (nfirst > 0) memcpy(zin.pre, first, (size_t)nfirst);
         zin.pre_len = nfirst;
-        if (opt_verbose) fprintf(stderr, "tar: decompressing %s\n", opt_file);
-        if (gunzip_stream(&zin, tfd, &err) < 0) {
-            fprintf(stderr, "tar: %s: %s\n", opt_file, err ? err : "invalid compressed data");
-            close(tfd);
-            unlink(tmpname);
-            if (fd > 0) close(fd);
-            return 2;
-        }
-        if (lseek(tfd, 0, 0) < 0) {
-            fprintf(stderr, "tar: %s: cannot rewind temporary file\n", opt_file);
-            close(tfd);
-            unlink(tmpname);
-            if (fd > 0) close(fd);
-            return 2;
-        }
-        if (fd > 0 && fd != tfd) close(fd);
-        fd = tfd;
         memset(&src, 0, sizeof src);
-        src.fd = tfd;
+        src.gz = &zin;
+        src.gzout = &gz_stream;
     } else if (nfirst == 512) {
         memcpy(src.peek, first, 512);
         src.peek_len = 512;
@@ -1151,15 +1225,23 @@ int main(int argc, char **argv) {
         int cr = chdir(opt_dir);
         if (cr < 0) {
             warn_sys(opt_dir, cr);
-            if (tmpname[0]) unlink(tmpname);
             if (fd > 0) close(fd);
             return 2;
         }
     }
     extraction_mask=umask(0);umask(extraction_mask);
     rc = run_archive(&src);
-    rc|=finish_directory_modes(!rc);
-    if (tmpname[0]) unlink(tmpname);
+    if (src.gz) {
+        unsigned char sink[4096];
+        int n = 0;
+        while (!gz_msg && (n = src_read(&src, sink, (int)sizeof sink)) > 0) {}
+        if (gz_msg || n < 0) rc = 1;
+    }
+    if (gz_msg && !gz_msg_printed) {
+        fprintf(stderr, "tar: %s: %s\n", opt_file, gz_msg);
+        rc = 1;
+    }
+    rc |= finish_directory_modes(!rc);
     if (fd > 0) close(fd);
     return rc ? 1 : 0;
 }

@@ -37,10 +37,12 @@ static int permissions_write(u32 b,const void *in) {
     return ret;
 }
 static int permissions_block(u32 ino,bool alloc,u32 *out) {
+    int ret;
     *out=0;
     if(sb.version!=3 || !sb.permissions_root) {
         if(!alloc)return 0;
         u32 root=balloc();if(!root)return FS_ENOSPC;
+        if((ret=write_zero_block(root)) || (ret=bitmap_flush())){bfree(root);return ret;}
         struct superblock old=sb;
         if(sb.version!=3)sb.layout_version=sb.version;
         sb.version=3;sb.permissions_root=root;
@@ -49,11 +51,12 @@ static int permissions_block(u32 ino,bool alloc,u32 *out) {
     u32 pointers[NINDIRECT];
     u32 index=ino/PERMISSIONS_PER_BLOCK;
     if(index/NINDIRECT>=NINDIRECT)return FS_EINVAL;
-    int ret=permissions_read(sb.permissions_root,pointers);if(ret)return ret;
+    ret=permissions_read(sb.permissions_root,pointers);if(ret)return ret;
     u32 leaf=pointers[index/NINDIRECT];
     if(!leaf) {
         if(!alloc)return 0;
         leaf=balloc();if(!leaf)return FS_ENOSPC;
+        if((ret=write_zero_block(leaf))){bfree(leaf);return ret;}
         pointers[index/NINDIRECT]=leaf;
         if((ret=permissions_write(sb.permissions_root,pointers))){bfree(leaf);return ret;}
     }
@@ -61,6 +64,7 @@ static int permissions_block(u32 ino,bool alloc,u32 *out) {
     u32 block=pointers[index%NINDIRECT];
     if(!block && alloc) {
         block=balloc();if(!block)return FS_ENOSPC;
+        if((ret=write_zero_block(block))){bfree(block);return ret;}
         pointers[index%NINDIRECT]=block;
         if((ret=permissions_write(leaf,pointers))){bfree(block);return ret;}
     }
@@ -71,7 +75,9 @@ static int permissions_store(u32 ino,u32 mode,u32 uid,u32 gid) {
     struct disk_permissions records[PERMISSIONS_PER_BLOCK];
     if((ret=permissions_read(block,records)))return ret;
     records[ino%PERMISSIONS_PER_BLOCK]=(struct disk_permissions){PERMISSIONS_MAGIC,mode,uid,gid};
-    return permissions_write(block,records);
+    ret=permissions_write(block,records);
+    if(ret)return ret;
+    return bitmap_flush();
 }
 static int myfs_read_impl(u32 ino,u32 off,void *buf,u32 n);
 static int permissions_load(u32 ino,const struct inode *in,u32 *mode,u32 *uid,u32 *gid) {

@@ -225,7 +225,10 @@ static int sys_close(u32 fd) {
     struct file *f=p->fds[fd]; p->fds[fd]=NULL; p->cloexec&=~(1u<<fd);
     irq_restore(flags);
     if (!f) return -EBADF;
-    file_close(f); return 0;
+    int flush_error=block_flush();
+    /* The descriptor is consumed even on EIO: retrying close must not close a
+     * descriptor another thread has subsequently reused. Release resources too. */
+    file_close(f); return flush_error ? -EIO : 0;
 }
 
 static int sys_lseek(u32 fd, u32 off, u32 whence) {
