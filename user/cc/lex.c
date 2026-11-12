@@ -365,6 +365,7 @@ static void remove_backslash_newline(char *p) {
     int i = 0, j = 0, n = 0;
     while (p[i]) {
         if (p[i] == '\\' && p[i + 1] == '\n') { i += 2; n++; }
+        else if (p[i] == '\\' && p[i+1] == '\r' && p[i+2] == '\n') { i+=3; n++; }
         else if (p[i] == '\n') { p[j++] = p[i++]; for (; n > 0; n--) p[j++] = '\n'; }
         else p[j++] = p[i++];
     }

@@ -65,9 +65,9 @@ enum {
     SYS_SYMLINK, SYS_READLINK, SYS_LSTAT,
     SYS_SYSINFO, SYS_SPAWN, SYS_CPUINFO,
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
+    SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL,
     SYS_REBOOT,
-    SYS_THREAD_CTL,
-    SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL
+    SYS_THREAD_CTL
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0
@@ -83,6 +83,9 @@ struct thread_tcb {
     struct thread_key key[THREAD_KEYS];
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
+_Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
+_Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 

@@ -778,6 +778,7 @@ gfxtest: | $(BUILD)
 
 # Тесты компилятора cc на Linux: тестовые программы и «cc собирает сам себя»
 cctest: $(BUILD)/cc-host $(CCROOT_READY)
+	python3 tests/cc_crlf.py $(BUILD)/cc-host $(CCROOT)
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
 	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \

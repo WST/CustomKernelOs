@@ -1236,6 +1236,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_CLIPBOARD: ret = sys_clipboard(a, b, c); break;
     case SYS_KBLAYOUT:    if ((int)a >= 0) kb_set_layout(a); ret = kb_layout(); break;
     case SYS_REBOOT:
+        if (!task_process(t)->authenticated || task_process(t)->uid != 0) { ret=-EPERM; break; }
         if (a != RB_POWEROFF && a != RB_REBOOT) { ret = -EINVAL; break; }
         machine_reset((int)a);
     case SYS_THREAD_CTL:

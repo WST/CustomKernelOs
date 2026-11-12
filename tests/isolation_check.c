@@ -43,7 +43,7 @@ static void ipc_checks(void){
  CHECK(service_register("isolation")==0);
  int ready[2],command[2];CHECK(pipe(ready)==0 && pipe(command)==0);int parent=getpid();
  int child=fork();if(!child){
-  CHECK(shm_map(id)==NULL && errno==EACCES);drop(1001);CHECK(kill(parent)==-EPERM);CHECK(kill(1)==-EPERM);
+  CHECK(shm_map(id)==NULL && errno==EACCES);drop(1001);CHECK(reboot(RB_REBOOT)==-1 && errno==EPERM);CHECK(reboot(RB_POWEROFF)==-1 && errno==EPERM);CHECK(kill(parent)==-EPERM);CHECK(kill(1)==-EPERM);
   struct msg m={0};m.from=123456;CHECK(msg_send(parent,&m)==-EPERM);CHECK(service_find("isolation")==0);CHECK(service_register("isolation")==0 && service_find("isolation")==getpid());
   CHECK(shm_map(id)==NULL && errno==EACCES);CHECK(shm_grant(id,parent,3)==-EPERM);
   int own=shm_alloc(4096);unsigned *p=shm_map(own);CHECK(p!=NULL);*p=99;put(ready[1],own);
@@ -68,7 +68,7 @@ static void ipc_checks(void){
  int victim_tid=take(ready[0]);child=fork();if(!child){drop(1001);CHECK(kill(victim)==-EPERM && kill(victim_tid)==-EPERM);
   int same=fork();if(!same){for(;;)yield();}CHECK(kill(same)==0);waited(same,137);exit(failures?1:0);
  }waited(child,0);CHECK(kill(victim_tid)==0);waited(victim,137);close(ready[0]);close(ready[1]);
- child=fork();if(!child){CHECK(account(6,NULL,NULL)==0);CHECK(kill(parent)==-EPERM && msg_send(parent,&m)==-EPERM && service_find("isolation")==0);CHECK(service_register("anonymous")==-EPERM);for(int i=0;i<16;i++)CHECK(shm_alloc(4096)>0);exit(failures?1:0);}waited(child,0);
+ child=fork();if(!child){CHECK(account(6,NULL,NULL)==0);CHECK(reboot(RB_REBOOT)==-1 && errno==EPERM);CHECK(kill(parent)==-EPERM && msg_send(parent,&m)==-EPERM && service_find("isolation")==0);CHECK(service_register("anonymous")==-EPERM);for(int i=0;i<16;i++)CHECK(shm_alloc(4096)>0);exit(failures?1:0);}waited(child,0);
  CHECK(shm_unmap(root)==0);int slots[64];for(int i=0;i<64;i++){slots[i]=shm_alloc(4096);CHECK(slots[i]>0);}CHECK(shm_alloc(4096)<0);for(int i=0;i<64;i++)CHECK(shm_discard(slots[i])==0);
  int old=shm_alloc(4096);CHECK(shm_discard(old)==0);int fresh=shm_alloc(4096);CHECK(fresh!=old && shm_map(old)==NULL && errno==EINVAL);CHECK(shm_discard(fresh)==0);
  puts("Kill ownership, IPC grants/epochs, namespaces and cleanup: PASS");
