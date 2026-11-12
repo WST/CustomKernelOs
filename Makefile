@@ -245,9 +245,13 @@ $(BUILD)/user/pic/zlib.o: user/include/zlib.h
 $(BUILD)/user/libz.so: $(BUILD)/user/pic/zlib.o $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libz.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/zlib.o -L$(BUILD)/user -lc
 
-$(BUILD)/user/pic/math.o: user/include/math.h
-$(BUILD)/user/libm.so: $(BUILD)/user/pic/math.o $(BUILD)/user/libc.so
-	$(CC) -m32 -shared -nostdlib -Wl,-soname,libm.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/math.o -L$(BUILD)/user -lc
+# libm.so — src/math musl (float и double). math.c по-прежнему внутри libc.
+MUSL_MATH_SRC := $(wildcard user/lib/musl-math/*.c)
+MUSL_PIC := $(patsubst user/lib/musl-math/%.c,$(BUILD)/user/pic/m_%.o,$(MUSL_MATH_SRC))
+$(BUILD)/user/pic/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h | $(BUILD)/user/pic
+	$(CC) $(UCFLAGS) -fexcess-precision=standard -fPIC -Iuser/lib/musl-math -c $< -o $@
+$(BUILD)/user/libm.so: $(MUSL_PIC) $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libm.so -Wl,--hash-style=sysv -o $@ $(MUSL_PIC) -L$(BUILD)/user -lc
 
 $(BUILD)/user/pic/libdl.o: user/lib/libdl.c user/include/dlfcn.h | $(BUILD)/user/pic
 	$(CC) $(UCFLAGS) -fPIC -c $< -o $@
@@ -376,9 +380,17 @@ $(CCROOT)/lib/libz.a: $(BUILD)/libobj-linux/zlib.o
 $(BUILD)/mlib/libz.a: $(BUILD)/libobj-myos/zlib.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
-$(CCROOT)/lib/libm.a: $(BUILD)/libobj-linux/math.o
+MUSL_LINUX := $(patsubst user/lib/musl-math/%.c,$(BUILD)/libobj-linux/m_%.o,$(MUSL_MATH_SRC))
+MUSL_MYOS  := $(patsubst user/lib/musl-math/%.c,$(BUILD)/libobj-myos/m_%.o,$(MUSL_MATH_SRC))
+$(BUILD)/libobj-linux/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -linux -Iuser/lib/musl-math -c $< -o $@
+$(BUILD)/libobj-myos/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h $(CCROOT)/.stamp $(BUILD)/cc-host
+	@mkdir -p $(@D)
+	$(BUILD)/cc-host -B $(CCROOT) -Iuser/lib/musl-math -c $< -o $@
+$(CCROOT)/lib/libm.a: $(MUSL_LINUX)
 	rm -f $@ && $(AR) rcs $@ $^
-$(BUILD)/mlib/libm.a: $(BUILD)/libobj-myos/math.o
+$(BUILD)/mlib/libm.a: $(MUSL_MYOS)
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
 $(BUILD)/libobj-linux/libdl.o: user/lib/libdl.c user/include/dlfcn.h $(CCROOT)/.stamp $(BUILD)/cc-host
@@ -668,6 +680,8 @@ lmtest: $(BUILD)/cc-host $(CCROOT_READY)
 	@./$(BUILD)/lm-libc
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/cc/libm.c -lm -o $(BUILD)/lm-test
 	@./$(BUILD)/lm-test
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/libm_full.c -lm -o $(BUILD)/lm-full
+	@./$(BUILD)/lm-full
 
 # libz: round-trip, куски входа и повтор после deflateReset.
 ztest: $(BUILD)/cc-host $(CCROOT_READY)
