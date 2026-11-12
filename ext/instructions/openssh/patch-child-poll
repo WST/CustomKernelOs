@@ -1,0 +1,30 @@
+--- a/sshd.c
++++ b/sshd.c
+@@ -962,7 +962,7 @@
+ 				unlink(options.pid_file);
+ 			exit(received_sigterm == SIGTERM ? 0 : 255);
+ 		}
+-		if (received_sigchld) {
++		if (1) { /* MyOS: reap without SIGCHLD delivery. */
+ 			child_reap_all_exited();
+ 			received_sigchld = 0;
+ 		}
+--- a/serverloop.c
++++ b/serverloop.c
+@@ -164,6 +164,7 @@
+ 
+ 	/* Prepare channel poll. First two pollfd entries are reserved */
+ 	ptimeout_init(&timeout);
++	ptimeout_deadline_ms(&timeout, 100);
+ 	channel_prepare_poll(ssh, pfdp, npfd_allocp, npfd_activep, 2, &timeout);
+ 	now = monotime();
+ 	if (*npfd_activep < 2)
+@@ -320,7 +321,7 @@
+ 	pid_t pid;
+ 	int status;
+ 
+-	if (child_terminated) {
++	if (1) { /* MyOS: poll waitpid instead of SIGCHLD. */
+ 		debug("Received SIGCHLD.");
+ 		while ((pid = waitpid(-1, &status, WNOHANG)) > 0 ||
+ 		    (pid == -1 && errno == EINTR))

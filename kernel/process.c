@@ -8,7 +8,7 @@
  *   0x80000000  динамический загрузчик, если в ELF есть PT_INTERP
  *   0xA0000000  общая память shm
  *   0xB0000000  mmap (анонимные страницы и частные копии файлов)
- *   0xBFFF0000  стек программы, 64 КБ, растёт вниз
+ *   0xBFF00000  стек программы, 1 МиБ, растёт вниз
  *   0xBFFFFFFF  на вершине: строки аргументов, argv[], argc
  *               у программы с PT_INTERP ещё envp и auxv
  */
@@ -50,7 +50,7 @@ struct elf_phdr {
 #define AT_BASE   7
 #define AT_ENTRY  9
 
-#define STACK_BOTTOM (USER_TOP - USER_STACK_PAGES * PAGE_SIZE)
+#define STACK_BOTTOM USER_STACK_BOTTOM
 #define EXEC_MAX      (8u * 1024 * 1024)   /* больше в кучу ядра не читаем */
 #define EXEC_MAX_PHDR 64
 
@@ -228,11 +228,14 @@ static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 in
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
  * argv — строки в памяти ядра. Файл читается кусками по 512 байт: в куче
  * ядра остаются только заголовки программы, не весь образ. */
-static int load_image(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
+static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
     u32 ino;
     struct fs_stat st;
-    if (fs_resolve(cwd, path, &ino) || fs_stat(ino, &st)) return PROC_ENOENT;
+    int resolved=fs_resolve(cwd,path,&ino);
+    if(resolved)return resolved==FS_EACCES?PROC_EACCES:PROC_ENOENT;
+    if(fs_stat(ino,&st))return PROC_ENOENT;
     if (st.type == FS_TYPE_DIR) return PROC_EISDIR;
+    if(fs_access(ino,1,false))return PROC_EACCES;
 
     struct elf_header eh;
     struct elf_phdr *ph = NULL, *lph = NULL;
@@ -281,7 +284,7 @@ static int load_image(const char *path, u32 cwd, int argc, char **argv, struct i
         u32 lino;
         struct fs_stat lst;
         struct elf_header leh;
-        if (fs_resolve(cwd, interp, &lino) || fs_stat(lino, &lst) || lst.type != FS_TYPE_FILE) {
+        if (fs_resolve(cwd, interp, &lino) || fs_stat(lino, &lst) || lst.type != FS_TYPE_FILE || fs_access(lino,1,false)) {
             err = PROC_ENOENT;
             goto fail;
         }
@@ -333,6 +336,12 @@ fail:
     return err;
 }
 
+/* Pin the namespace while ELF headers, segments and interpreter are read.
+ * Otherwise unlink/reuse between reads could substitute another owner's inode. */
+static int load_image(const char *path,u32 cwd,int argc,char **argv,struct image *im) {
+    fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,im);fs_namespace_unlock();return ret;
+}
+
 static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent) {
     struct image im;
     int err = load_image(path, cwd, argc, argv, &im);
@@ -342,8 +351,17 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;
     task_process(t)->cwd = cwd;
+    task_process(t)->creation_mask=022;
     if (parent) {
         task_process(t)->uid = task_process(parent)->uid;
+    task_process(t)->real_uid = task_process(parent)->real_uid;
+    task_process(t)->saved_uid = task_process(parent)->saved_uid;
+    task_process(t)->cloexec = task_process(parent)->cloexec;
+    task_process(t)->fs_root = task_process(parent)->fs_root;
+    task_process(t)->gid = task_process(parent)->gid;
+    task_process(t)->real_gid = task_process(parent)->real_gid;
+    task_process(t)->saved_gid = task_process(parent)->saved_gid;
+    task_process(t)->creation_mask = task_process(parent)->user?task_process(parent)->creation_mask:022;
         task_process(t)->authenticated = task_process(parent)->authenticated;
         t->parent = parent->id;
         t->pgid = parent->pgid;
@@ -396,6 +414,14 @@ int proc_fork(struct regs *r) {
     task_process(t)->brk        = task_process(parent)->brk;
     task_process(t)->user_pages = pages;
     task_process(t)->uid = task_process(parent)->uid;
+    task_process(t)->real_uid = task_process(parent)->real_uid;
+    task_process(t)->saved_uid = task_process(parent)->saved_uid;
+    task_process(t)->cloexec = task_process(parent)->cloexec;
+    task_process(t)->fs_root = task_process(parent)->fs_root;
+    task_process(t)->gid = task_process(parent)->gid;
+    task_process(t)->real_gid = task_process(parent)->real_gid;
+    task_process(t)->saved_gid = task_process(parent)->saved_gid;
+    task_process(t)->creation_mask = task_process(parent)->user?task_process(parent)->creation_mask:022;
     task_process(t)->authenticated = task_process(parent)->authenticated;
     task_process(t)->cwd        = task_process(parent)->cwd;
     t->parent     = parent->id;
@@ -421,10 +447,13 @@ int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
     int err = load_image(path, task_process(t)->cwd, argc, argv, &im);
     if (err) return err;
 
+    for(int fd=0;fd<MAX_FDS;fd++) if(t->cloexec&(1u<<fd)) {file_close(t->fds[fd]);t->fds[fd]=NULL;}
+    t->cloexec=0;
     u32 old = t->page_dir;
     t->page_dir = im.dir;
     vmm_switch(im.dir);                                  /* уходим со старого каталога... */
-    shm_release_all(t, old);                             /* общую память — отпустить, не освобождая */
+    shm_release_all(t, old);                             /* release mappings before destroying the old directory */
+    ipc_identity_changed(t);                             /* invalidate capabilities held by the old image */
     vmm_destroy_dir(old);                                /* ...и только теперь его освобождаем */
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;

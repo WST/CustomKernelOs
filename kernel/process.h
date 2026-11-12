@@ -3,7 +3,7 @@
 #include "types.h"
 #include "idt.h"
 
-#define USER_STACK_PAGES 16             /* 64 КБ стека у программы */
+#include "paging.h" /* shared process stack and guard boundaries */
 #define PROC_MAX_ARGS    64             /* хватает на сборку lua одной командой cc */
 
 enum {
@@ -13,6 +13,7 @@ enum {
     PROC_EAGAIN  = -4,
     PROC_EISDIR  = -5,
     PROC_EBUSY   = -6,
+    PROC_EACCES  = -7,
 };
 
 /* Загрузить ELF-файл и запустить его как процесс. -> pid или PROC_E* */

@@ -1,6 +1,7 @@
 #ifndef PAGING_H
 #define PAGING_H
 #include "types.h"
+#include "pmm.h"
 
 /* Флаги записей каталога и таблиц страниц (x86, 32 бит) */
 #define PG_PRESENT  0x001
@@ -17,7 +18,12 @@
 #define SHM_END      0xB0000000u
 #define INTERP_BASE  0x80000000u    /* динамический загрузчик (PT_INTERP) */
 #define MMAP_BASE    SHM_END        /* mmap: анонимные страницы и MAP_PRIVATE */
-#define MMAP_END     (USER_TOP - 16 * 4096)
+#define USER_STACK_PAGES 256u
+#define USER_STACK_BOTTOM (USER_TOP - USER_STACK_PAGES * PAGE_SIZE)
+#define USER_STACK_GUARD (USER_STACK_BOTTOM - PAGE_SIZE)
+#define MMAP_END USER_STACK_GUARD
+#define THREAD_STACK_MIN (3u * PAGE_SIZE)
+_Static_assert(MMAP_BASE < MMAP_END && MMAP_END + PAGE_SIZE == USER_STACK_BOTTOM, "mmap/stack guard layout");
 /* 0xD0000000..: куча ядра (heap.h) — общая для всех каталогов */
 
 void paging_init(void);

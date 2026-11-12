@@ -63,10 +63,10 @@ static int read_file(const char *path, unsigned char **out, int *out_n) {
     return 0;
 }
 
-static int write_file(const char *path, const unsigned char *data, int n) {
+static int write_file(const char *path, const unsigned char *data, int n,unsigned mode) {
     int fd, off = 0;
     if (opt_force) remove(path);
-    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC);
+    fd = open(path, O_WRONLY | O_CREAT | O_TRUNC,mode&0777);
     if (fd < 0) { die_path(path, strerror(errno)); return -1; }
     while (off < n) {
         int r = write(fd, data + off, (size_t)(n - off));
@@ -85,13 +85,15 @@ static int write_file(const char *path, const unsigned char *data, int n) {
 
 static int copy_path(const char *src, const char *dst);
 
-static int copy_dir(const char *src, const char *dst) {
+static int copy_dir(const char *src, const char *dst,unsigned mode) {
     DIR *d;
     struct dirent *ent;
     char **names = NULL;
     int n = 0, cap = 0, i, rc = 0, mr;
     if (path_inside(src, dst)) { die_path(dst, "cannot copy a directory into itself"); return -1; }
-    mr = mkdir(dst);
+    unsigned mask=umask(0);umask(mask);
+    mr = mkdir(dst,(mode&0777)|0700);
+    if(mr==-1)mr=-errno;
     if (mr < 0 && mr != -EEXIST) { die_path(dst, strerror(-mr)); return -1; }
     d = opendir(src);
     if (!d) { die_path(src, strerror(errno)); return -1; }
@@ -126,6 +128,7 @@ static int copy_dir(const char *src, const char *dst) {
         free(names[i]);
     }
     free(names);
+    if(mr==0 && chmod(dst,mode&0777&~mask)<0){die_path(dst,strerror(errno));rc=-1;}
     return rc;
 }
 
@@ -137,11 +140,11 @@ static int copy_path(const char *src, const char *dst) {
     if (S_ISDIR(st.st_mode)) {
         if (!opt_recur) { die_path(src, "is a directory"); return -1; }
         if (opt_verbose) fprintf(stderr, "%s -> %s\n", src, dst);
-        return copy_dir(src, dst);
+        return copy_dir(src,dst,st.st_mode);
     }
     if (read_file(src, &data, &n) < 0) return -1;
     if (opt_verbose) fprintf(stderr, "%s -> %s\n", src, dst);
-    if (write_file(dst, data, n) < 0) { free(data); return -1; }
+    if (write_file(dst,data,n,st.st_mode) < 0) { free(data); return -1; }
     free(data);
     return 0;
 }

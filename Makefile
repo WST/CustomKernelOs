@@ -458,6 +458,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	done
 	@echo "==> заголовки в /include, библиотеки в /lib, исходники программ в /src (для cc)"
 	@for d in /include /lib /lib/fonts /src /src/cc /etc /home /root /tmp /var /var/lib /var/log /usr /usr/bin /usr/lib /usr/share /usr/share/applications /mnt /media /proc /sys /run /ext /ext/bin /ext/instructions; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null 2>&1 || true; done
+	@$(MAKE) --no-print-directory install-permissions DISK=$(DISK)
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
@@ -496,6 +497,8 @@ QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive format=raw,file=$(DISK),index=1,media=disk
 QEMU_MEM ?= 256M
 QEMU_CPUS ?= 4
+QEMU_CPU ?=
+QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 DATA_DISK ?=
 ifneq ($(strip $(DATA_DISK)),)
@@ -509,14 +512,19 @@ QEMU_VIDEO = python3 tools/run_qemu.py --qemu "$(QEMU)" --gpu "$(GPU)" --vga "$(
 # сеть: карта e1000 за NAT QEMU; HOST_PORT хоста -> порт 80 MyOS (httpd)
 # Другой порт: make run HOST_PORT=8081
 HOST_PORT ?= 8080
-QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80 -rtc base=localtime
+SSH_PORT ?=
+QEMU_SSH_FORWARD :=
+ifneq ($(SSH_PORT),)
+QEMU_SSH_FORWARD := ,hostfwd=tcp:127.0.0.1:$(SSH_PORT)-:22
+endif
+QEMU_NET := -nic user,model=e1000,hostfwd=tcp::$(HOST_PORT)-:80$(QEMU_SSH_FORWARD) -rtc base=localtime
 
 # всё, что пишет консоль ядра (и browser -v), — ещё и в build/serial.log
 run: all
-	$(QEMU_VIDEO) -smp $(QEMU_CPUS) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
+	$(QEMU_VIDEO) $(QEMU_CPU_FLAGS) -smp $(QEMU_CPUS) -m $(QEMU_MEM) $(QEMU_DRIVES) $(QEMU_NET) -serial file:$(BUILD)/serial.log
 
 debug: all
-	$(QEMU_VIDEO) -smp $(QEMU_CPUS) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
+	$(QEMU_VIDEO) $(QEMU_CPU_FLAGS) -smp $(QEMU_CPUS) $(QEMU_DRIVES) $(QEMU_NET) -no-reboot -d int,cpu_reset -s -S
 
 clean:
 	rm -rf $(BUILD)
@@ -541,7 +549,7 @@ test: | $(BUILD)
 	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
-	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==2, v'
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==3, v'
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
 	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
@@ -877,6 +885,8 @@ $(BUILD)/user/terminalwindowcheck: $(BUILD)/user/terminalwindowcheck.o $(ULIB) u
 
 .PHONY: terminalwindowtest
 terminalwindowtest:
+	@mkdir -p build
+	python3 -c "from pathlib import Path; p = Path('build/terminal-resize-test.img'); f = p.open('wb'); f.truncate(128 * 1024 * 1024); f.close()"
 	$(MAKE) build/os.img build/user/terminalwindowcheck install DISK=build/terminal-resize-test.img
 	python3 tests/terminal_window_smoke.py
 
@@ -936,3 +946,56 @@ usbmouse-smoke: usb-image usbmousetest
 nvidia-iotest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections tests/nvidia_io_test.c -Wl,--gc-sections -o $(BUILD)/nvidia-io-test
 	./$(BUILD)/nvidia-io-test
+
+# OpenSSH ext port; host build uses the same compiler and static libc as ext.
+$(BUILD)/file.o $(HWBUILD)/file.o: kernel/ssh-local.inc
+$(BUILD)/syscall.o $(HWBUILD)/syscall.o: kernel/ssh-syscall.inc
+.PHONY: openssh-build openssh-recipetest openssh-tests-ready opensshtest openssh-exttest
+openssh-build: $(BUILD)/cc-host $(CCROOT)/.stamp $(BUILD)/mlib/libc.a
+	python3 tests/openssh_build.py
+openssh-recipetest: $(BUILD)/cc-host $(CCROOT_READY)
+	$(BUILD)/cc-host -B $(CCROOT) -linux user/make.c -o $(BUILD)/make-linux
+	python3 tests/openssh_recipe.py
+openssh-tests-ready: openssh-build openssh-recipetest fslookuptest
+	$(BUILD)/cc-host -B $(BUILD)/openssh-native/sysroot -I$(BUILD)/openssh-native/openssh-10.6p2 -I$(BUILD)/openssh-native/openssh-10.6p2/myos-include -I$(BUILD)/openssh-native/openssh-10.6p2/openbsd-compat tests/sshcheck.c $(BUILD)/openssh-native/openssh-10.6p2/myos-posix.o $(BUILD)/openssh-native/openssh-10.6p2/c0.a $(BUILD)/openssh-native/openssh-10.6p2/c1.a -o $(BUILD)/openssh-native/sshcheck
+opensshtest: openssh-tests-ready
+	python3 tests/openssh_smoke.py
+openssh-exttest: openssh-tests-ready
+	python3 tests/openssh_smoke.py --ext
+	python3 tests/openssh_service.py
+
+$(BUILD)/fs-lookup-test: tests/fs_lookup_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/myfs
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/fs_lookup_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $@
+.PHONY: fslookuptest
+fslookuptest: $(BUILD)/fs-lookup-test
+	python3 -c 'import tempfile,pathlib,subprocess; t=tempfile.TemporaryDirectory(prefix="myos-lookup-"); p=pathlib.Path(t.name)/"disk.img"; f=p.open("wb"); f.truncate(64*1024*1024); f.close(); subprocess.run(["$(BUILD)/fs-lookup-test",str(p)],check=True)'
+
+$(BUILD)/file.o $(HWBUILD)/file.o: kernel/fs.h
+$(BUILD)/fs.o $(HWBUILD)/fs.o: kernel/fs-permissions.inc
+$(BUILD)/myfs.o $(HWBUILD)/myfs.o: kernel/myfs-permissions.inc
+$(BUILD)/syscall.o $(HWBUILD)/syscall.o: kernel/fs-syscall.inc
+$(BUILD)/myfs: kernel/fs-permissions.inc kernel/myfs-permissions.inc
+
+$(BUILD)/fs-permissions-test: tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c kernel/fs-permissions.inc kernel/myfs-permissions.inc $(BUILD)/myfs
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -DFS_PERMISSIONS_TEST -Ikernel tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $@
+.PHONY: permissionstest
+permissionstest: $(BUILD)/fs-permissions-test
+	python3 tests/fs_permissions.py
+
+.PHONY: permissions-smoke
+permissions-smoke:
+	python3 tests/permissions_smoke.py
+
+.PHONY: install-permissions
+install-permissions: $(BUILD)/myfs
+	@$(BUILD)/myfs $(DISK) chmod 0700 /root || exit 1
+	@$(BUILD)/myfs $(DISK) chmod 1777 /tmp || exit 1
+	@for key in /etc/ssh/ssh_host_ed25519_key /root/.ssh/id_ed25519; do \
+	  if $(BUILD)/myfs $(DISK) stat $$key >/dev/null 2>&1; then \
+	    $(BUILD)/myfs $(DISK) chown 0 0 $$key && $(BUILD)/myfs $(DISK) chmod 0600 $$key || exit 1; \
+	  fi; \
+	done
+
+.PHONY: isolationtest
+isolationtest:
+	python3 tests/isolation_smoke.py

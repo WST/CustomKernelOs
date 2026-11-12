@@ -1,0 +1,56 @@
+name openssh
+descr OpenSSH 10.6p2 client and server (MyOS port)
+workdir /tmp/ext/openssh
+fetch https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz openssh-10.6p2.tar.gz
+tar xzf openssh-10.6p2.tar.gz
+workdir /tmp/ext/openssh/openssh-10.6p2
+mkdir /ext/bin
+mkdir /etc/ssh
+mkdir /var/empty
+mkdir /run
+mkdir myos-include/sys
+mkdir myos-include/netinet
+mkdir myos-include/arpa
+mkdir myos-include/net
+copy install.c install.c
+copy config.h config.h
+copy Makefile Makefile
+copy myos-posix.h myos-posix.h
+copy myos-posix.c myos-posix.c
+copy sys_socket.h myos-include/sys/socket.h
+copy sys_select.h myos-include/sys/select.h
+copy sys_un.h myos-include/sys/un.h
+copy sys_uio.h myos-include/sys/uio.h
+copy sys_wait.h myos-include/sys/wait.h
+copy sys_resource.h myos-include/sys/resource.h
+copy sys_file.h myos-include/sys/file.h
+copy sys_utsname.h myos-include/sys/utsname.h
+copy sys_statvfs.h myos-include/sys/statvfs.h
+copy netinet_in.h myos-include/netinet/in.h
+copy netinet_in_systm.h myos-include/netinet/in_systm.h
+copy netinet_ip.h myos-include/netinet/ip.h
+copy netinet_tcp.h myos-include/netinet/tcp.h
+copy arpa_inet.h myos-include/arpa/inet.h
+copy netdb.h myos-include/netdb.h
+copy poll.h myos-include/poll.h
+copy termios.h myos-include/termios.h
+copy grp.h myos-include/grp.h
+copy syslog.h myos-include/syslog.h
+copy paths.h myos-include/paths.h
+copy utime.h myos-include/utime.h
+copy sys_mman.h myos-include/sys/mman.h
+copy sys_param.h myos-include/sys/param.h
+copy sys_queue.h myos-include/sys/queue.h
+copy sys_tree.h myos-include/sys/tree.h
+copy net_if.h myos-include/net/if.h
+copy nlist.h myos-include/nlist.h
+copy netgroup.h myos-include/netgroup.h
+copy resolv.h myos-include/resolv.h
+copy endian.h myos-include/endian.h
+copy ifaddrs.h myos-include/ifaddrs.h
+copy myos-auth.c myos-auth.c
+patch patch-executable
+patch patch-child-poll
+patch patch-tty
+patch patch-pty
+make

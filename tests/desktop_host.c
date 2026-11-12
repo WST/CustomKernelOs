@@ -58,12 +58,16 @@ static struct msg queue[64];
 static int nq;
 static void *shms[64];
 static int nshm;
+static unsigned shm_bytes[64];
+int shm_grant(int id,int pid,unsigned rights){(void)id;(void)pid;(void)rights;return 0;}
+int shm_discard(int id){(void)id;return 0;}
+int shm_size(int id){return id>=0 && id<nshm?(int)shm_bytes[id]:-1;}
 
 int msg_send(int pid, struct msg *m) { (void)pid; (void)m; return 0; }
 int msg_recv(struct msg *m, int timeout_ms);
 void *shm_map(int id) { return id >= 0 && id < nshm ? shms[id] : NULL; }
 int shm_unmap(void *p) { (void)p; return 0; }
-int shm_alloc(unsigned size) { shms[nshm] = calloc(1, size); return nshm++; }
+int shm_alloc(unsigned size) { shm_bytes[nshm]=size;shms[nshm] = calloc(1, size); return nshm++; }
 int service_find(const char *n) { (void)n; return 0; }
 int service_register(const char *n) { (void)n; return 0; }
 int account(int op, const char *name, const char *password) {

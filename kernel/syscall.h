@@ -88,6 +88,9 @@ enum {
     SYS_KLOG_READ,      /* klog_read(buf, capacity, &cursor), nondestructive */
     SYS_REBOOT,         /* reboot(RB_POWEROFF | RB_REBOOT): не возвращается */
     SYS_THREAD_CTL,     /* errno/ключи, detach, cond_wait/cond_wake; номера как в myos.h */
+    SYS_SSHCTL,         /* POSIX adapter operations, see ssh-syscall.inc */
+    SYS_FSCTL,          /* file metadata, access, umask and mode-aware creation */
+    SYS_IPCCTL,         /* explicit SHM grants, discard, size and mailbox grants */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */

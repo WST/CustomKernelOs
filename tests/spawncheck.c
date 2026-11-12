@@ -1,4 +1,5 @@
 #include "myos.h"
+#include "sys/stat.h"
 #define CHECK(x) do { if(!(x)) { printf("SPAWN FAIL line %d: %s\n",__LINE__,#x); return 1; } } while(0)
 static int child(int argc,char **argv) {
     CHECK(argc==7 && !strcmp(argv[1],"child"));
@@ -32,6 +33,7 @@ static int exercise(void) {
     CHECK(spawn("/tmp",args,-1)==-EISDIR);
     int fd=open("/tmp/not-elf",O_WRITE);CHECK(fd>=0);
     char data[128];memset(data,0,sizeof(data));CHECK(write(fd,data,sizeof(data))==sizeof(data));close(fd);
+    CHECK(chmod("/tmp/not-elf",0755)==0); /* reach ELF validation after the execute-permission check */
     CHECK(spawn("/tmp/not-elf",args,-1)==-ENOEXEC);unlink("/tmp/not-elf");
     /* Repeated failures must not consume process slots or leak descriptor refs. */
     for(int i=0;i<40;i++) CHECK(spawn("/missing",args,-1)==-ENOENT);

@@ -17,15 +17,15 @@
 
 #define MAX_VARS  48
 #define MAX_RULES 64
-#define MAX_PRE   40          /* bash линкуется из нескольких десятков архивов */
+#define MAX_PRE   64          /* bash линкуется из нескольких десятков архивов */
 #define MAX_REC   8
-#define MAX_NODE  96
+#define MAX_NODE  1024
 #define MAX_STACK 16
 #define MAX_PHONY 32
 #define MAX_BATCH 8
 #define NAME      80
-#define VAL       256
-#define LINE      512
+#define VAL       1024
+#define LINE      2048
 
 struct var {
     char name[NAME];

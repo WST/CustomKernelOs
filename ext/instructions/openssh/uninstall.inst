@@ -1,0 +1,6 @@
+name openssh
+workdir /tmp/ext/openssh-remove
+copy remove.c remove.c
+copy remove.mk Makefile
+cc remove.c -o remove
+make

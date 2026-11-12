@@ -1,0 +1,117 @@
+--- a/sshpty.c
++++ b/sshpty.c
+@@ -91,51 +91,12 @@
+ void
+ pty_make_controlling_tty(int *ttyfd, const char *tty)
+ {
+-	int fd;
+-
+-	/* First disconnect from the old controlling tty. */
+-#ifdef TIOCNOTTY
+-	fd = open(_PATH_TTY, O_RDWR | O_NOCTTY);
+-	if (fd >= 0) {
+-		(void) ioctl(fd, TIOCNOTTY, NULL);
+-		close(fd);
+-	}
+-#endif /* TIOCNOTTY */
++	/* MyOS associates the controlling PTY with standard descriptor slots. */
++	(void)tty;
+ 	if (setsid() == -1)
+-		error("setsid: %.100s", strerror(errno));
+-
+-	/*
+-	 * Verify that we are successfully disconnected from the controlling
+-	 * tty.
+-	 */
+-	fd = open(_PATH_TTY, O_RDWR | O_NOCTTY);
+-	if (fd >= 0) {
+-		error("Failed to disconnect from controlling tty.");
+-		close(fd);
+-	}
+-	/* Make it our controlling tty. */
+-#ifdef TIOCSCTTY
+-	debug("Setting controlling tty using TIOCSCTTY.");
+-	if (ioctl(*ttyfd, TIOCSCTTY, NULL) < 0)
+-		error("ioctl(TIOCSCTTY): %.100s", strerror(errno));
+-#endif /* TIOCSCTTY */
+-#ifdef NEED_SETPGRP
+-	if (setpgrp(0,0) < 0)
+-		error("SETPGRP %s",strerror(errno));
+-#endif /* NEED_SETPGRP */
+-	fd = open(tty, O_RDWR);
+-	if (fd == -1)
+-		error("%.100s: %.100s", tty, strerror(errno));
+-	else
+-		close(fd);
+-
+-	/* Verify that we now have a controlling tty. */
+-	fd = open(_PATH_TTY, O_WRONLY);
+-	if (fd == -1)
+-		error("open /dev/tty failed - could not set controlling tty: %.100s",
+-		    strerror(errno));
+-	else
+-		close(fd);
++		error("setsid: %s", strerror(errno));
++	if (!isatty(*ttyfd))
++		fatal("invalid MyOS PTY slave descriptor");
+ }
+ 
+ /* Changes the window size associated with the pty. */
+@@ -157,54 +118,7 @@
+ void
+ pty_setowner(struct passwd *pw, const char *tty)
+ {
+-	struct group *grp;
+-	gid_t gid;
+-	mode_t mode;
+-	struct stat st;
+-
+-	/* Determine the group to make the owner of the tty. */
+-	grp = getgrnam("tty");
+-	if (grp == NULL)
+-		debug_f("no tty group");
+-	gid = (grp != NULL) ? grp->gr_gid : pw->pw_gid;
+-	mode = (grp != NULL) ? 0620 : 0600;
+-
+-	/*
+-	 * Change owner and mode of the tty as required.
+-	 * Warn but continue if filesystem is read-only and the uids match/
+-	 * tty is owned by root.
+-	 */
+-	if (stat(tty, &st) == -1)
+-		fatal("stat(%.100s) failed: %.100s", tty,
+-		    strerror(errno));
+-
+-#ifdef WITH_SELINUX
+-	ssh_selinux_setup_pty(pw->pw_name, tty);
+-#endif
+-
+-	if (st.st_uid != pw->pw_uid || st.st_gid != gid) {
+-		if (chown(tty, pw->pw_uid, gid) == -1) {
+-			if (errno == EROFS &&
+-			    (st.st_uid == pw->pw_uid || st.st_uid == 0))
+-				debug("chown(%.100s, %u, %u) failed: %.100s",
+-				    tty, (u_int)pw->pw_uid, (u_int)gid,
+-				    strerror(errno));
+-			else
+-				fatal("chown(%.100s, %u, %u) failed: %.100s",
+-				    tty, (u_int)pw->pw_uid, (u_int)gid,
+-				    strerror(errno));
+-		}
+-	}
+-
+-	if ((st.st_mode & (S_IRWXU|S_IRWXG|S_IRWXO)) != mode) {
+-		if (chmod(tty, mode) == -1) {
+-			if (errno == EROFS &&
+-			    (st.st_mode & (S_IRGRP | S_IROTH)) == 0)
+-				debug("chmod(%.100s, 0%o) failed: %.100s",
+-				    tty, (u_int)mode, strerror(errno));
+-			else
+-				fatal("chmod(%.100s, 0%o) failed: %.100s",
+-				    tty, (u_int)mode, strerror(errno));
+-		}
+-	}
++	/* MyOS PTYs are anonymous descriptor capabilities, not filesystem nodes. */
++	(void)pw;
++	(void)tty;
+ }

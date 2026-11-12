@@ -1388,7 +1388,8 @@ static void handle_msg(struct msg *m) {
     case WM_CREATE: {
         int idx = -1;
         for (int i = 0; i < MAXWIN; i++) if (!wins[i].used) { idx = i; break; }
-        color_t *px = idx >= 0 ? shm_map(m->a) : NULL;
+        int needed=m->b>0 && m->c>0 && m->b<=2560 && m->c<=1600?m->b*m->c*4+((unsigned)m->d==WM_BUFFERED?WM_FRAME_BYTES:0):-1;
+        color_t *px=idx>=0 && needed>0 && shm_size(m->a)>=needed?shm_map(m->a):NULL;
         if (!px || m->b <= 0 || m->c <= 0 || m->b > 2560 || m->c > 1600) {
             if (px) shm_unmap(px);
             send(m->from, WM_CREATED, -1, 0, 0, 0);
@@ -1480,9 +1481,10 @@ static void handle_msg(struct msg *m) {
         struct win *w = &wins[m->a];
         w->awaiting = false;
         if (m->c <= 0 || m->d <= 0 || m->c > 2560 || m->d > 1600) return;
-        color_t *px = shm_map(m->b);
+        unsigned marker;memcpy(&marker,m->data,sizeof(marker));
+        int needed=m->c*m->d*4+(marker==WM_BUFFERED?WM_FRAME_BYTES:0);
+        color_t *px=shm_size(m->b)>=needed?shm_map(m->b):NULL;
         if (!px) return;
-        unsigned marker; memcpy(&marker, m->data, sizeof(marker));
         bool buffered = marker == WM_BUFFERED;
         color_t *snapshot = buffered ? malloc(m->c * m->d * 4) : px;
         if (!snapshot) { shm_unmap(px); return; }

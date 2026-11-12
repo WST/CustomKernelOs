@@ -49,6 +49,9 @@ static bool user_buf_ok(u32 addr, u32 len, bool write) {
         u32 flags;
         if (!vmm_lookup(dir, p, NULL, &flags) || !(flags & PG_USER)) return false;
         if (write && !(flags & (PG_WRITE | PG_COW))) return false;
+        /* CR0.WP is off: a supervisor store does not fault on COW pages.
+         * Detach before writing, including kernel-updated userspace mutexes. */
+        if (write && (flags & PG_COW) && !vmm_cow_fault(p)) return false;
     }
     return true;
 }
@@ -66,6 +69,8 @@ static bool user_str(u32 addr, char *out, u32 max) {
 /* ошибки файловой системы и загрузчика -> errno */
 static int fs_errno(int e) {
     switch (e) {
+    case FS_EACCES: return -EACCES;
+    case FS_EPERM: return -EPERM;
     case FS_ENOENT:       return -ENOENT;
     case FS_EEXIST:       return -EEXIST;
     case FS_ENOTDIR:      return -ENOTDIR;
@@ -93,6 +98,7 @@ static int proc_errno(int e) {
     case PROC_EAGAIN:  return -EAGAIN;
     case PROC_EISDIR:  return -EISDIR;
     case PROC_EBUSY:   return -EBUSY;
+    case PROC_EACCES: return -EACCES;
     default:           return e;
     }
 }
@@ -111,7 +117,7 @@ static int alloc_fd(struct file *f) {
     struct task *t = task_current();
     u32 flags=irq_save();
     int fd=-EMFILE;
-    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; fd=i; break; }
+    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; task_process(t)->cloexec&=~(1u<<i); fd=i; break; }
     irq_restore(flags); return fd;
 }
 
@@ -153,6 +159,8 @@ static int sys_clipboard(u32 op, u32 addr, u32 size) {
     return result;
 }
 
+#include "ssh-syscall.inc"
+
 static int sys_write(u32 fd, u32 buf, u32 len) {
     struct file *f = get_fd(fd);
     if (!f) return -EBADF;
@@ -168,7 +176,7 @@ static int sys_read(u32 fd, u32 buf, u32 len) {
 }
 
 /* flags — как O_* в Linux i386: младшие 2 бита это доступ, дальше O_CREAT/EXCL/TRUNC/APPEND. */
-static int sys_open_impl(u32 upath, u32 flags) {
+static int sys_open_impl(u32 upath, u32 flags,u32 create_mode) {
     struct task *t = task_current();
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
@@ -185,7 +193,7 @@ static int sys_open_impl(u32 upath, u32 flags) {
     struct fs_stat st;
     int r = fs_resolve(task_process(t)->cwd, path, &ino);
     bool existed = r == 0;
-    if (r == FS_ENOENT && creat && want_write) r = fs_create(task_process(t)->cwd, path, FS_TYPE_FILE, &ino);
+    if (r == FS_ENOENT && creat) r = fs_create_mode(task_process(t)->cwd, path, FS_TYPE_FILE,create_mode, &ino);
     if (r) return fs_errno(r);
     if (account_private(ino)) return -EPERM;
     if ((r = fs_stat(ino, &st))) return fs_errno(r);
@@ -193,6 +201,7 @@ static int sys_open_impl(u32 upath, u32 flags) {
     if (st.type == FS_TYPE_DIR) return -EISDIR;
     if (st.type == FS_TYPE_BLOCK && want_write) return -EROFS;
     if (excl && creat && existed) return -EEXIST;
+    r=existed?fs_access(ino,(want_read?4:0)|(want_write?2:0),false):0;if(r)return fs_errno(r);
     if (trunc && want_write && (r = fs_truncate(ino))) return fs_errno(r);
 
     u8 mode = (want_read ? FMODE_READ : 0) | (want_write ? FMODE_WRITE : 0) | (append ? FMODE_APPEND : 0);
@@ -205,7 +214,7 @@ static int sys_open_impl(u32 upath, u32 flags) {
 
 static int sys_open(u32 upath,u32 mode) {
     fs_namespace_lock();
-    int r=sys_open_impl(upath,mode);
+    int r=sys_open_impl(upath,mode,0666);
     fs_namespace_unlock();
     return r;
 }
@@ -214,7 +223,7 @@ static int sys_close(u32 fd) {
     if (fd>=MAX_FDS) return -EBADF;
     u32 flags=irq_save();
     struct task *p=task_process(task_current());
-    struct file *f=p->fds[fd]; p->fds[fd]=NULL;
+    struct file *f=p->fds[fd]; p->fds[fd]=NULL; p->cloexec&=~(1u<<fd);
     irq_restore(flags);
     if (!f) return -EBADF;
     file_close(f); return 0;
@@ -237,6 +246,10 @@ static int sys_fstat(u32 fd, u32 ust) {
         size = st.size;
         if (st.type == FS_TYPE_DIR) mode = 0040000;
         else if (st.type == FS_TYPE_FILE) mode = 0100000;
+    } else if(f->type==FILE_SOCKET || f->type==FILE_LOCAL) {
+        mode=0140000;
+    } else if(f->type==FILE_PIPE) {
+        mode=0010000;
     } else if (f->type == FILE_CONSOLE || f->type == FILE_PTY_SLAVE) {
         mode = 0020000;                                 /* S_IFCHR: isatty */
     }
@@ -294,13 +307,14 @@ static int sys_dup2(u32 oldfd, u32 newfd) {
     if (oldfd == newfd) { irq_restore(flags); return newfd; }
     struct file *old=task_process(t)->fds[newfd];
     task_process(t)->fds[newfd] = file_dup(f);
+    task_process(t)->cloexec &= ~(1u<<newfd);
     irq_restore(flags);
     file_close(old); return newfd;
 }
 
 /* ---------------------------------------------------------------- каталоги */
 
-static int sys_chdir(u32 upath) {
+static int sys_chdir_impl(u32 upath) {
     struct task *t = task_current();
     char path[PATH_MAX];
     u32 ino;
@@ -310,8 +324,13 @@ static int sys_chdir(u32 upath) {
     if (!r) r = fs_stat(ino, &st);
     if (r) return fs_errno(r);
     if (st.type != FS_TYPE_DIR) return -ENOTDIR;
+    if((r=fs_access(ino,1,false)))return fs_errno(r);
     task_process(t)->cwd = ino;
     return 0;
+}
+
+static int sys_chdir(u32 upath) {
+    fs_namespace_lock();int ret=sys_chdir_impl(upath);fs_namespace_unlock();return ret;
 }
 
 static int sys_getcwd(u32 buf, u32 len) {
@@ -326,7 +345,7 @@ static int sys_getcwd(u32 buf, u32 len) {
 }
 
 /* index-я запись каталога (без . и ..) */
-static int sys_readdir(u32 upath, u32 index, u32 uout) {
+static int sys_readdir_impl(u32 upath, u32 index, u32 uout) {
     char path[PATH_MAX];
     if (!user_str(upath, path, sizeof(path))) return -EFAULT;
     if (!user_buf_ok(uout, sizeof(struct dirent_info), true)) return -EFAULT;
@@ -340,7 +359,10 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
         if (i == index) break;
     }
     struct fs_stat st;
-    if ((r = fs_stat(de.ino, &st))) return fs_errno(r);
+    /* Read permits listing names; search is required for child metadata. */
+    r=fs_access(dir,1,false);
+    if(r==FS_EACCES)memset(&st,0,sizeof(st));
+    else if(r || (r=fs_stat(de.ino,&st)))return fs_errno(r);
     struct dirent_info *out = (struct dirent_info *)uout;
     memcpy(out->name, de.name, sizeof(out->name));
     out->type = st.type;
@@ -348,7 +370,11 @@ static int sys_readdir(u32 upath, u32 index, u32 uout) {
     return 1;
 }
 
-static int stat_path(const char *path, struct dirent_info *out, bool follow) {
+static int sys_readdir(u32 upath,u32 index,u32 out) {
+    fs_namespace_lock();int ret=sys_readdir_impl(upath,index,out);fs_namespace_unlock();return ret;
+}
+
+static int stat_path_impl(const char *path, struct dirent_info *out, bool follow) {
     u32 ino;
     struct fs_stat st;
     int r = follow ? fs_resolve(task_process(task_current())->cwd, path, &ino)
@@ -362,6 +388,10 @@ static int stat_path(const char *path, struct dirent_info *out, bool follow) {
     out->type = st.type;
     out->size = st.size;
     return 0;
+}
+
+static int stat_path(const char *path,struct dirent_info *out,bool follow) {
+    fs_namespace_lock();int ret=stat_path_impl(path,out,follow);fs_namespace_unlock();return ret;
 }
 
 static int sys_stat(u32 upath, u32 uout) {
@@ -466,6 +496,7 @@ static int sys_kill(u32 pid) {
     struct task *v = task_by_id(pid);
     if (!v) return -ESRCH;
     if (!v->user) return -EPERM;            /* потоки ядра программе не по зубам */
+    if(!task_can_control(task_current(),v))return -EPERM;
     return task_kill(task_process(v)->id) == 0 ? 0 : -ESRCH;
 }
 
@@ -662,6 +693,8 @@ static u32 sys_sbrk(i32 inc) {
     u32 old = task_process(t)->brk, new = old + inc;
     if (inc < 0 ? new < task_process(t)->brk_start || new > old : new > SBRK_LIMIT || new < old)
         return (u32)-1;
+    /* Shrinking then regrowing the heap must not replace a live stack guard. */
+    if (inc < 0 && task_stack_busy(t->page_dir,new,old)) return (u32)-1;
     for (u32 va = (old + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1); va < new; va += PAGE_SIZE) {
         u32 frame = pmm_alloc();
         if (!frame) return (u32)-1;
@@ -713,7 +746,7 @@ static void mmap_rollback(struct task *t, u32 va, u32 n) {
 
 static int sys_mmap(u32 uargs) {
     struct mmap_args a;
-    struct task *t = task_current();
+    struct task *t = task_process(task_current());
     if (!user_buf_ok(uargs, sizeof(a), false)) return -EFAULT;
     memcpy(&a, (const void *)uargs, sizeof(a));
     if (!a.len || a.len > MMAP_MAX) return -EINVAL;
@@ -755,10 +788,11 @@ static int sys_mmap(u32 uargs) {
 }
 
 static int sys_munmap(u32 addr, u32 len) {
-    struct task *t = task_current();
+    struct task *t = task_process(task_current());
     if (!len || len > MMAP_MAX) return -EINVAL;
     u32 end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
     if (addr & (PAGE_SIZE - 1) || addr < MMAP_BASE || end < addr || end > MMAP_END) return -EINVAL;
+    if(task_stack_busy(task_process(t)->page_dir,addr,end))return -EBUSY;
     for (u32 va = addr; va < end; va += PAGE_SIZE) {
         u32 frame = vmm_unmap_in(t->page_dir, va);
         if (!frame) continue;
@@ -769,11 +803,12 @@ static int sys_munmap(u32 addr, u32 len) {
 }
 
 static int sys_mprotect(u32 addr, u32 len, u32 prot) {
-    struct task *t = task_current();
+    struct task *t = task_process(task_current());
     if (!len || len > MMAP_MAX) return -EINVAL;
     if (prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC)) return -EINVAL;
     u32 end = addr + ((len + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
     if (addr & (PAGE_SIZE - 1) || addr < MMAP_BASE || end < addr || end > MMAP_END) return -EINVAL;
+    if(task_stack_busy(task_process(t)->page_dir,addr,end))return -EBUSY;
     for (u32 va = addr; va < end; va += PAGE_SIZE) {
         u32 frame, flags;
         if (!vmm_lookup(t->page_dir, va, &frame, &flags)) return -ENOMEM;
@@ -832,6 +867,8 @@ static int sys_listen(u32 fd, u32 backlog) {
 }
 
 static int sys_accept(u32 fd, u32 uaddr) {
+    struct file *listener=get_fd(fd);
+    if(listener && (listener->status_flags&04000) && !(file_ready(listener,1)&(1|8|16))) return -EAGAIN;
     struct sock *s = get_sock(fd);
     if (!s) return -EBADF;
     if (uaddr && !user_buf_ok(uaddr, sizeof(struct user_sockaddr), true)) return -EFAULT;
@@ -963,6 +1000,8 @@ static int sys_time(u32 uout) {
     return 0;
 }
 
+#include "fs-syscall.inc"
+
 void syscall_dispatch(struct regs *r) {
     struct task *t = task_current();
     /* A remote kill may precede this syscall (including a long sleep).
@@ -978,8 +1017,8 @@ void syscall_dispatch(struct regs *r) {
     case SYS_GETTID: ret=t->id; break;
     case SYS_THREAD_EXIT: t->in_syscall=false; task_exit_code((int)a);
     case SYS_THREAD_CREATE: {
-        if (e<4096 || e>1024*1024 || d+e<d || !user_buf_ok(d,e,true) ||
-            !user_buf_ok(a,1,false) || !user_buf_ok(b,1,false)) { ret=-EFAULT; break; }
+        if(e<THREAD_STACK_MIN || e>1024*1024 || d+e<d || d+e>USER_STACK_GUARD){ret=-EINVAL;break;}
+        if(!user_buf_ok(d,e,true) || !user_buf_ok(a,1,false) || !user_buf_ok(b,1,false)){ret=-EFAULT;break;}
         u32 sp=((d+e)&~15u)-20; /* i386 ABI: esp+4 aligned to 16 */
         ret=task_thread_create(a,b,c,sp,d,e); break;
     }
@@ -1063,6 +1102,15 @@ void syscall_dispatch(struct regs *r) {
         volatile char *v=password;for(unsigned i=0;i<sizeof(password);i++) v[i]=0;
         break;
     }
+    case SYS_SSHCTL: ret = sys_sshctl(a,b,c); break;
+    case SYS_FSCTL: ret=sys_fsctl(a,b,c);break;
+    case SYS_IPCCTL:
+        if(a==1){u32 grant[2];if(!user_buf_ok(c,8,false)){ret=-EFAULT;break;}memcpy(grant,(void*)c,8);ret=shm_grant((int)b,grant[0],grant[1]);}
+        else if(a==2)ret=shm_discard((int)b);
+        else if(a==3)ret=c>1?-EINVAL:msg_allow(b,c!=0);
+        else if(a==4)ret=shm_size((int)b);
+        else ret=-EINVAL;
+        break;
     case SYS_KLOG_READ: {
         if(b>KLOG_CAPACITY) { ret=-EINVAL;break; }
         if(!user_buf_ok(c,sizeof(struct klog_cursor),true) || !user_buf_ok(a,b,true)) {

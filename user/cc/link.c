@@ -48,11 +48,8 @@ static void buf_u16(Buf *b, unsigned v) { buf_byte(b, v); buf_byte(b, v >> 8); }
 static unsigned align_up(unsigned n, unsigned a) { return (n + a - 1) / a * a; }
 
 void write_file(const char *path, Buf *b) {
-#ifdef CC_HOST
-    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0755);
-#else
-    int fd = open(path, O_WRITE);
-#endif
+    unsigned mode=b->len>=18 && !memcmp(b->data,"\177ELF",4) && rd16(b->data+16)!=1?0755:0644;
+    int fd=open(path,O_WRONLY|O_CREAT|O_TRUNC,mode);
     if (fd < 0) error("cannot write %s", path);
     int off = 0;
     while (off < b->len) {

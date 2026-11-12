@@ -16,6 +16,11 @@ struct task;
 int  shm_alloc(u32 size);           /* -> id (сразу отображён в процесс? нет — см. shm_map) */
 int  shm_map(int id, u32 *addr);    /* отобразить в текущий процесс */
 int  shm_unmap(u32 addr);
+int shm_grant(int id,u32 pid,u32 rights);
+int shm_discard(int id);
+int shm_size(int id);
+int msg_allow(u32 pid,bool allow);
+void ipc_identity_changed(struct task *t);
 void shm_release_all(struct task *t, u32 dir);   /* процесс умер или сделал exec */
 
 int  msg_send(u32 pid, const void *msg);         /* msg в памяти ядра, MSG_SIZE байт */
