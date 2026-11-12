@@ -23,6 +23,7 @@ ssize_t readlink(const char *path, char *buf, size_t bufsiz);
 int execve(const char *path, char *const argv[], char *const envp[]);
 extern char **environ;
 unsigned sleep(unsigned seconds);
+long syscall(long n, ...);
 unsigned alarm(unsigned seconds);
 uid_t getuid(void);
 uid_t geteuid(void);

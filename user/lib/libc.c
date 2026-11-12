@@ -13,6 +13,7 @@
 #include "locale.h"
 #include "signal.h"
 #include "fcntl.h"
+#include "poll.h"
 #include "pwd.h"
 #include "sys/ioctl.h"
 
@@ -178,7 +179,17 @@ static inline int syscall5(int n, int a, int b, int c, int d, int e) {
 }
 #endif
 
+static void (*exit_handlers[64])(void);
+static int exit_handler_n;
+
+int atexit(void (*fn)(void)) {
+    if (!fn || exit_handler_n >= 64) return -1;
+    exit_handlers[exit_handler_n++] = fn;
+    return 0;
+}
+
 void exit(int code) {
+    while (exit_handler_n > 0) exit_handlers[--exit_handler_n]();
     syscall3(SYS_EXIT, code, 0, 0);
     for (;;) ;
 }
@@ -2568,6 +2579,89 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size) {
 }
 void setbuf(FILE *f, char *buf) { setvbuf(f, buf, buf ? _IOFBF : _IONBF, BUFSIZ); }
 
+static int scan_isspace(int c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
+}
+
+int sscanf(const char *s, const char *fmt, ...) {
+    const char *start = s;
+    va_list ap;
+    int assigned = 0;
+    va_start(ap, fmt);
+    while (*fmt) {
+        int suppress, width, lcount;
+        char conv, buf[128];
+        const char *num;
+        int i;
+        if (scan_isspace((unsigned char)*fmt)) {
+            while (scan_isspace((unsigned char)*fmt)) fmt++;
+            while (scan_isspace((unsigned char)*s)) s++;
+            continue;
+        }
+        if (*fmt != '%') {
+            if (*s != *fmt) break;
+            s++; fmt++;
+            continue;
+        }
+        fmt++;
+        suppress = 0; width = 0; lcount = 0;
+        if (*fmt == '*') { suppress = 1; fmt++; }
+        while (*fmt >= '0' && *fmt <= '9') { width = width * 10 + (*fmt - '0'); fmt++; }
+        if (*fmt == 'l') { lcount = 1; fmt++; if (*fmt == 'l') { lcount = 2; fmt++; } }
+        else if (*fmt == 'h') { fmt++; if (*fmt == 'h') fmt++; }
+        conv = *fmt ? *fmt++ : 0;
+        if (conv == '%') { if (*s != '%') break; s++; continue; }
+        if (conv == 'n') {
+            if (!suppress) { *va_arg(ap, int *) = (int)(s - start); assigned++; }
+            continue;
+        }
+        if (conv != 'c') while (scan_isspace((unsigned char)*s)) s++;
+        if (!*s && conv != 'n') break;
+        if (conv == 'c' || conv == 's') {
+            char *out = suppress ? 0 : va_arg(ap, char *);
+            int max = width ? width : (conv == 'c' ? 1 : 1000000);
+            i = 0;
+            while (i < max && *s && (conv == 'c' || !scan_isspace((unsigned char)*s))) {
+                if (out) out[i] = *s;
+                s++; i++;
+            }
+            if (i == 0) break;
+            if (out && conv == 's') out[i] = 0;
+            if (!suppress) assigned++;
+            continue;
+        }
+        if (conv != 'd' && conv != 'i' && conv != 'u' && conv != 'o' && conv != 'x' && conv != 'X')
+            break;
+        num = s;
+        i = 0;
+        if ((*s == '+' || *s == '-') && i < 126) buf[i++] = *s++;
+        while (*s && i < 127 && (!width || (int)(s - num) < width)) {
+            int hex = conv == 'x' || conv == 'X' || conv == 'i';
+            if (*s >= '0' && *s <= '9') buf[i++] = *s++;
+            else if (hex && ((*s >= 'a' && *s <= 'f') || (*s >= 'A' && *s <= 'F'))) buf[i++] = *s++;
+            else if (hex && i > 0 && (buf[i - 1] == '0') && (*s == 'x' || *s == 'X')) buf[i++] = *s++;
+            else break;
+        }
+        if (i == 0 || (i == 1 && (buf[0] == '+' || buf[0] == '-'))) break;
+        buf[i] = 0;
+        if (!suppress) {
+            int base = conv == 'o' ? 8 : (conv == 'x' || conv == 'X') ? 16 : conv == 'i' ? 0 : 10;
+            if (conv == 'd' || conv == 'i') {
+                if (lcount >= 2) *va_arg(ap, long long *) = strtoll(buf, 0, base);
+                else if (lcount == 1) *va_arg(ap, long *) = strtol(buf, 0, base);
+                else *va_arg(ap, int *) = (int)strtol(buf, 0, base);
+            } else {
+                if (lcount >= 2) *va_arg(ap, unsigned long long *) = strtoull(buf, 0, base);
+                else if (lcount == 1) *va_arg(ap, unsigned long *) = strtoul(buf, 0, base);
+                else *va_arg(ap, unsigned *) = (unsigned)strtoul(buf, 0, base);
+            }
+            assigned++;
+        }
+    }
+    va_end(ap);
+    return assigned;
+}
+
 int isatty(int fd) {
 #if defined(__LINUX_TEST__)
     struct { unsigned short row, col, xpixel, ypixel; } ws;
@@ -2591,6 +2685,49 @@ unsigned sleep(unsigned seconds) {
         seconds -= chunk;
     }
     return 0;
+#endif
+}
+
+int nanosleep(const struct timespec *req, struct timespec *rem) {
+#if defined(__LINUX_TEST__)
+    struct { long sec, nsec; } r, m;
+    if (!req) return -1;
+    r.sec = (long)req->tv_sec; r.nsec = req->tv_nsec; m.sec = 0; m.nsec = 0;
+    if (__syscall(162, (int)&r, (int)&m) < 0) return -1;
+    if (rem) { rem->tv_sec = m.sec; rem->tv_nsec = m.nsec; }
+    return 0;
+#else
+    unsigned ms;
+    (void)rem;
+    if (!req || req->tv_sec < 0 || req->tv_nsec < 0) return -1;
+    ms = (unsigned)req->tv_sec * 1000u + (unsigned)(req->tv_nsec / 1000000L);
+    sleep_ms(ms);
+    return 0;
+#endif
+}
+
+long syscall(long n, ...) {
+    long a, b, c, d, e;
+    va_list ap;
+    va_start(ap, n);
+    a = va_arg(ap, long); b = va_arg(ap, long); c = va_arg(ap, long);
+    d = va_arg(ap, long); e = va_arg(ap, long);
+    va_end(ap);
+#if defined(__LINUX_TEST__)
+    return __syscall((int)n, (int)a, (int)b, (int)c, (int)d, (int)e);
+#else
+    (void)n; (void)a; (void)b; (void)c; (void)d; (void)e;
+    return -38;
+#endif
+}
+
+int poll(struct pollfd *fds, unsigned nfds, int timeout) {
+#if defined(__LINUX_TEST__)
+    return __syscall(168, (int)fds, (int)nfds, timeout);
+#else
+    (void)fds; (void)nfds; (void)timeout;
+    errno = 38;
+    return -1;
 #endif
 }
 
@@ -2665,6 +2802,15 @@ int gettimeofday(struct timeval *tv, void *tz) {
     t = time(NULL);
     if (t == (time_t)-1) return -1;
     if (tv) { tv->tv_sec = t; tv->tv_usec = 0; }
+    return 0;
+}
+
+int clock_gettime(int clock_id, struct timespec *ts) {
+    struct timeval tv;
+    (void)clock_id;
+    if (!ts || gettimeofday(&tv, 0) < 0) return -1;
+    ts->tv_sec = tv.tv_sec;
+    ts->tv_nsec = (long)tv.tv_usec * 1000L;
     return 0;
 }
 

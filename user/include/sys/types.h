@@ -7,4 +7,7 @@ typedef unsigned int mode_t;
 typedef int pid_t;
 typedef unsigned int uid_t;
 typedef unsigned int gid_t;
+typedef unsigned int dev_t;
+typedef unsigned int ino_t;
+typedef unsigned int nlink_t;
 #endif

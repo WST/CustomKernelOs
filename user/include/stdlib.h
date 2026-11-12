@@ -3,6 +3,7 @@
 #include "stddef.h"
 #include "stdint.h"
 void abort(void) __attribute__((noreturn));
+int atexit(void (*fn)(void));
 #define EXIT_SUCCESS 0
 #define EXIT_FAILURE 1
 extern char *__progname;
