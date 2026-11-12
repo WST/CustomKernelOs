@@ -399,7 +399,7 @@ $(BUILD)/user/l_domjs.o: user/lib/dom_prelude.h
 
 # прелюдия (часть окружения браузера на JS) -> строка Си
 user/lib/dom_prelude.h: user/lib/dom_prelude.js
-	sed -e '/^ *\/\//d' -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
+	sed -e 's/\r$$//' -e '/^ *\/\//d' -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/^/"/' -e 's/$$/\\n"/' $< > $@
 
 $(BUILD)/user/js.o: user/lib/js.h
 
@@ -868,14 +868,8 @@ curltest: $(BUILD)/user/libcurl.so $(CCROOT)/lib/libc.a $(CCROOT)/lib/libz.a
 		-D_POSIX_C_SOURCE=200809L -I$(CURL_SRC)/include -Iuser/include -Iuser/lib \
 		tests/curlget.c $(CURL_BLD)/lib/.libs/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
 		$(CCROOT)/lib/libz.a $(CCROOT)/lib/libc.a -o $(BUILD)/curlget-test
-	@openssl req -x509 -newkey rsa:2048 -keyout $(BUILD)/curl-test.key -out $(BUILD)/curl-test.crt -days 1 -nodes -subj /CN=127.0.0.1 >/dev/null 2>&1
-	@fuser -k 18765/tcp 18766/tcp >/dev/null 2>&1 || true; \
-	 python3 tests/curlserve.py 18765 >/dev/null 2>&1 & echo $$! > $(BUILD)/curl-http.pid; \
-	 python3 tests/curlserve.py 18766 $(BUILD)/curl-test.crt $(BUILD)/curl-test.key >/dev/null 2>&1 & echo $$! > $(BUILD)/curl-https.pid; \
-	 sleep 0.4; ./$(BUILD)/curlget-test; s=$$?; \
-	 kill $$(cat $(BUILD)/curl-http.pid) $$(cat $(BUILD)/curl-https.pid) 2>/dev/null; \
-	 rm -f $(BUILD)/curl-http.pid $(BUILD)/curl-https.pid; \
-	 readelf -d $(BUILD)/user/libcurl.so | grep -q libcurl.so || s=1; exit $$s
+	@python3 tests/curl_test.py $(BUILD)/curlget-test
+	@readelf -d $(BUILD)/user/libcurl.so | grep -q libcurl.so
 
 # libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)

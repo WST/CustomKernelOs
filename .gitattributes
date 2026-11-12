@@ -1,8 +1,2 @@
-*.sh text eol=lf
-user/lib/curl/configure text eol=lf
-user/lib/curl/config.guess text eol=lf
-user/lib/curl/config.sub text eol=lf
-user/lib/curl/install-sh text eol=lf
-user/lib/curl/missing text eol=lf
-user/lib/curl/depcomp text eol=lf
-user/lib/curl/compile text eol=lf
+# The build runs under Unix/WSL; keep text inputs and generated templates in LF.
+* text=auto eol=lf
