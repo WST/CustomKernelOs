@@ -918,3 +918,17 @@ netboot-usb-smoke:
 
 envtest:
 	python3 tests/env_config_test.py
+
+.PHONY: desktopdragtest
+desktopdragtest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined -Iuser/include -Iuser/lib tests/desktop_drag_test.c -Wl,--gc-sections -o $(BUILD)/desktop-drag-test
+	./$(BUILD)/desktop-drag-test
+
+$(BUILD)/user/dragcheck.o: tests/desktop_dragcheck.c user/desktop.c user/desktop_gpu.inc user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/dragcheck: $(BUILD)/user/dragcheck.o $(BUILD)/user/l_img.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/l_img.o $(ULIB) -o $@
+
+.PHONY: desktopdrag-smoke
+desktopdrag-smoke: usb-image $(BUILD)/os.img $(BUILD)/user/dragcheck
+	python3 tests/desktop_drag_smoke.py
