@@ -5,12 +5,11 @@
  *   cc -E hello.c              -> показать текст после препроцессора
  *
  *   cc -c a.c && cc a.o -lz    -> объектный файл, потом программа с /lib/libz.a
- *   cc a.c -lm                 -> то же с /lib/libm.so или /lib/libm.a
  *   cc a.c -ldl                -> dlopen из /lib/libdl.so, состояние в ld.so
  *   cc a.c -lpthread           -> pthread_create из /lib/libpthread.so
  *
- * Заголовки (#include <myos.h>, <gfx.h>) берутся из /include. Библиотеки —
- * /lib/libgfx.a и /lib/libc.a; если их нет, вместе с программой компилируются
+ * Заголовки (#include <myos.h>, <gfx.h>) берутся из /include. Вместе с программой
+ * линкуются libm, libgfx и libc. Если архивов gfx и libc нет, компилируются
  * исходники /lib/libc.c, gfx.c, vec.c, font.c, win.c. */
 #include "cc.h"
 
@@ -150,7 +149,7 @@ static void usage(void) {
         "  -D name     predefined macro, name or name=body\n"
         "  -L dir      also look for -l libraries in dir (before /lib and /usr/lib)\n"
         "  -l name     link libname.so if it exists, otherwise libname.a (-static: only .a)\n"
-        "  -nostdlib   do not link /lib/libgfx.a and /lib/libc.a\n"
+        "  -nostdlib   do not link libm, libgfx and libc\n"
         "              (without them on disk: /lib/gfx.c, vec.c, font.c, win.c, libc.c)\n"
         "Objects (.o) may come from cc -c or from gcc -m32 -fno-pic; libraries from ar or cc -shared.\n");
     exit(2);
@@ -308,6 +307,16 @@ int main(int argc, char **argv) {
     /* Стандартные библиотеки: готовые .a, а если их нет — исходники */
     StrList libsrcs = {0};
     if (!nostdlib) {
+        int have_m = false;
+        for (int i = 0; i < libs.n; i++)
+            if (has_suffix(libs.v[i], "libm.a")) have_m = true;
+        for (int i = 0; i < sos.n; i++)
+            if (has_suffix(sos.v[i], "libm.so")) have_m = true;
+        if (!have_m) {
+            char *so = format("%s/lib/libm.so", base_dir), *a = format("%s/lib/libm.a", base_dir);
+            if (!opt_static && file_exists(so)) push(&sos, so);
+            else if (file_exists(a)) push(&libs, a);
+        }
         char *gfx_a = format("%s/lib/libgfx.a", base_dir), *libc_a = format("%s/lib/libc.a", base_dir);
         if (file_exists(gfx_a)) push(&libs, gfx_a);
         else {

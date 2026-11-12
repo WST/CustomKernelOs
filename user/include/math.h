@@ -61,7 +61,7 @@ int __fpclassify(double);
 int __fpclassifyf(float);
 #define fpclassify(x) (sizeof(x) == sizeof(float) ? __fpclassifyf(x) : __fpclassify(x))
 
-/* Остальные функции — src/math musl 1.2.5 в libm. Без -lm их нет. */
+/* Все функции — src/math musl 1.2.5 в libm. cc подключает libm сам. */
 float acosf(float);
 double acosh(double);
 float acoshf(float);

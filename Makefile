@@ -183,7 +183,7 @@ ULIB := $(BUILD)/user/libmyos.a
 $(ULIB): $(ULIB_OBJS)
 	rm -f $@ && $(AR) rcs $@ $^
 
-$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.o: user/lib/libc.c user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 $(BUILD)/user/setjmp.o: user/lib/setjmp.S | $(BUILD)/user
@@ -223,7 +223,7 @@ DYNLDFLAGS := -m elf_i386 -nostdlib -s --gc-sections -dynamic-linker /lib/ld.so 
 $(BUILD)/user/crt0.o: user/lib/crt0.asm | $(BUILD)/user
 	$(NASM) -f elf32 $< -o $@
 
-$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S user/lib/regex.c user/lib/math.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
+$(BUILD)/user/libc.so: user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S user/lib/regex.c user/include/regex.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -fPIC -D__LIBC_SO__ -shared -Wl,-soname,libc.so -Wl,--hash-style=sysv -o $@ user/lib/libc.c user/lib/setjmp.S user/lib/alloca.S
 
 $(BUILD)/user/pic/%.o: user/lib/%.c user/lib/myos.h | $(BUILD)/user/pic
@@ -245,7 +245,7 @@ $(BUILD)/user/pic/zlib.o: user/include/zlib.h
 $(BUILD)/user/libz.so: $(BUILD)/user/pic/zlib.o $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libz.so -Wl,--hash-style=sysv -o $@ $(BUILD)/user/pic/zlib.o -L$(BUILD)/user -lc
 
-# libm.so — src/math musl (float и double). math.c по-прежнему внутри libc.
+# libm.so — единственная математика: src/math musl (float и double).
 MUSL_MATH_SRC := $(wildcard user/lib/musl-math/*.c)
 MUSL_PIC := $(patsubst user/lib/musl-math/%.c,$(BUILD)/user/pic/m_%.o,$(MUSL_MATH_SRC))
 $(BUILD)/user/pic/m_%.o: user/lib/musl-math/%.c $(wildcard user/lib/musl-math/*.h) user/include/math.h user/include/fenv.h user/include/stdint.h | $(BUILD)/user/pic
@@ -345,7 +345,7 @@ programs: $(UBINS)
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
 CC_HDRS   := user/lib/myos.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h)
-CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/math.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
+CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
@@ -363,7 +363,7 @@ $(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
 	@mkdir -p $(@D)
 	$(BUILD)/cc-host -B $(CCROOT) -c $< -o $@
 
-$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c user/lib/math.c
+$(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c
 
 $(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
 	rm -f $@ && $(AR) rcs $@ $^
@@ -465,7 +465,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in libc.c regex.c math.c zlib.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
+	@for f in libc.c regex.c zlib.c gfx.c vec.c font.c win.c tls.c; do $(BUILD)/myfs $(DISK) put user/lib/$$f /lib/$$f >/dev/null || exit 1; done
 	@for f in $(MLIBS); do $(BUILD)/myfs $(DISK) put $$f /lib/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/ld.so /lib/ld.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libc.so /lib/libc.so >/dev/null || exit 1
@@ -674,7 +674,7 @@ dltest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/dl_test.c -ldl -o $(BUILD)/dl-test
 	@./$(BUILD)/dl-test
 
-# libm: -lm находит библиотеку, а вызов без флага по-прежнему берётся из libc.
+# libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/cc/libm.c -o $(BUILD)/lm-libc
 	@./$(BUILD)/lm-libc

@@ -645,7 +645,7 @@ static void emit_u64(struct out *o, unsigned long long v, unsigned base, bool up
     if (left) for (; total < width; width--) emit(o, ' ');
 }
 
-/* 10^e для |e| <= 308. Нужен печати и разбору вещественных, без math.c. */
+/* 10^e для |e| <= 308. Нужен печати и разбору вещественных, без libm. */
 static double dpow10(int e) {
     static const double p[] = { 1e1, 1e2, 1e4, 1e8, 1e16, 1e32, 1e64, 1e128, 1e256 };
     int neg = e < 0, i;
@@ -2307,6 +2307,24 @@ static void big_add_small(Big *b, unsigned a) {
     if (c && b->n < BIG_N) b->v[b->n++] = c;
 }
 
+/* Знак, inf и nan для strtod. Публичные sin/pow живут в libm, libc его не тянет. */
+static double libc_bits(unsigned long long u) {
+    double x;
+    memcpy(&x, &u, 8);
+    return x;
+}
+static unsigned long long libc_ubits(double x) {
+    unsigned long long u;
+    memcpy(&u, &x, 8);
+    return u;
+}
+static double libc_inf(void) { return libc_bits(0x7ff0000000000000ULL); }
+static double libc_nan(void) { return libc_bits(0x7ff8000000000000ULL); }
+static double libc_copysign(double x, double y) {
+    unsigned long long u = (libc_ubits(x) & ~(1ULL << 63)) | (libc_ubits(y) & (1ULL << 63));
+    return libc_bits(u);
+}
+
 /* Ближайший double к целому * 2^extra. extra < 0 — это сдвиг вправо всего числа. */
 static double big_to_double(Big *b, int sign, int extra) {
     int bits, i, be, roundb, sticky;
@@ -2314,7 +2332,7 @@ static double big_to_double(Big *b, int sign, int extra) {
     double d;
     bits = b->n * 32;
     while (bits > 0 && !big_bit(b, bits - 1)) bits--;
-    if (bits <= 0) return copysign(0.0, sign < 0 ? -1.0 : 1.0);
+    if (bits <= 0) return libc_copysign(0.0, sign < 0 ? -1.0 : 1.0);
     roundb = 0;
     sticky = 0;
     if (bits > 53) {
@@ -2331,8 +2349,8 @@ static double big_to_double(Big *b, int sign, int extra) {
         for (i = 0; i < bits; i++) mant = (mant << 1) | (unsigned)big_bit(b, bits - 1 - i);
     }
     be = bits - 1 + extra;
-    if (be > 1023) { errno = ERANGE; return copysign(__myos_inf(), sign < 0 ? -1.0 : 1.0); }
-    if (be < -1022) { errno = ERANGE; return copysign(0.0, sign < 0 ? -1.0 : 1.0); }
+    if (be > 1023) { errno = ERANGE; return libc_copysign(libc_inf(), sign < 0 ? -1.0 : 1.0); }
+    if (be < -1022) { errno = ERANGE; return libc_copysign(0.0, sign < 0 ? -1.0 : 1.0); }
     u = ((unsigned long long)(be + 1023) << 52) | (mant & ((1ULL << 52) - 1));
     if (sign < 0) u |= 1ULL << 63;
     memcpy(&d, &u, 8);
@@ -2377,7 +2395,7 @@ static double strtod_precise(const char *nptr, char **end) {
     }
     if (end) *end = (char *)s;
     while (nd > 0 && digs[nd - 1] == 0) { nd--; exp++; }
-    if (!nd) return copysign(0.0, sign < 0 ? -1.0 : 1.0);
+    if (!nd) return libc_copysign(0.0, sign < 0 ? -1.0 : 1.0);
     big_set(&b, 0);
     for (i = 0; i < nd; i++) {
         big_mul(&b, 10);
@@ -2405,12 +2423,12 @@ double strtod(const char *nptr, char **end) {
         if ((s[0] == 'i' || s[0] == 'I') && (s[1] == 'n' || s[1] == 'N') && (s[2] == 'i' || s[2] == 'I') &&
             (s[3] == 't' || s[3] == 'T') && (s[4] == 'y' || s[4] == 'Y')) s += 5;
         if (end) *end = (char *)s;
-        return copysign(__myos_inf(), sign < 0 ? -1.0 : 1.0);
+        return libc_copysign(libc_inf(), sign < 0 ? -1.0 : 1.0);
     }
     if ((s[0] == 'n' || s[0] == 'N') && (s[1] == 'a' || s[1] == 'A') && (s[2] == 'n' || s[2] == 'N')) {
         s += 3;
         if (end) *end = (char *)s;
-        return __myos_nan();
+        return libc_nan();
     }
     while (isdigit((unsigned char)*s)) {
         saw = 1;
@@ -2444,8 +2462,8 @@ double strtod(const char *nptr, char **end) {
     if (!saw) { if (end) *end = (char *)nptr; return 0; }
     if (trunc) return strtod_precise(nptr, end);
     if (end) *end = (char *)s;
-    if (exp > 350) { errno = ERANGE; return copysign(__myos_inf(), sign < 0 ? -1.0 : 1.0); }
-    if (exp < -350) { errno = ERANGE; return copysign(0.0, sign < 0 ? -1.0 : 1.0); }
+    if (exp > 350) { errno = ERANGE; return libc_copysign(libc_inf(), sign < 0 ? -1.0 : 1.0); }
+    if (exp < -350) { errno = ERANGE; return libc_copysign(0.0, sign < 0 ? -1.0 : 1.0); }
     x = (double)acc;
     if (exp > 0) x *= dpow10(exp);
     else if (exp < 0) x /= dpow10(-exp);
@@ -2987,5 +3005,4 @@ int system(const char *cmd) {
     return st;
 }
 
-#include "math.c"
 #include "regex.c"
