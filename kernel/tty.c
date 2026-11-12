@@ -44,7 +44,11 @@ static u32 ring_get(struct ring *r, u8 *d, u32 n) {
 }
 
 static void to_screen(struct tty *t, const char *s, u32 n) {
-    ring_put(&t->out, (const u8 *)s, n);
+    for(u32 i=0;i<n;i++) {
+        if(s[i]=='\n' && (t->oflags&TTY_OUTPUT_DEFAULT)==TTY_OUTPUT_DEFAULT) {
+            if(TTY_BUF-t->out.count>=2)ring_put(&t->out,(const u8*)"\r\n",2);
+        } else ring_put(&t->out,(const u8*)s+i,1);
+    }
     task_wakeup(&t->out);
 }
 
@@ -59,6 +63,7 @@ int pty_create(struct file **master, struct file **slave) {
     ttys[slot] = t;
     t->id = slot;
     t->cols = 80; t->rows = 25;
+    t->oflags=TTY_OUTPUT_DEFAULT;
     t->masters = t->slaves = 1;
     irq_restore(f);
     m->type = FILE_PTY_MASTER; s->type = FILE_PTY_SLAVE;
@@ -192,10 +197,17 @@ static int slave_write(struct tty *t, const u8 *buf, u32 len) {
     u32 done = 0;
     while (done < len) {
         if (t->masters == 0) { irq_restore(f); return done ? (int)done : -EIO; }
-        u32 k = ring_put(&t->out, buf + done, len - done);
+        u32 k;
+        if((t->oflags&TTY_OUTPUT_DEFAULT)!=TTY_OUTPUT_DEFAULT)k=ring_put(&t->out,buf+done,len-done);
+        else {
+            u32 span=0;while(done+span<len && buf[done+span]!='\n')span++;
+            if(span)k=ring_put(&t->out,buf+done,span);
+            else if(TTY_BUF-t->out.count>=2){ring_put(&t->out,(const u8*)"\r\n",2);k=1;}
+            else k=0;
+        }
         done += k;
         task_wakeup(&t->out);
-        if (done < len) {
+        if (done < len && (!k || t->out.count==TTY_BUF)) {
             task_wait(&t->out);                                 /* ждём, пока окно прочитает */
             if (task_current()->kill_pending) { irq_restore(f); return done ? (int)done : -EINTR; }
         }
@@ -239,6 +251,7 @@ void tty_release(u32 pid) {
         struct tty *t = ttys[i];
         if (t && t->mode_owner == pid) {
             t->mode = 0;
+            t->oflags=TTY_OUTPUT_DEFAULT;
             t->mode_owner = 0;
             to_screen(t, "\x1b[0m\x1b[?25h", 10);                 /* цвета и курсор — как было */
         }
@@ -266,6 +279,11 @@ int tty_ctl(struct file *f, u32 op, u32 arg) {
     case TTYCTL_GETSIZE: return (t->cols << 16) | t->rows;
     case TTYCTL_GETFG: return t->fg;
     case TTYCTL_GETMODE: return t->mode;
+    case TTYCTL_GETOFLAGS: return t->oflags;
+    case TTYCTL_SETOFLAGS: {
+        if(arg&~TTY_OUTPUT_DEFAULT)return -EINVAL;
+        u32 flags=irq_save();t->oflags=arg;irq_restore(flags);return 0;
+    }
     }
     return -EINVAL;
 }

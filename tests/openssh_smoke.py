@@ -116,6 +116,12 @@ try:
  result=ssh('echo SSH_SERVER_PASS')
  assert result.returncode==0 and 'SSH_SERVER_PASS' in result.stdout,result.stderr+'\n'+text()[-7000:]
  print('Remote command and public key authentication: PASS',flush=True)
+ raw=subprocess.run(['ssh']+keyopts+['root@127.0.0.1','echo SSH_RAW_LINE'],capture_output=True,timeout=45)
+ assert raw.returncode==0 and raw.stdout==b'SSH_RAW_LINE\n',(raw.stdout,raw.stderr)
+ rendered=subprocess.run(['ssh']+keyopts+['-tt','root@127.0.0.1','sysinfo'],capture_output=True,timeout=45)
+ assert rendered.returncode==0 and b'\r\n' in rendered.stdout,(rendered.stdout,rendered.stderr)
+ assert b'\n' not in rendered.stdout.replace(b'\r\n',b''),rendered.stdout
+ print('SSH PTY line endings are CRLF; non-PTY output remains byte-exact: PASS',flush=True)
  result=ssh('ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 echo SSH_CLIENT_PASS')
  assert result.returncode==0 and 'SSH_CLIENT_PASS' in result.stdout,result.stderr+'\n'+result.stdout+'\n'+text()[-7000:]
  print('Native SSH client to native SSH server: PASS',flush=True)

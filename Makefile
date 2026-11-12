@@ -950,3 +950,8 @@ extautotest: $(BUILD)/myfs
 .PHONY: sshkeytest
 sshkeytest: $(BUILD)/myfs
 	python3 tests/ssh_key_config_test.py
+
+.PHONY: ptytest
+ptytest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -ffunction-sections -fdata-sections -fsanitize=address,undefined tests/pty_output.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/pty-output-test
+	./$(BUILD)/pty-output-test
