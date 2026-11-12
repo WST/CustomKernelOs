@@ -291,6 +291,30 @@ $(BUILD)/user/pic/f_sysv.o: user/lib/ffi/sysv.S user/lib/ffi/fficonfig.h user/in
 $(BUILD)/user/libffi.so: $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libffi.so -Wl,--hash-style=sysv -o $@ $(FFI_PIC) $(BUILD)/user/pic/f_sysv.o -L$(BUILD)/user -lc
 
+# OpenSSL 3.6.5. Собирает gcc хоста, без ассемблера и без сокетов: cc эти объекты
+# не линкует (R_386_GOT32X). Общую библиотеку собираем сами, на нашу libc.so.
+OSSL_SRC := user/lib/openssl
+OSSL_BLD := $(BUILD)/openssl
+OSSL_FLAGS := linux-x86 no-asm no-threads no-thread-pool no-sock no-dgram no-dso no-module \
+	no-apps no-docs no-tests no-engine no-quic no-comp no-afalgeng no-devcryptoeng \
+	no-pinshared no-sse2 no-shared no-ui-console --with-rand-seed=devrandom \
+	-std=gnu11 -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx \
+	-DNO_SYSLOG -DMYOS_HOST_LIBC -D__STDC_NO_ATOMICS__ -DRIO_POLL_METHOD=3 \
+	-I$(abspath user/include) -I$(abspath user/lib) \
+	--prefix=$(abspath $(OSSL_BLD))/prefix
+$(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
+	rm -rf $(OSSL_BLD)
+	mkdir -p $(OSSL_BLD)
+	cd $(OSSL_BLD) && perl $(abspath $(OSSL_SRC))/Configure $(OSSL_FLAGS)
+	$(MAKE) -C $(OSSL_BLD) -j$(shell nproc)
+	touch $@
+$(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libcrypto.so -Wl,--hash-style=sysv -Wl,-z,defs \
+		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libcrypto.a -Wl,--no-whole-archive -L$(BUILD)/user -lc
+$(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/user/libc.so
+	$(CC) -m32 -shared -nostdlib -Wl,-soname,libssl.so -Wl,--hash-style=sysv -Wl,-z,defs \
+		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libssl.a -Wl,--no-whole-archive -L$(BUILD)/user -lcrypto -lc
+
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -499,7 +523,7 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so | $(DISK)
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -547,6 +571,10 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libexpat.so /lib/libexpat.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libsqlite3.so /lib/libsqlite3.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libffi.so /lib/libffi.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcrypto.so /lib/libcrypto.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libssl.so /lib/libssl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) mkdir /include/openssl >/dev/null 2>&1 || true
+	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; $(BUILD)/myfs $(DISK) put $$f /include/openssl/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in user/code_*.h; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) put user/desktop_gpu.inc /src/desktop_gpu.inc >/dev/null || exit 1
 	@for f in user/*.c; do $(BUILD)/myfs $(DISK) put $$f /src/$$(basename $$f) >/dev/null || exit 1; done
@@ -771,6 +799,15 @@ ffitest: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/user/libffi.so
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/ffi.c -lffi -o $(BUILD)/ffi-test
 	@./$(BUILD)/ffi-test
 	@readelf -d $(BUILD)/user/libffi.so | grep -q libffi.so
+
+# SHA-256 «abc» через libcrypto. Тест линкует gcc: в объектах OpenSSL есть R_386_GOT32X.
+ossltest: $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(CCROOT)/lib/libc.a
+	@$(CC) -m32 -nostdlib -nostdinc -no-pie -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-mmx -std=gnu11 \
+		-I$(OSSL_BLD)/include -I$(OSSL_SRC)/include -Iuser/include -Iuser/lib \
+		tests/sha256.c $(OSSL_BLD)/libcrypto.a $(CCROOT)/lib/libc.a -o $(BUILD)/sha256-test
+	@./$(BUILD)/sha256-test
+	@readelf -d $(BUILD)/user/libcrypto.so | grep -q libcrypto.so
+	@readelf -d $(BUILD)/user/libssl.so | grep -q libssl.so
 
 # libm: pow находится и без -lm, потому что cc подключает libm сам.
 lmtest: $(BUILD)/cc-host $(CCROOT_READY)
