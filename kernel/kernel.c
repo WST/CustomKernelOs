@@ -129,7 +129,7 @@ void kmain(void) {
 
 #ifdef MYOS_HARDWARE
     boot_stage("xHCI and USB HID input");
-    if (xhci_init()) ok("USB HID input ready");
+    if (xhci_init()) ok("USB xHCI ready: hotplug, USB2 hubs and HID input");
     else fail("USB HID", "no supported direct keyboard/mouse; PS/2 or BIOS legacy may still work");
     if (boot_info_get()) ok("LIVE MODE: filesystem changes stay in RAM; internal ATA disks are hidden");
 #endif

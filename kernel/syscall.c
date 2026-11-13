@@ -1147,7 +1147,7 @@ void syscall_dispatch(struct regs *r) {
         unsigned size=hwinfo_record_size(a);
         if (!size || d<size) { ret=-EINVAL; break; }
         if (!user_buf_ok(c,size,true)) { ret=-EFAULT; break; }
-        union { struct hw_pci_info pci; struct hw_usb_info usb; struct hw_sata_info sata; } info;
+        union { struct hw_pci_info pci; struct hw_usb_info usb; struct hw_sata_info sata; struct hw_usb_device_info device; } info;
         memset(&info,0,sizeof(info));
         ret=hwinfo_read(a,b,&info);
         if (ret==1) memcpy((void *)c,&info,size);

@@ -3,6 +3,7 @@
 #include "types.h"
 #include "hwinfo.h"
 int xhci_port_info(unsigned index, struct hw_usb_info *out);
-/* One xHCI controller, directly attached USB HID boot keyboards and mice. */
+int xhci_device_info(unsigned index,struct hw_usb_device_info *out);
+/* One xHCI controller, hotplug, USB2 hubs and HID keyboards/mice. */
 bool xhci_init(void);
 #endif

@@ -166,3 +166,5 @@ I/O/MMIO. По ним можно проверить совместимость �
 
 Команды `lspci`, `lsusb -t` и `lsports` показывают PCI-устройства и доступные
 USB/SATA-порты. Описание вывода и ограничений: [hardware-inventory.md](hardware-inventory.md).
+
+USB hotplug, клавиатуры/мыши и USB2-хабы: [usb-hotplug.md](usb-hotplug.md).

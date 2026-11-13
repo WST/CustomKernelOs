@@ -8,12 +8,14 @@ unsigned hwinfo_record_size(unsigned kind) {
     switch (kind) {
     case HWINFO_PCI: return sizeof(struct hw_pci_info);
     case HWINFO_USB: return sizeof(struct hw_usb_info);
+    case HWINFO_USB_DEVICE: return sizeof(struct hw_usb_device_info);
     case HWINFO_SATA: return sizeof(struct hw_sata_info);
     default: return 0;
     }
 }
 int hwinfo_read(unsigned kind, unsigned index, void *out) {
     if (kind == HWINFO_USB) return xhci_port_info(index, out);
+    if (kind == HWINFO_USB_DEVICE) return xhci_device_info(index, out);
     if (kind == HWINFO_SATA) return ahci_port_info(index, out);
     if (kind != HWINFO_PCI || index > 65536u) return -22;
     struct pci_dev dev;

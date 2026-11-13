@@ -85,10 +85,10 @@ static inline void hw_usb_row(const struct hw_usb_info *p) {
     if (!p->connected) { putchar('\n'); return; }
     printf(" %-7s %s",hw_usb_speed(p->speed),p->enabled?"enabled":"disabled");
     if (p->descriptor_valid)
-        printf(" %04x:%04x %s [boot descriptor]",p->vendor_id,p->product_id,
+        printf(" %04x:%04x %s",p->vendor_id,p->product_id,
                hw_usb_class(p->device_class?p->device_class:p->interface_class,p->protocol));
     else printf(" descriptor unavailable");
-    if (p->hid_active && p->controller_running) printf(" [HID configured at boot]");
+    if (p->hid_active && p->controller_running) printf(" [HID active]");
     if (!p->controller_running) printf(" [controller inactive]");
     putchar('\n');
 }

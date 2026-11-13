@@ -1334,3 +1334,16 @@ $(BUILD)/make-job-probe: $(BUILD)/make-job-probe.o $(ULIB) user/user.ld
 .PHONY: parallel-buildtest
 parallel-buildtest: $(BUILD)/os.img $(BUILD)/make-job-probe $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/sh $(BUILD)/user/make $(BUILD)/user/ext $(BUILD)/user/cc $(BUILD)/user/tar $(BUILD)/user/cp $(BUILD)/user/ar $(BUILD)/user/echo $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/mlib/libc.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libgfx.a
 	python3 tests/parallel_build_smoke.py
+
+.PHONY: usblifecycletest
+usblifecycletest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/usb_lifecycle_test.c kernel/string.c kernel/hid_mouse.c -Wl,--gc-sections -o $(BUILD)/usb-lifecycle-test
+	./$(BUILD)/usb-lifecycle-test
+
+$(BUILD)/usb-hotplug-check.o: tests/usb_hotplug_check.c user/lib/myos.h user/lib/hwinfo.h | $(BUILD)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/usb-hotplug-check: $(BUILD)/usb-hotplug-check.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: usbhotplugtest
+usbhotplugtest: $(HWBUILD)/kernel.bin $(BUILD)/usb-hotplug-check $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/sh $(BUILD)/user/lsusb $(BUILD)/user/lsports $(BUILD)/user/libc.so usblifecycletest
+	python3 tests/usb_hotplug_smoke.py

@@ -8,6 +8,7 @@
 #define HWINFO_PCI  1u
 #define HWINFO_USB  2u
 #define HWINFO_SATA 3u
+#define HWINFO_USB_DEVICE 4u
 struct hw_pci_info {
     unsigned bus, device, function, vendor_id, device_id;
     unsigned class_code, subclass, prog_if, revision, header_type, irq;
@@ -23,7 +24,11 @@ struct hw_sata_info {
     unsigned driver_active, sectors;
     char model[44];
 };
-/* USB IDs/classes describe enumeration at boot; connected/enabled/speed are
- * current PORTSC values. No hub traversal or hotplug enumeration is implied. */
+/* Live device inventory, including children of USB2 hubs. route contains
+ * one 4-bit downstream port per tier; root_port remains the xHCI root port. */
+struct hw_usb_device_info {
+    struct hw_usb_info usb;
+    unsigned slot,parent_slot,root_port,route,depth,hub_ports,generation;
+};
 int hwinfo(unsigned kind, unsigned index, void *out, unsigned size);
 #endif
