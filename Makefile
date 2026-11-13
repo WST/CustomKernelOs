@@ -344,11 +344,9 @@ $(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o
 $(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
 
-# HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
-# Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
-TLS_PROGS := $(BUILD)/user/wget $(BUILD)/user/download
-
-# x509.c — проверка сертификатов (RSA, ECDSA P-256/P-384, цепочка до корней из /etc/certs.der)
+# HTTPS у браузера — свой TLS 1.3 (user/lib/tls.c). Собирается gcc:
+# нужна 64-битная арифметика, которой нет в cc внутри MyOS.
+# wget и download ходят через libcurl, корни те же — /etc/certs.der.
 TLS_OBJS := $(BUILD)/user/tls.o $(BUILD)/user/x509.o
 
 $(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/x509.h user/lib/myos.h | $(BUILD)/user
@@ -356,10 +354,18 @@ $(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/x509.h user/lib/myos
 $(BUILD)/user/x509.o: user/lib/x509.c user/lib/x509.h user/lib/tls.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-$(patsubst %,%.o,$(TLS_PROGS)) $(BUILD)/user/browser.o: user/lib/tls.h
+$(BUILD)/user/browser.o: user/lib/tls.h
 
-$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(TLS_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
-	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) -L$(BUILD)/user -lc -lgfx
+$(BUILD)/user/curlhttp.o: user/lib/curlhttp.c user/lib/curlhttp.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(CURL_SRC)/include -c $< -o $@
+$(BUILD)/user/wget.o: user/wget.c user/lib/curlhttp.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(CURL_SRC)/include -c $< -o $@
+$(BUILD)/user/download.o: user/download.c user/lib/curlhttp.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(CURL_SRC)/include -c $< -o $@
+$(BUILD)/user/wget: $(BUILD)/user/wget.o $(BUILD)/user/curlhttp.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/user/libcurl.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/wget.o $(BUILD)/user/curlhttp.o -L$(BUILD)/user -rpath-link $(BUILD)/user -lcurl -lc -lgfx
+$(BUILD)/user/download: $(BUILD)/user/download.o $(BUILD)/user/curlhttp.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/user/libcurl.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/download.o $(BUILD)/user/curlhttp.o -L$(BUILD)/user -rpath-link $(BUILD)/user -lcurl -lc -lgfx
 
 # JavaScript — движок user/lib/js*.c (программа js и браузер) и DOM user/lib/dom*.c (браузер).
 # Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
