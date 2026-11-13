@@ -29,9 +29,13 @@ include $(ENV_CONFIG_MK)
 fsize   = $$(wc -c < $(1) | tr -d ' ')
 padto   = dd if=/dev/null of=$(1) bs=1 seek=$(2) 2>/dev/null
 
+# Код gcc хоста целиком копируется в ОЗУ. -Oz жмёт текст сильнее -O2.
+# На i386 кадр через ebp остаётся даже при -Os, поэтому убираем его явно.
+# Таблицы раскрутки freestanding-программе не нужны, а лежат в загружаемом файле.
+SIZE_FLAGS := -Oz -fomit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables
 CFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
            -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx -mno-80387 \
-           -O2 -Wall -Wextra -std=gnu11
+           $(SIZE_FLAGS) -Wall -Wextra -std=gnu11
 LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
            $(shell $(LD) --help 2>/dev/null | grep -q no-warn-rwx && echo --no-warn-rwx-segments)
 
@@ -164,7 +168,7 @@ $(BUILD)/os.img: $(BUILD)/boot.bin $(BUILD)/kernel.bin
 # программам FPU можно (ядро сохраняет его регистры при переключении), SSE — нет
 UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx \
-            -O2 -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
+            $(SIZE_FLAGS) -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
 # --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
 ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 # ldso.c — не команда /bin, а исходник /lib/ld.so (собирается отдельно, своим cc).
@@ -301,6 +305,8 @@ $(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
 	rm -rf $(OSSL_BLD)
 	mkdir -p $(OSSL_BLD)
 	cd $(OSSL_BLD) && perl $(abspath $(OSSL_SRC))/Configure $(OSSL_FLAGS)
+	# Configure дописывает -O3 в конец CFLAGS, поэтому более ранний -Oz он затирает.
+	sed -i 's/ -O3 / $(SIZE_FLAGS) /' $(OSSL_BLD)/Makefile
 	$(MAKE) -C $(OSSL_BLD) -j$(shell nproc)
 	touch $@
 $(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
@@ -310,69 +316,43 @@ $(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libssl.so -Wl,--hash-style=sysv -Wl,-z,defs \
 		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libssl.a -Wl,--no-whole-archive -L$(BUILD)/user -lcrypto -lc
 
-# curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста.
-# Объекты с R_386_GOT32X, поэтому cc их не линкует. .so собираем сами.
+# curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста
+# по зафиксированному curl_config.h, без configure. Объекты с R_386_GOT32X,
+# поэтому cc их не линкует. .so собираем сами.
 CURL_SRC := user/lib/curl
 CURL_BLD := $(BUILD)/curl
-CURL_DEPS := $(BUILD)/curl-deps
-# CCROOT ниже по файлу, поэтому путь пишем через BUILD. Архивы — order-only:
-# на чистой сборке они должны появиться раньше configure, но правка libc
-# не должна заново конфигурировать весь curl.
-$(CURL_BLD)/.built: $(CURL_SRC)/configure $(OSSL_BLD)/.built | $(BUILD)/ccroot/lib/libc.a $(BUILD)/ccroot/lib/libz.a
-	rm -rf $(CURL_BLD) $(CURL_DEPS)
-	mkdir -p $(CURL_DEPS)/include/openssl $(CURL_DEPS)/lib $(CURL_BLD)
-	cp $(OSSL_SRC)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
-	cp $(OSSL_BLD)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
-	ln -s $(abspath $(OSSL_BLD))/libssl.a $(CURL_DEPS)/lib/libssl.a
-	ln -s $(abspath $(OSSL_BLD))/libcrypto.a $(CURL_DEPS)/lib/libcrypto.a
-	ln -s $(abspath user/include/zlib.h) $(CURL_DEPS)/include/zlib.h
-	ln -s $(abspath $(CCROOT)/lib/libz.a) $(CURL_DEPS)/lib/libz.a
-	echo 'void exit(int); int main(void); void _start(void) { exit(main()); }' > $(BUILD)/curl-crt.c
-	$(CC) -m32 -c -nostdinc -Iuser/include -o $(BUILD)/curl-crt.o $(BUILD)/curl-crt.c
-	printf '%s\n' '#!/bin/bash' \
-	  'root=$(abspath .)' \
-	  'link=1' 'args=()' \
-	  'for a in "$$@"; do' \
-	  '  case "$$a" in -c|-E|-S|-M) link=0 ;; -lc|-lpthread|-ldl|-lrt|-lm|-lresolv) continue ;; esac' \
-	  '  args+=("$$a")' \
-	  'done' \
-	  'for a in "$${args[@]}"; do' \
-	  '  if [[ $$a == -lz ]]; then args+=(-Wl,--defsym=gzread=0); break; fi' \
-	  'done' \
-	  'base=(gcc -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx -D_POSIX_C_SOURCE=200809L -I"$$root/user/include" -I"$$root/user/lib")' \
-	  'if [[ $$link -eq 1 ]]; then exec "$${base[@]}" "$${args[@]}" -nostdlib "$$root/build/curl-crt.o" "$$root/build/ccroot/lib/libc.a"; fi' \
-	  'exec "$${base[@]}" "$${args[@]}"' > $(BUILD)/curl-cc
-	chmod +x $(BUILD)/curl-cc
-	cd $(CURL_BLD) && PKG_CONFIG=/bin/false $(abspath $(CURL_SRC))/configure --host=i686-pc-linux-gnu \
-	  CC=$(abspath $(BUILD)/curl-cc) --disable-shared --enable-static \
-	  --disable-ftp --disable-file --disable-ipfs --disable-ldap --disable-ldaps \
-	  --disable-rtsp --disable-dict --disable-telnet --disable-tftp --disable-pop3 \
-	  --disable-imap --disable-smtp --disable-gopher --disable-mqtt \
-	  --disable-manual --disable-docs --disable-ipv6 --disable-threaded-resolver \
-	  --disable-unix-sockets --disable-alt-svc --disable-hsts --disable-ares \
-	  --without-libpsl --without-brotli --without-zstd --without-nghttp2 \
-	  --without-libidn2 --without-nghttp3 --without-ngtcp2 --without-quiche \
-	  --without-libssh2 --without-libssh --without-gnutls --without-mbedtls \
-	  --without-wolfssl --without-rustls \
-	  --with-openssl=$(abspath $(CURL_DEPS)) --with-zlib=$(abspath $(CURL_DEPS))
-	$(MAKE) -C $(CURL_BLD)/lib -j$(shell nproc)
-	touch $@
-$(BUILD)/user/libcurl.so: $(CURL_BLD)/.built $(BUILD)/user/libssl.so $(BUILD)/user/libz.so $(BUILD)/user/libc.so
+CURL_PRESET := user/lib/curl-preset
+CURL_CSRC := $(filter-out %/dllmain.c,$(wildcard $(CURL_SRC)/lib/*.c) \
+	$(foreach d,curlx vauth vdns vtls vquic vssh,$(wildcard $(CURL_SRC)/lib/$(d)/*.c)))
+CURL_OBJS := $(patsubst $(CURL_SRC)/lib/%.c,$(CURL_BLD)/%.o,$(CURL_CSRC))
+CURL_CFLAGS := -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin \
+	-nostdinc -mno-sse -mno-mmx $(SIZE_FLAGS) -Werror-implicit-function-declaration -Wno-system-headers \
+	-D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -DHAVE_CONFIG_H -DBUILDING_LIBCURL \
+	-I$(CURL_PRESET) -I$(CURL_SRC)/include -I$(CURL_SRC)/lib -Iuser/include -Iuser/lib \
+	-isystem $(OSSL_BLD)/include -isystem $(OSSL_SRC)/include
+$(CURL_BLD)/%.o: $(CURL_SRC)/lib/%.c $(CURL_PRESET)/curl_config.h $(OSSL_BLD)/.built
+	@mkdir -p $(dir $@)
+	$(CC) $(CURL_CFLAGS) -c $< -o $@
+$(CURL_BLD)/libcurl.a: $(CURL_OBJS)
+	rm -f $@ && $(AR) rcs $@ $(CURL_OBJS)
+$(BUILD)/user/libcurl.so: $(CURL_BLD)/libcurl.a $(BUILD)/user/libssl.so $(BUILD)/user/libz.so $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libcurl.so -Wl,--hash-style=sysv -Wl,-z,defs \
-		-o $@ -Wl,--whole-archive $(CURL_BLD)/lib/.libs/libcurl.a -Wl,--no-whole-archive \
+		-o $@ -Wl,--whole-archive $(CURL_BLD)/libcurl.a -Wl,--no-whole-archive \
 		-L$(BUILD)/user -lssl -lcrypto -lz -lc
 
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
 
+$(BUILD)/user/tar.o: user/include/zlib.h
+$(BUILD)/user/tar: $(BUILD)/user/tar.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/tar.o $(BUILD)/user/zlib.o -L$(BUILD)/user -lc -lgfx
+
 $(BUILD)/user/%: $(BUILD)/user/%.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
 	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< -L$(BUILD)/user -lc -lgfx
 
-# HTTPS (TLS 1.3) — user/lib/tls.c, только тем, кому нужен: browser и wget.
-# Собирается gcc (нужна 64-битная арифметика, которой нет в cc внутри MyOS).
-TLS_PROGS := $(BUILD)/user/wget $(BUILD)/user/download
-
-# x509.c — проверка сертификатов (RSA, ECDSA P-256/P-384, цепочка до корней из /etc/certs.der)
+# HTTPS у браузера — свой TLS 1.3 (user/lib/tls.c). Собирается gcc:
+# нужна 64-битная арифметика, которой нет в cc внутри MyOS.
+# wget и download ходят через libcurl, корни те же — /etc/certs.der.
 TLS_OBJS := $(BUILD)/user/tls.o $(BUILD)/user/x509.o
 
 $(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/x509.h user/lib/myos.h | $(BUILD)/user
@@ -380,10 +360,18 @@ $(BUILD)/user/tls.o: user/lib/tls.c user/lib/tls.h user/lib/x509.h user/lib/myos
 $(BUILD)/user/x509.o: user/lib/x509.c user/lib/x509.h user/lib/tls.h user/lib/myos.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
-$(patsubst %,%.o,$(TLS_PROGS)) $(BUILD)/user/browser.o: user/lib/tls.h
+$(BUILD)/user/browser.o: user/lib/tls.h
 
-$(TLS_PROGS): $(BUILD)/user/%: $(BUILD)/user/%.o $(TLS_OBJS) $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
-	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $< $(TLS_OBJS) -L$(BUILD)/user -lc -lgfx
+$(BUILD)/user/curlhttp.o: user/lib/curlhttp.c user/lib/curlhttp.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(CURL_SRC)/include -c $< -o $@
+$(BUILD)/user/wget.o: user/wget.c user/lib/curlhttp.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(CURL_SRC)/include -c $< -o $@
+$(BUILD)/user/download.o: user/download.c user/lib/curlhttp.h user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -I$(CURL_SRC)/include -c $< -o $@
+$(BUILD)/user/wget: $(BUILD)/user/wget.o $(BUILD)/user/curlhttp.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/user/libcurl.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/wget.o $(BUILD)/user/curlhttp.o -L$(BUILD)/user -rpath-link $(BUILD)/user -lcurl -lc -lgfx
+$(BUILD)/user/download: $(BUILD)/user/download.o $(BUILD)/user/curlhttp.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/user/libcurl.so
+	$(LD) $(DYNLDFLAGS) -o $@ $(BUILD)/user/crt0.o $(BUILD)/user/download.o $(BUILD)/user/curlhttp.o -L$(BUILD)/user -rpath-link $(BUILD)/user -lcurl -lc -lgfx
 
 # JavaScript — движок user/lib/js*.c (программа js и браузер) и DOM user/lib/dom*.c (браузер).
 # Тоже собирается gcc: в нём 64-битная арифметика и сопроцессор x87.
@@ -587,6 +575,12 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc.inst || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head.inst || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/grep.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head/setup.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head/uninstall.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc/setup.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc/uninstall.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/lua.inst || exit 1
 	@for d in ext/instructions/*; do \
 	  test -d $$d || continue; \
@@ -874,7 +868,7 @@ ossltest: $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(CCROOT)/lib/libc.
 curltest: $(BUILD)/user/libcurl.so $(CCROOT)/lib/libc.a $(CCROOT)/lib/libz.a
 	@$(CC) -m32 -nostdlib -nostdinc -no-pie -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-mmx -std=gnu11 \
 		-D_POSIX_C_SOURCE=200809L -I$(CURL_SRC)/include -Iuser/include -Iuser/lib \
-		tests/curlget.c $(CURL_BLD)/lib/.libs/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
+		tests/curlget.c $(CURL_BLD)/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
 		$(CCROOT)/lib/libz.a $(CCROOT)/lib/libc.a -o $(BUILD)/curlget-test
 	@python3 tests/curl_test.py $(BUILD)/curlget-test
 	@readelf -d $(BUILD)/user/libcurl.so | grep -q libcurl.so

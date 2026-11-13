@@ -3,107 +3,45 @@
  *   -r N    сколько раз повторить после неудачи (по умолчанию 0)
  *   -o file куда сохранить; иначе имя берётся из адреса
  *   -k      не проверять сертификат HTTPS
- * До пяти перенаправлений за одну попытку. */
+ * До пяти перенаправлений за одну попытку. Готовый файл публикуется переименованием,
+ * поэтому оборванная загрузка не затирает уже лежащий файл.
+ * Передача — libcurl. Корни сертификатов те же, /etc/certs.der. */
 #include "myos.h"
 #include "unistd.h"
 #include "stdio.h"
-#include "tls.h"
+#include "curlhttp.h"
 
-static char host[128];
-static char reqpath[512];
-static int port, https;
-static tls *conn;
+struct sink {
+    int fd, err;
+};
 
-static int net_read(int fd, void *b, int n) { return conn ? tls_read(conn, b, n) : read(fd, b, n); }
-static int net_write(int fd, const void *b, int n) { return conn ? tls_write(conn, b, n) : write(fd, b, n); }
-
-static int parse_url(const char *url) {
-    https = 0;
-    port = 80;
-    host[0] = 0;
-    if (!strncmp(url, "http://", 7)) url += 7;
-    else if (!strncmp(url, "https://", 8)) { url += 8; https = 1; port = 443; }
-    else return -1;
-    int i = 0;
-    while (*url && *url != '/' && *url != ':' && i < (int)sizeof(host) - 1) host[i++] = *url++;
-    host[i] = 0;
-    if (!i) return -1;
-    if (*url == ':') {
-        url++;
-        port = atoi(url);
-        while (isdigit((unsigned char)*url)) url++;
+static size_t on_body(char *ptr, size_t size, size_t nmemb, void *ud) {
+    struct sink *s = ud;
+    size_t n = size * nmemb, off = 0;
+    while (off < n) {
+        size_t chunk = n - off;
+        int w;
+        if (chunk > (1u << 20)) chunk = 1u << 20;
+        w = write(s->fd, ptr + off, chunk);
+        if (w <= 0) { s->err = w < 0 ? errno : ENOSPC; return 0; }
+        off += (size_t)w;
     }
-    if (port <= 0 || port > 65535) return -1;
-    if (*url && *url != '/') return -1;
-    snprintf(reqpath, sizeof(reqpath), "%s", *url ? url : "/");
-    return 0;
+    return n;
 }
 
-static char resp[4096];
-static int resp_len, body_off;
-
-static int read_headers(int fd) {
-    resp_len = 0;
-    body_off = 0;
-    while (resp_len < (int)sizeof(resp) - 1) {
-        int n = net_read(fd, resp + resp_len, sizeof(resp) - 1 - resp_len);
-        if (n <= 0) return n < 0 ? n : -EIO;
-        resp_len += n;
-        resp[resp_len] = 0;
-        for (int i = 0; i + 3 < resp_len; i++)
-            if (resp[i] == '\r' && resp[i + 1] == '\n' && resp[i + 2] == '\r' && resp[i + 3] == '\n') {
-                body_off = i + 4;
-                return 0;
-            }
-    }
-    return -EMSGSIZE;
+static size_t on_hdr(char *ptr, size_t size, size_t nmemb, void *ud) {
+    struct curlhttp_hdr *h = ud;
+    size_t n = curlhttp_on_header(ptr, size, nmemb, h);
+    if (n >= 5 && !memcmp(ptr, "HTTP/", 5)) dprintf(STDERR, "download: %s\n", h->line);
+    return n;
 }
 
-static int header(const char *name, char *out, int max) {
-    int nl = (int)strlen(name);
-    for (char *p = resp; p < resp + body_off; ) {
-        char *e = p;
-        int same;
-        while (e < resp + body_off && *e != '\r') e++;
-        same = e - p > nl && p[nl] == ':';
-        for (int i = 0; same && i < nl; i++) if (toupper((unsigned char)p[i]) != toupper((unsigned char)name[i])) same = 0;
-        if (same) {
-            char *v = p + nl + 1;
-            int l;
-            while (*v == ' ') v++;
-            l = e - v < max - 1 ? (int)(e - v) : max - 1;
-            memcpy(out, v, (size_t)l);
-            out[l] = 0;
-            return 1;
-        }
-        p = e + 2;
-    }
-    return 0;
+static int http_url(const char *url) {
+    return !strncmp(url, "http://", 7) || !strncmp(url, "https://", 8);
 }
 
-/* Новый адрес пишется в cur. 0 — получилось. */
-static int resolve_loc(char *cur, int cap, const char *loc) {
-    char base[512];
-    char *slash;
-    if (!strncmp(loc, "http://", 7) || !strncmp(loc, "https://", 8)) {
-        snprintf(cur, (size_t)cap, "%s", loc);
-        return 0;
-    }
-    if (loc[0] == '/') {
-        snprintf(cur, (size_t)cap, "%s://%s:%d%s", https ? "https" : "http", host, port, loc);
-        return 0;
-    }
-    snprintf(base, sizeof base, "%s", reqpath);
-    slash = strrchr(base, '/');
-    if (slash) slash[1] = 0;
-    else snprintf(base, sizeof base, "/");
-    snprintf(cur, (size_t)cap, "%s://%s:%d%s%s", https ? "https" : "http", host, port, base, loc);
-    return 0;
-}
-
-static void close_net(int fd) {
-    if (conn) { tls_close(conn); conn = NULL; }
-    if (fd >= 0) close(fd);
+static int cert_fail(CURLcode rc) {
+    return rc == CURLE_PEER_FAILED_VERIFICATION || rc == CURLE_SSL_CACERT_BADFILE;
 }
 
 /* Reserve a unique sibling, without truncating any existing path. */
@@ -146,94 +84,73 @@ static int publish_download(const char *temp, const char *out) {
     return 0;
 }
 
-/* 0 — файл записан, 2 — в cur новый адрес, -2 — сертификат, -1 — прочая ошибка. */
-static int once(char *cur, const char *out, int insecure) {
-    int fd, ofd, status, n, r;
-    char req[640], loc[640];
-    char *eol, *sp;
-    unsigned got = 0;
-    if (parse_url(cur) < 0) { dprintf(STDERR, "download: bad url\n"); return -1; }
-    fd = tcp_connect(host, port);
-    if (fd < 0) {
-        dprintf(STDERR, "download: %s: %s\n", host, fd == -ENOENT ? "host not found" : strerror(-fd));
+/* 0 — файл записан, -2 — сертификат, -1 — прочая ошибка. */
+static int once(const char *url, const char *temp, int insecure) {
+    CURL *c;
+    CURLcode rc;
+    char err[256];
+    long code = 0;
+    struct sink sink;
+    struct curlhttp_hdr hdr;
+    int fd, prepared;
+    if (!http_url(url)) { dprintf(STDERR, "download: bad url\n"); return -1; }
+    fd = open(temp, O_WRONLY | O_TRUNC);
+    if (fd < 0) { dprintf(STDERR, "download: %s: %s\n", temp, strerror(errno)); return -1; }
+    c = curl_easy_init();
+    if (!c) { close(fd); dprintf(STDERR, "download: out of memory\n"); return -1; }
+    memset(&sink, 0, sizeof sink);
+    memset(&hdr, 0, sizeof hdr);
+    sink.fd = fd;
+    err[0] = 0;
+    curl_easy_setopt(c, CURLOPT_ERRORBUFFER, err);
+    prepared = curlhttp_prepare(c, url, "MyOS-download/0.1", insecure);
+    if (prepared < 0) {
+        curl_easy_cleanup(c);
+        close(fd);
+        if (prepared == -1)
+            dprintf(STDERR, "download: certificate problem: cannot read /etc/certs.der\n(use -k to download anyway)\n");
+        else dprintf(STDERR, "download: out of memory\n");
+        return prepared == -1 ? -2 : -1;
+    }
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
+    curl_easy_setopt(c, CURLOPT_REDIR_PROTOCOLS_STR, "http,https");
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_body);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA, &sink);
+    curl_easy_setopt(c, CURLOPT_HEADERFUNCTION, on_hdr);
+    curl_easy_setopt(c, CURLOPT_HEADERDATA, &hdr);
+    rc = curl_easy_perform(c);
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
+    curl_easy_cleanup(c);
+    close(fd);
+    if (prepared == 0 && cert_fail(rc)) {
+        dprintf(STDERR, "download: certificate problem: %s\n(use -k to download anyway)\n",
+                err[0] ? err : curl_easy_strerror(rc));
+        return -2;
+    }
+    if (sink.err || rc != CURLE_OK || code < 200 || code >= 300) {
+        if (sink.err) dprintf(STDERR, "download: write failed\n");
+        else if (rc != CURLE_OK) dprintf(STDERR, "download: %s\n", err[0] ? err : curl_easy_strerror(rc));
+        else if (!hdr.line[0]) dprintf(STDERR, "download: bad response\n");
         return -1;
-    }
-    if (https) {
-        char err[96];
-        conn = tls_open(fd, host, err, sizeof err);
-        if (!conn) { dprintf(STDERR, "download: TLS: %s\n", err); close(fd); return -1; }
-        if (!tls_cert_ok(conn) && !insecure) {
-            dprintf(STDERR, "download: certificate problem: %s\n(use -k to download anyway)\n", tls_cert_error(conn));
-            close_net(fd);
-            return -2;
-        }
-    }
-    n = snprintf(req, sizeof req,
-        "GET %s HTTP/1.0\r\nHost: %s\r\nUser-Agent: MyOS-download/0.1\r\nAccept: */*\r\nConnection: close\r\n\r\n",
-        reqpath, host);
-    if (n < 0 || n >= (int)sizeof req || net_write(fd, req, n) != n) {
-        dprintf(STDERR, "download: send failed\n");
-        close_net(fd);
-        return -1;
-    }
-    r = read_headers(fd);
-    if (r < 0) { dprintf(STDERR, "download: bad response: %s\n", strerror(-r)); close_net(fd); return -1; }
-    eol = strchr(resp, '\r');
-    if (!eol) { close_net(fd); return -1; }
-    *eol = 0;
-    status = 0;
-    sp = strchr(resp, ' ');
-    if (sp) status = atoi(sp + 1);
-    dprintf(STDERR, "download: %s\n", resp);
-    *eol = '\r';
-    if (status >= 300 && status < 400 && header("Location", loc, sizeof loc)) {
-        close_net(fd);
-        resolve_loc(cur, 768, loc);
-        return 2;
-    }
-    if (status < 200 || status >= 300) { close_net(fd); return -1; }
-
-    char length_header[32];
-    unsigned expected = 0;
-    bool has_length = header("Content-Length", length_header, sizeof length_header);
-    if (has_length) {
-        const char *p = length_header;
-        if (!*p) { close_net(fd); return -1; }
-        for (; *p; p++) {
-            if (*p < '0' || *p > '9' || expected > (0xffffffffu - (*p - '0')) / 10) {
-                close_net(fd); return -1;
-            }
-            expected = expected * 10 + (*p - '0');
-        }
-    }
-    ofd = open(out, O_WRONLY | O_TRUNC); /* out is a reserved temporary file */
-    if (ofd < 0) { dprintf(STDERR, "download: %s: %s\n", out, strerror(errno)); close_net(fd); return -1; }
-    if (resp_len > body_off) {
-        int w = write(ofd, resp + body_off, (size_t)(resp_len - body_off));
-        if (w != resp_len - body_off) { dprintf(STDERR, "download: write failed\n"); close(ofd); close_net(fd); return -1; }
-        got = (unsigned)(resp_len - body_off);
-    }
-    while ((n = net_read(fd, req, 512)) > 0) {
-        int w = write(ofd, req, (size_t)n);
-        if (w != n) { dprintf(STDERR, "download: write failed\n"); close(ofd); close_net(fd); return -1; }
-        got += (unsigned)n;
-    }
-    int closed = close(ofd);
-    close_net(fd);
-    if (n < 0 || closed < 0 || (has_length && got != expected)) {
-        dprintf(STDERR, "download: incomplete transfer\n"); return -1;
     }
     return 0;
 }
 
 static int default_name(const char *url, char *name, int max) {
-    const char *s, *slash;
-    int i = 0;
-    if (parse_url(url) < 0) return -1;
-    slash = strrchr(reqpath, '/');
-    s = slash ? slash + 1 : reqpath;
-    while (s[i] && s[i] != '?' && s[i] != '#') i++;
-    if (i == 0) { snprintf(name, (size_t)max, "index.html"); return 0; }
+    const char *p, *path, *end, *slash, *s;
+    int i;
+    if (!http_url(url)) return -1;
+    p = strstr(url, "://") + 3;
+    path = strchr(p, '/');
+    if (!path) { snprintf(name, (size_t)max, "index.html"); return 0; }
+    end = path;
+    while (*end && *end != '?' && *end != '#') end++;
+    slash = path;
+    for (s = path; s < end; s++) if (*s == '/') slash = s;
+    s = slash + 1;
+    if (s >= end) { snprintf(name, (size_t)max, "index.html"); return 0; }
+    i = (int)(end - s);
     if (i >= max) { dprintf(STDERR, "download: name is longer than %d, use -o\n", max - 1); return -1; }
     memcpy(name, s, (size_t)i);
     name[i] = 0;
@@ -248,7 +165,6 @@ int main(int argc, char **argv) {
     int retries = 0, insecure = 0, opt, attempt;
     const char *out = NULL, *url = NULL;
     char name[28];
-    char cur[768];
     opterr = 1;
     while ((opt = getopt(argc, argv, "r:o:k")) != -1) {
         if (opt == 'r') {
@@ -268,26 +184,23 @@ int main(int argc, char **argv) {
         out = name;
     }
     for (attempt = 0; attempt <= retries; attempt++) {
-        int red;
         char temporary[128];
         int temp_fd = reserve_sibling(out, temporary);
+        int r;
         if (temp_fd < 0) {
-            dprintf(STDERR, "download: cannot create temporary file: %s\n", strerror(errno)); return 1;
+            dprintf(STDERR, "download: cannot create temporary file: %s\n", strerror(errno));
+            return 1;
         }
         if (close(temp_fd) < 0) { unlink(temporary); return 1; }
-        snprintf(cur, sizeof cur, "%s", url);
-        for (red = 0; red < 5; red++) {
-            int r = once(cur, temporary, insecure);
-            if (r == 0) {
-                if (publish_download(temporary, out) == 0) { dprintf(STDERR, "download: saved %s\n", out); return 0; }
-                dprintf(STDERR, "download: cannot publish %s: %s\n", out, strerror(errno));
-                unlink(temporary); return 1;
-            }
-            if (r == 2) continue;
-            if (r == -2) { unlink(temporary); return 1; }
-            break;
+        r = once(url, temporary, insecure);
+        if (r == 0) {
+            if (publish_download(temporary, out) == 0) { dprintf(STDERR, "download: saved %s\n", out); return 0; }
+            dprintf(STDERR, "download: cannot publish %s: %s\n", out, strerror(errno));
+            unlink(temporary);
+            return 1;
         }
         unlink(temporary);
+        if (r == -2) return 1;
         if (attempt < retries) {
             dprintf(STDERR, "download: retry %d/%d\n", attempt + 1, retries);
             sleep(1);
