@@ -217,6 +217,13 @@ int main(){
   memset(rd,0xff,100); CHECK(fs_read(zero,0,rd,100)==100);
   for(int i=0;i<100;i++) CHECK(rd[i]==0);
   CHECK(fs_resolve(dev,"null",&ino)==0 && fs_read(ino,0,rd,10)==0 && fs_write(ino,0,"x",1)==1);
+  {
+    u32 rnd; u8 a[32], b[32]; int i, any=0;
+    CHECK(fs_resolve(dev,"urandom",&rnd)==0 && fs_read(rnd,0,a,32)==32 && fs_read(rnd,0,b,32)==32);
+    for(i=0;i<32;i++) if(a[i]) any=1;
+    CHECK(any && memcmp(a,b,32)!=0);
+    CHECK(fs_resolve(dev,"random",&rnd)==0 && fs_stat(rnd,&st)==0 && st.type==FS_TYPE_CHAR && fs_read(rnd,0,a,16)==16);
+  }
   CHECK(fs_resolve(1,"/dev/sdb",&raw)==0 && fs_stat(raw,&st)==0 && st.type==FS_TYPE_BLOCK);
   CHECK(fs_read(raw,509,rd,20)==20 && !memcmp(rd,disk+509,20));
   CHECK(fs_write(raw,0,"x",1)==FS_EROFS && fs_truncate(raw)==FS_EROFS);
