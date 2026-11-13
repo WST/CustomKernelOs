@@ -244,7 +244,12 @@ static char *new_unique_name(void) {
 
 static Obj *new_anon_gvar(Type *ty) { return new_gvar(new_unique_name(), ty); }
 
+/* Одинаковые литералы — один объект в rodata: текст программы занимает меньше ОЗУ. */
 static Obj *new_string_literal(char *p, int len, Type *ty) {
+    for (Obj *v = globals; v; v = v->next) {
+        if (!v->is_rodata || !v->init_data || v->ty->size != len) continue;
+        if (!memcmp(v->init_data, p, (size_t)len)) return v;
+    }
     Obj *var = new_anon_gvar(ty);
     var->init_data = xcalloc(len);
     memcpy(var->init_data, p, len);

@@ -369,6 +369,9 @@ static void gen_cast(Type *from, Type *to) {
 static Obj *cur_fn;
 static int  ret_label;
 static bool fn_got;                 /* в этой функции ebx — указатель на GOT */
+static int  save_mask;              /* какие из ebx/esi/edi функция портит: 1, 2, 4 */
+static int  save_bytes;             /* сколько байт кадра занимают их сохранения */
+static int  got_slot;               /* [ebp+got_slot]: копия ebx с адресом GOT */
 static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
 static void reload_got(void);
@@ -1023,9 +1026,6 @@ static void gen_stmt(Node *node) {
 
 /* ------------------------------------------------------------ функции */
 
-#define SAVED_REGS 12
-#define GOT_SLOT (-(SAVED_REGS + 4))            /* [ebp-16]: сюда прячем GOT, пока ebx занят */
-
 static char thunk_name[] = "__x86.get_pc_thunk.bx";
 static char got_name[] = "_GLOBAL_OFFSET_TABLE_";
 static bool need_thunk;
@@ -1052,13 +1052,62 @@ static bool needs_got(Node *n) {
 
 static void reload_got(void) {
     if (!fn_got) return;
-    E("8B"); ebp_operand(3, GOT_SLOT);                          /* mov ebx, [ebp-16] */
+    E("8B"); ebp_operand(3, got_slot);                          /* mov ebx, [ebp+got_slot] */
 }
 
 static void pic_setup(void) {
     E("E8"); sym_ref(thunk_name, R_386_PC32);                   /* ebx = адрес следующей команды */
     E("81 C3"); sym_ref(got_name, R_386_GOTPC);                 /* add ebx, _GLOBAL_OFFSET_TABLE_ */
-    E("89"); ebp_operand(3, GOT_SLOT);                          /* mov [ebp-16], ebx */
+    E("89"); ebp_operand(3, got_slot);                          /* mov [ebp+got_slot], ebx */
+}
+
+static void note_reg(int bit) { save_mask |= bit; }
+
+/* ebx, esi и edi по System V i386 сохраняет вызываемый. В кадр кладём только те,
+ * которые эта функция сама затирает: лишние 4–12 байт на каждый вызов — это стек. */
+static void scan_clobber(Node *n) {
+    if (!n) return;
+    if (n->kind == ND_MEMZERO) note_reg(4);
+    if (n->kind == ND_SYSCALL) {
+        int k = 0;
+        for (Node *a = n->args; a; a = a->next) k++;
+        if (k >= 2) note_reg(1);                                /* аргумент попадает в ebx */
+        if (k >= 5) note_reg(2);
+        if (k >= 6) note_reg(4);
+    }
+    if (n->kind == ND_RETURN && n->lhs && n->lhs->ty &&
+        (n->lhs->ty->kind == TY_STRUCT || n->lhs->ty->kind == TY_UNION)) {
+        note_reg(2); note_reg(4);                               /* copy_bytes: esi, edi */
+    }
+    if (n->kind == ND_ASSIGN && n->ty && n->lhs &&
+        !(n->lhs->kind == ND_VAR && n->lhs->var && n->lhs->var->is_local &&
+          (is_scalar_int(n->ty) || is_flonum(n->ty))) &&
+        !(n->lhs->kind == ND_MEMBER && n->lhs->member && n->lhs->member->is_bitfield) &&
+        (n->ty->kind == TY_STRUCT || n->ty->kind == TY_UNION)) {
+        note_reg(2); note_reg(4);
+    }
+    if (n->kind == ND_FUNCALL) {
+        for (Node *a = n->args; a; a = a->next)
+            if (a->ty && (a->ty->kind == TY_STRUCT || a->ty->kind == TY_UNION)) {
+                note_reg(2); note_reg(4);
+            }
+    }
+    if (n->lhs && n->lhs->ty && n->lhs->ty->kind == TY_LONGLONG &&
+        (n->kind == ND_ADD || n->kind == ND_SUB || n->kind == ND_MUL || n->kind == ND_DIV ||
+         n->kind == ND_MOD || n->kind == ND_BITAND || n->kind == ND_BITOR || n->kind == ND_BITXOR ||
+         n->kind == ND_EQ || n->kind == ND_NE || n->kind == ND_LT || n->kind == ND_LE)) {
+        note_reg(1);                                            /* pop ebx — младшая половина правого */
+        if (n->kind == ND_MUL) { note_reg(2); note_reg(4); }
+    }
+    scan_clobber(n->lhs);
+    scan_clobber(n->rhs);
+    scan_clobber(n->cond);
+    scan_clobber(n->then);
+    scan_clobber(n->els);
+    scan_clobber(n->init);
+    scan_clobber(n->inc);
+    for (Node *s = n->body; s; s = s->next) scan_clobber(s);
+    for (Node *a = n->args; a; a = a->next) scan_clobber(a);
 }
 
 static void assign_offsets(Obj *fn) {
@@ -1069,7 +1118,7 @@ static void assign_offsets(Obj *fn) {
         p->offset = off;
         off += align_to(p->ty->size, 4);
     }
-    int bottom = SAVED_REGS;                                    /* под ebp — сохранённые ebx, esi, edi */
+    int bottom = save_bytes;                                    /* под ebp — только реально сохранённые регистры */
     if (fn_got) bottom += 4;                                    /* и сохранённый указатель на GOT */
     for (Obj *v = fn->locals; v && v != fn->params; v = v->next) {
         int align = v->ty->align < 4 ? (v->ty->size >= 4 ? 4 : v->ty->align) : v->ty->align;
@@ -1077,28 +1126,42 @@ static void assign_offsets(Obj *fn) {
         bottom = align_to(bottom + v->ty->size, align);
         v->offset = -bottom;
     }
-    fn->stack_size = align_to(bottom, 4) - SAVED_REGS;
+    fn->stack_size = align_to(bottom, 4) - save_bytes;
 }
 
-/* Кадр: [ebp] — старый ebp, ниже ebx, esi, edi (их по соглашению i386 бережёт
- * вызываемая функция, а код ниже ими пользуется), ещё ниже — локальные переменные.
- * В -fPIC между ними и локальными лежит копия ebx, указывающего на GOT. */
+/* Кадр: [ebp] — старый ebp, ниже — те из ebx, esi, edi, которые функция портит.
+ * В -fPIC следом лежит копия ebx, указывающего на GOT, ещё ниже — локальные переменные. */
 static void gen_function(Obj *fn) {
+    int nsave;
     cur_fn = fn;
     fn_got = opt_pic && needs_got(fn->body);
     if (fn_got) need_thunk = true;
+    save_mask = 0;
+    scan_clobber(fn->body);
+    if (fn_got) note_reg(1);                                    /* pic_setup пишет в ebx */
+    nsave = (save_mask & 1 ? 1 : 0) + (save_mask & 2 ? 1 : 0) + (save_mask & 4 ? 1 : 0);
+    save_bytes = nsave * 4;
+    got_slot = -(save_bytes + 4);
     assign_offsets(fn);
     fn->section = 1;
     fn->addr = text.len;
     ret_label = new_label();
-    E("55 89 E5 53 56 57");                                     /* push ebp; mov ebp, esp; push ebx, esi, edi */
-    if (fn->stack_size) { E("81 EC"); imm32(fn->stack_size); }
+    E("55 89 E5");                                              /* push ebp; mov ebp, esp */
+    if (save_mask & 1) E("53");                                 /* push ebx */
+    if (save_mask & 2) E("56");                                 /* push esi */
+    if (save_mask & 4) E("57");                                 /* push edi */
+    if (fn->stack_size) sub_esp(fn->stack_size);
     if (fn_got) pic_setup();
     depth = 0;
     gen_stmt(fn->body);
     if (!strcmp(fn->name, "main")) mov_eax_imm(0);              /* main без return вернёт 0 */
     label_here(ret_label);
-    E("8D 65 F4 5F 5E 5B 5D");                                  /* lea esp, [ebp-12]; pop edi, esi, ebx, ebp */
+    if (save_bytes) { E("8D 65"); buf_byte(&text, -save_bytes); } /* lea esp, [ebp-saved] */
+    else E("89 EC");                                            /* mov esp, ebp */
+    if (save_mask & 4) E("5F");                                 /* pop edi */
+    if (save_mask & 2) E("5E");                                 /* pop esi */
+    if (save_mask & 1) E("5B");                                 /* pop ebx */
+    E("5D");                                                    /* pop ebp */
     Type *rt = fn->ty->return_ty;
     if (rt->kind == TY_STRUCT || rt->kind == TY_UNION) E("C2 04 00");   /* ret 4 */
     else E("C3");
