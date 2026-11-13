@@ -2933,6 +2933,24 @@ unsigned __popcountdi2(unsigned long long x) {
     return n;
 }
 
+/* gcc -m32 для __builtin_ctzll зовёт это имя: bsf умеет только 32 бита.
+ * Считаем по половинам, иначе -Oz узнает цикл и вызовет __ctzdi2 из него же. */
+unsigned __ctzdi2(unsigned long long x) {
+    di_parts v;
+    unsigned n, w;
+    v.u = x;
+    if (!v.p.lo) {
+        if (!v.p.hi) return 64;
+        w = v.p.hi;
+        n = 32;
+    } else {
+        w = v.p.lo;
+        n = 0;
+    }
+    while ((w & 1u) == 0) { n++; w >>= 1; }
+    return n;
+}
+
 static char *empty_environ[] = { NULL };
 char **environ = empty_environ;
 

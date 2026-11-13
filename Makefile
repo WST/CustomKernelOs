@@ -29,9 +29,13 @@ include $(ENV_CONFIG_MK)
 fsize   = $$(wc -c < $(1) | tr -d ' ')
 padto   = dd if=/dev/null of=$(1) bs=1 seek=$(2) 2>/dev/null
 
+# Код gcc хоста целиком копируется в ОЗУ. -Oz жмёт текст сильнее -O2.
+# На i386 кадр через ebp остаётся даже при -Os, поэтому убираем его явно.
+# Таблицы раскрутки freestanding-программе не нужны, а лежат в загружаемом файле.
+SIZE_FLAGS := -Oz -fomit-frame-pointer -fno-unwind-tables -fno-asynchronous-unwind-tables
 CFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
            -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx -mno-80387 \
-           -O2 -Wall -Wextra -std=gnu11
+           $(SIZE_FLAGS) -Wall -Wextra -std=gnu11
 LDFLAGS := -m elf_i386 -T linker.ld -nostdlib \
            $(shell $(LD) --help 2>/dev/null | grep -q no-warn-rwx && echo --no-warn-rwx-segments)
 
@@ -164,7 +168,7 @@ $(BUILD)/os.img: $(BUILD)/boot.bin $(BUILD)/kernel.bin
 # программам FPU можно (ядро сохраняет его регистры при переключении), SSE — нет
 UCFLAGS  := -m32 -ffreestanding -fno-pie -fno-pic -fno-stack-protector \
             -fno-builtin -nostdlib -nostdinc -mno-sse -mno-mmx \
-            -O2 -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
+            $(SIZE_FLAGS) -Wall -std=gnu11 -Iuser/include -Iuser/lib -ffunction-sections -fdata-sections
 # --gc-sections и библиотека-архив: в программу попадает только то, что она зовёт
 ULDFLAGS := -m elf_i386 -T user/user.ld -nostdlib -s --gc-sections
 # ldso.c — не команда /bin, а исходник /lib/ld.so (собирается отдельно, своим cc).
@@ -301,6 +305,8 @@ $(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
 	rm -rf $(OSSL_BLD)
 	mkdir -p $(OSSL_BLD)
 	cd $(OSSL_BLD) && perl $(abspath $(OSSL_SRC))/Configure $(OSSL_FLAGS)
+	# Configure дописывает -O3 в конец CFLAGS, поэтому более ранний -Oz он затирает.
+	sed -i 's/ -O3 / $(SIZE_FLAGS) /' $(OSSL_BLD)/Makefile
 	$(MAKE) -C $(OSSL_BLD) -j$(shell nproc)
 	touch $@
 $(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
@@ -320,7 +326,7 @@ CURL_CSRC := $(filter-out %/dllmain.c,$(wildcard $(CURL_SRC)/lib/*.c) \
 	$(foreach d,curlx vauth vdns vtls vquic vssh,$(wildcard $(CURL_SRC)/lib/$(d)/*.c)))
 CURL_OBJS := $(patsubst $(CURL_SRC)/lib/%.c,$(CURL_BLD)/%.o,$(CURL_CSRC))
 CURL_CFLAGS := -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin \
-	-nostdinc -mno-sse -mno-mmx -O2 -Werror-implicit-function-declaration -Wno-system-headers \
+	-nostdinc -mno-sse -mno-mmx $(SIZE_FLAGS) -Werror-implicit-function-declaration -Wno-system-headers \
 	-D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -DHAVE_CONFIG_H -DBUILDING_LIBCURL \
 	-I$(CURL_PRESET) -I$(CURL_SRC)/include -I$(CURL_SRC)/lib -Iuser/include -Iuser/lib \
 	-isystem $(OSSL_BLD)/include -isystem $(OSSL_SRC)/include
