@@ -42,7 +42,11 @@ static void address(struct sockaddr *out,socklen_t *len,unsigned ip,unsigned por
     if(out && len){memcpy(out,&in,*len<sizeof(in)?*len:sizeof(in));*len=sizeof(in);}
 }
 int accept(int fd,struct sockaddr *out,socklen_t *len) {
-    struct myos_sockaddr a;int r=posix(raw(SYS_ACCEPT,fd,(int)&a,0));if(r>=0) address(out,len,a.ip,a.port);return r;
+    /* SYS_ACCEPT returns the kernel ABI pair, not a POSIX sockaddr. */
+    struct { unsigned ip, port; } a;
+    int r=posix(raw(SYS_ACCEPT,fd,(int)&a,0));
+    if(r>=0) address(out,len,a.ip,a.port);
+    return r;
 }
 int getsockname(int fd,struct sockaddr *out,socklen_t *len) {unsigned a[4];if(ctl(5,fd,a)<0)return -1;address(out,len,a[0],a[1]);return 0;}
 int getpeername(int fd,struct sockaddr *out,socklen_t *len) {unsigned a[4];if(ctl(5,fd,a)<0)return -1;address(out,len,a[2],a[3]);return 0;}

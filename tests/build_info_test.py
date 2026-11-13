@@ -1,5 +1,7 @@
 """Check clean/dirty identity, archive fallback and reproducible timestamps."""
 import os
+import runpy
+from unittest.mock import patch
 from pathlib import Path
 import subprocess
 import sys
@@ -31,4 +33,21 @@ with tempfile.TemporaryDirectory() as tmp:
     assert '"'+commit+'"' in generate()
     (root/'new-source.c').write_text('/* untracked */')
     assert commit+'-dirty' in generate()
+    # A slow status must not block the build or falsely label it clean.
+    def slow_status(command, **kwargs):
+        assert kwargs['timeout'] == 3
+        assert '--no-optional-locks' in command
+        if 'rev-parse' in command:
+            return commit + '\n'
+        raise subprocess.TimeoutExpired(command, kwargs['timeout'])
+    old_cwd=Path.cwd()
+    try:
+        os.chdir(root)
+        with patch.dict(os.environ,env,clear=True), \
+             patch.object(sys,'argv',[str(script),'identity.h']), \
+             patch('subprocess.check_output',side_effect=slow_status):
+            runpy.run_path(str(script),run_name='__main__')
+        assert commit+'-state-unknown' in (root/'identity.h').read_text()
+    finally:
+        os.chdir(old_cwd)
 print('Build metadata: PASS')

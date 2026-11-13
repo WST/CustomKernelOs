@@ -6,16 +6,26 @@ from pathlib import Path
 import subprocess
 import sys
 
+GIT_TIMEOUT = 3
+
 def git(*args):
     try:
-        return subprocess.check_output(['git', *args], stderr=subprocess.DEVNULL, text=True).strip()
+        return subprocess.check_output(
+            ['git', '--no-optional-locks', *args], stderr=subprocess.DEVNULL,
+            text=True, timeout=GIT_TIMEOUT).strip()
+    except subprocess.TimeoutExpired:
+        print('build_info: git ' + args[0] + ' timed out; continuing without complete Git metadata', file=sys.stderr)
+        return None
     except (OSError, subprocess.CalledProcessError):
-        return ''
+        return None
 
 commit = os.environ.get('MYOS_BUILD_COMMIT') or git('rev-parse', 'HEAD') or 'unknown'
-state = git('status', '--porcelain', '--untracked-files=normal')
-if commit != 'unknown' and state:
-    commit += '-dirty'
+if commit != 'unknown':
+    state = git('status', '--porcelain', '--untracked-files=normal')
+    if state is None:
+        commit += '-state-unknown'
+    elif state:
+        commit += '-dirty'
 epoch = os.environ.get('SOURCE_DATE_EPOCH')
 now = datetime.datetime.fromtimestamp(int(epoch), datetime.timezone.utc) if epoch else datetime.datetime.now(datetime.timezone.utc)
 values = {'MYOS_VERSION': Path('VERSION').read_text().strip(),
