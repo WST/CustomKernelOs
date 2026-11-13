@@ -1,6 +1,0 @@
-# OpenBSD usr.bin/head/head.c, ревизия d9b0e4ff (head.c 1.24). Файл совпадает с копией в репозитории.
-name head
-descr OpenBSD head
-workdir /tmp/ext/head
-fetch https://raw.githubusercontent.com/openbsd/src/d9b0e4ff016f71f5867f6873471a9231e335a9eb/usr.bin/head/head.c head.c
-cc -o /ext/bin/head head.c

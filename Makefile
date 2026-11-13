@@ -587,6 +587,12 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc.inst || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head.inst || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/grep.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head/setup.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head/uninstall.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc/setup.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc/uninstall.inst || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/head || exit 1
+	@$(BUILD)/myfs $(DISK) rm /ext/instructions/wc || exit 1
 	@$(BUILD)/myfs $(DISK) rm /ext/instructions/lua.inst || exit 1
 	@for d in ext/instructions/*; do \
 	  test -d $$d || continue; \
