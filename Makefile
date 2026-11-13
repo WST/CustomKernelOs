@@ -310,56 +310,28 @@ $(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libssl.so -Wl,--hash-style=sysv -Wl,-z,defs \
 		-o $@ -Wl,--whole-archive $(OSSL_BLD)/libssl.a -Wl,--no-whole-archive -L$(BUILD)/user -lcrypto -lc
 
-# curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста.
-# Объекты с R_386_GOT32X, поэтому cc их не линкует. .so собираем сами.
+# curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста
+# по зафиксированному curl_config.h, без configure. Объекты с R_386_GOT32X,
+# поэтому cc их не линкует. .so собираем сами.
 CURL_SRC := user/lib/curl
 CURL_BLD := $(BUILD)/curl
-CURL_DEPS := $(BUILD)/curl-deps
-# CCROOT ниже по файлу, поэтому путь пишем через BUILD. Архивы — order-only:
-# на чистой сборке они должны появиться раньше configure, но правка libc
-# не должна заново конфигурировать весь curl.
-$(CURL_BLD)/.built: $(CURL_SRC)/configure $(OSSL_BLD)/.built | $(BUILD)/ccroot/lib/libc.a $(BUILD)/ccroot/lib/libz.a
-	rm -rf $(CURL_BLD) $(CURL_DEPS)
-	mkdir -p $(CURL_DEPS)/include/openssl $(CURL_DEPS)/lib $(CURL_BLD)
-	cp $(OSSL_SRC)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
-	cp $(OSSL_BLD)/include/openssl/*.h $(CURL_DEPS)/include/openssl/
-	ln -s $(abspath $(OSSL_BLD))/libssl.a $(CURL_DEPS)/lib/libssl.a
-	ln -s $(abspath $(OSSL_BLD))/libcrypto.a $(CURL_DEPS)/lib/libcrypto.a
-	ln -s $(abspath user/include/zlib.h) $(CURL_DEPS)/include/zlib.h
-	ln -s $(abspath $(CCROOT)/lib/libz.a) $(CURL_DEPS)/lib/libz.a
-	echo 'void exit(int); int main(void); void _start(void) { exit(main()); }' > $(BUILD)/curl-crt.c
-	$(CC) -m32 -c -nostdinc -Iuser/include -o $(BUILD)/curl-crt.o $(BUILD)/curl-crt.c
-	printf '%s\n' '#!/bin/bash' \
-	  'root=$(abspath .)' \
-	  'link=1' 'args=()' \
-	  'for a in "$$@"; do' \
-	  '  case "$$a" in -c|-E|-S|-M) link=0 ;; -lc|-lpthread|-ldl|-lrt|-lm|-lresolv) continue ;; esac' \
-	  '  args+=("$$a")' \
-	  'done' \
-	  'for a in "$${args[@]}"; do' \
-	  '  if [[ $$a == -lz ]]; then args+=(-Wl,--defsym=gzread=0); break; fi' \
-	  'done' \
-	  'base=(gcc -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin -nostdinc -mno-sse -mno-mmx -D_POSIX_C_SOURCE=200809L -I"$$root/user/include" -I"$$root/user/lib")' \
-	  'if [[ $$link -eq 1 ]]; then exec "$${base[@]}" "$${args[@]}" -nostdlib "$$root/build/curl-crt.o" "$$root/build/ccroot/lib/libc.a"; fi' \
-	  'exec "$${base[@]}" "$${args[@]}"' > $(BUILD)/curl-cc
-	chmod +x $(BUILD)/curl-cc
-	cd $(CURL_BLD) && PKG_CONFIG=/bin/false $(abspath $(CURL_SRC))/configure --host=i686-pc-linux-gnu \
-	  CC=$(abspath $(BUILD)/curl-cc) --disable-shared --enable-static \
-	  --disable-ftp --disable-file --disable-ipfs --disable-ldap --disable-ldaps \
-	  --disable-rtsp --disable-dict --disable-telnet --disable-tftp --disable-pop3 \
-	  --disable-imap --disable-smtp --disable-gopher --disable-mqtt \
-	  --disable-manual --disable-docs --disable-ipv6 --disable-threaded-resolver \
-	  --disable-unix-sockets --disable-alt-svc --disable-hsts --disable-ares \
-	  --without-libpsl --without-brotli --without-zstd --without-nghttp2 \
-	  --without-libidn2 --without-nghttp3 --without-ngtcp2 --without-quiche \
-	  --without-libssh2 --without-libssh --without-gnutls --without-mbedtls \
-	  --without-wolfssl --without-rustls \
-	  --with-openssl=$(abspath $(CURL_DEPS)) --with-zlib=$(abspath $(CURL_DEPS))
-	$(MAKE) -C $(CURL_BLD)/lib -j$(shell nproc)
-	touch $@
-$(BUILD)/user/libcurl.so: $(CURL_BLD)/.built $(BUILD)/user/libssl.so $(BUILD)/user/libz.so $(BUILD)/user/libc.so
+CURL_PRESET := user/lib/curl-preset
+CURL_CSRC := $(filter-out %/dllmain.c,$(wildcard $(CURL_SRC)/lib/*.c) \
+	$(foreach d,curlx vauth vdns vtls vquic vssh,$(wildcard $(CURL_SRC)/lib/$(d)/*.c)))
+CURL_OBJS := $(patsubst $(CURL_SRC)/lib/%.c,$(CURL_BLD)/%.o,$(CURL_CSRC))
+CURL_CFLAGS := -m32 -std=gnu11 -fPIC -ffreestanding -fno-stack-protector -fno-builtin \
+	-nostdinc -mno-sse -mno-mmx -O2 -Werror-implicit-function-declaration -Wno-system-headers \
+	-D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L -DHAVE_CONFIG_H -DBUILDING_LIBCURL \
+	-I$(CURL_PRESET) -I$(CURL_SRC)/include -I$(CURL_SRC)/lib -Iuser/include -Iuser/lib \
+	-isystem $(OSSL_BLD)/include -isystem $(OSSL_SRC)/include
+$(CURL_BLD)/%.o: $(CURL_SRC)/lib/%.c $(CURL_PRESET)/curl_config.h $(OSSL_BLD)/.built
+	@mkdir -p $(dir $@)
+	$(CC) $(CURL_CFLAGS) -c $< -o $@
+$(CURL_BLD)/libcurl.a: $(CURL_OBJS)
+	rm -f $@ && $(AR) rcs $@ $(CURL_OBJS)
+$(BUILD)/user/libcurl.so: $(CURL_BLD)/libcurl.a $(BUILD)/user/libssl.so $(BUILD)/user/libz.so $(BUILD)/user/libc.so
 	$(CC) -m32 -shared -nostdlib -Wl,-soname,libcurl.so -Wl,--hash-style=sysv -Wl,-z,defs \
-		-o $@ -Wl,--whole-archive $(CURL_BLD)/lib/.libs/libcurl.a -Wl,--no-whole-archive \
+		-o $@ -Wl,--whole-archive $(CURL_BLD)/libcurl.a -Wl,--no-whole-archive \
 		-L$(BUILD)/user -lssl -lcrypto -lz -lc
 
 $(BUILD)/user/gzip: $(BUILD)/user/gzip.o $(BUILD)/user/zlib.o $(BUILD)/user/crt0.o $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so
@@ -884,7 +856,7 @@ ossltest: $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(CCROOT)/lib/libc.
 curltest: $(BUILD)/user/libcurl.so $(CCROOT)/lib/libc.a $(CCROOT)/lib/libz.a
 	@$(CC) -m32 -nostdlib -nostdinc -no-pie -ffreestanding -fno-stack-protector -fno-builtin -mno-sse -mno-mmx -std=gnu11 \
 		-D_POSIX_C_SOURCE=200809L -I$(CURL_SRC)/include -Iuser/include -Iuser/lib \
-		tests/curlget.c $(CURL_BLD)/lib/.libs/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
+		tests/curlget.c $(CURL_BLD)/libcurl.a $(OSSL_BLD)/libssl.a $(OSSL_BLD)/libcrypto.a \
 		$(CCROOT)/lib/libz.a $(CCROOT)/lib/libc.a -o $(BUILD)/curlget-test
 	@python3 tests/curl_test.py $(BUILD)/curlget-test
 	@readelf -d $(BUILD)/user/libcurl.so | grep -q libcurl.so
