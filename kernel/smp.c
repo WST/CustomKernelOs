@@ -3,6 +3,7 @@
  * No kernel code outside the entry/exit/idle paths executes without the BKL.
  */
 #include "smp.h"
+#include "acpi_smp.h"
 #include "task.h"
 #include "gdt.h"
 #include "idt.h"
@@ -157,45 +158,44 @@ static u32 scan_rsdp(u32 start,u32 end) {
         if(!memcmp((void *)a,"RSD PTR ",8) && checksum((void *)a,20)) return a;
     return 0;
 }
-static bool table_ok(u32 a) {
-    if(a<0x1000 || a>paging_identity_limit()-36) return false;
-    u32 len=*(u32 *)(a+4);
-    return len>=36 && len<=0x100000 && len<=paging_identity_limit()-a && checksum((void *)a,len);
+/* Firmware tables commonly sit near the top of RAM, above our 1 GiB
+ * allocator/identity mapping. Map only bounded table pages in two private
+ * supervisor windows; never treat their physical addresses as user VAs. */
+#define ACPI_WINDOW 0xe5000000u
+#define ACPI_WINDOW_STRIDE 0x200000u
+struct acpi_windows { unsigned pages[2]; };
+static const void *acpi_map(u32 physical,u32 length,unsigned slot,void *context) {
+    if(slot>1 || !length || length>ACPI_SMP_TABLE_MAX || length-1>0xffffffffu-physical) return NULL;
+    if(physical>=0x1000 && physical<paging_identity_limit() && length<=paging_identity_limit()-physical)
+        return (const void *)physical;
+    struct acpi_windows *windows=context;
+    unsigned offset=physical&4095, pages=(offset+length+4095)/4096;
+    u32 virtual=ACPI_WINDOW+slot*ACPI_WINDOW_STRIDE,base=physical&~4095u;
+    for(unsigned i=0;i<pages;i++) {
+        if(vmm_map(virtual+i*4096,base+i*4096,0)) return NULL;
+        if(windows->pages[slot]<i+1) windows->pages[slot]=i+1;
+    }
+    return (const void *)(virtual+offset);
 }
 static u32 discover(u8 ids[SMP_MAX_CPUS],u32 *address) {
     u32 rsdp=scan_rsdp(0xe0000,0x100000);
-    if(!rsdp) {
-        u32 base=ebda_base;
-        if(base>=0x80000 && base<0xa0000) rsdp=scan_rsdp(base,base+1024);
+    if(!rsdp && ebda_base>=0x80000 && ebda_base<0xa0000)
+        rsdp=scan_rsdp(ebda_base,ebda_base+1024);
+    if(!rsdp) { kprintf("SMP: ACPI RSDP not found (EBDA=%x)\n",ebda_base); return 1; }
+    struct acpi_windows windows={{0,0}};
+    struct acpi_smp_info info;
+    enum acpi_smp_error error=acpi_smp_discover(rsdp,apic_id(),acpi_map,&windows,&info);
+    for(unsigned slot=0;slot<2;slot++) for(unsigned i=0;i<windows.pages[slot];i++)
+        vmm_unmap(ACPI_WINDOW+slot*ACPI_WINDOW_STRIDE+i*4096);
+    if(error!=ACPI_SMP_OK) {
+        kprintf("SMP: ACPI discovery failed: %s (RSDP=%x)\n",acpi_smp_error_string(error),rsdp);
+        return 1;
     }
-    if(!rsdp) return 1;
-    u32 root=*(u32 *)(rsdp+16);
-    if(!table_ok(root) || memcmp((void *)root,"RSDT",4)) return 1;
-    u32 count=1; ids[0]=apic_id();
-    for(u32 off=36;off+4<=*(u32 *)(root+4);off+=4) {
-        u32 a=*(u32 *)(root+off);
-        if(!table_ok(a) || memcmp((void *)a,"APIC",4)) continue;
-        u32 len=*(u32 *)(a+4);
-        if(len<44) continue;
-        *address=*(u32 *)(a+36);
-        for(u32 p=a+44;p+2<=a+len;) {
-            u8 *e=(u8 *)p;
-            if(e[1]<2 || e[1]>a+len-p) return 1;
-            if(e[0]==0 && e[1]>=8 && (*(u32 *)(e+4)&1) && e[3]!=ids[0]) {
-                bool duplicate=false;
-                for(u32 j=1;j<count;j++) if(ids[j]==e[3]) duplicate=true;
-                if(!duplicate && count<SMP_MAX_CPUS) ids[count++]=e[3];
-            }
-            /* LAPIC address override: this 32-bit kernel needs an address below 4G. */
-            if(e[0]==5 && e[1]>=12) {
-                if(*(u32 *)(e+8)) return 1;
-                *address=*(u32 *)(e+4);
-            }
-            p+=e[1];
-        }
-        return count;
-    }
-    return 1;
+    *address=info.lapic; memcpy(ids,info.ids,sizeof(info.ids));
+    kprintf("SMP: ACPI %s=%x MADT=%x LAPIC=%x, %u enabled CPUs, %u selected\n",
+            info.xsdt?"XSDT":"RSDT",info.root,info.madt,info.lapic,info.reported,info.count);
+    if(info.unaddressable) kprintf("SMP: %u CPU entries require unsupported APIC IDs\n",info.unaddressable);
+    return info.count;
 }
 static void delay(u32 ticks) {
     u32 start=timer_ticks();

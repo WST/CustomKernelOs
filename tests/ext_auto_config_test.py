@@ -3,6 +3,20 @@ import os,pathlib,subprocess,sys,tempfile,unittest
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'tools'))
 import configure_ext_auto as auto
 class AutoConfigTest(unittest.TestCase):
+    def test_build_jobs(self):
+        self.assertEqual(auto.build_jobs('auto'),'auto')
+        self.assertEqual(auto.build_jobs('04'),'4')
+        for value in ('0','17','-1','','4;echo','999999999999999999999999'):
+            with self.assertRaises(ValueError):auto.build_jobs(value)
+        with tempfile.TemporaryDirectory(prefix='myos-ext-jobs-') as folder:
+            disk=pathlib.Path(folder)/'disk.img'
+            with disk.open('wb') as f:f.truncate(8*1048576)
+            def fs(*args):return subprocess.check_output(['build/myfs',str(disk),*args],text=True)
+            auto.seed_build_jobs(disk,'4')
+            self.assertEqual(fs('cat','/etc/ext/build-jobs'),'4\n')
+            auto.seed_build_jobs(disk,'auto')
+            self.assertEqual(fs('cat','/etc/ext/build-jobs'),'4\n')
+
     def test_names(self):
         self.assertEqual(auto.packages(' openssh lua openssh '),['openssh','lua'])
         self.assertEqual(auto.packages(''),[])

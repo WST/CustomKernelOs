@@ -62,37 +62,5 @@ fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/ltablib.c ltablib.c
 fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lutf8lib.c lutf8lib.c
 fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/linit.c linit.c
 fetch https://raw.githubusercontent.com/lua/lua/v5.4.8/lua.c lua.c
-cc -c -DLUA_USE_C89 lapi.c
-cc -c -DLUA_USE_C89 lcode.c
-cc -c -DLUA_USE_C89 lctype.c
-cc -c -DLUA_USE_C89 ldebug.c
-cc -c -DLUA_USE_C89 ldo.c
-cc -c -DLUA_USE_C89 ldump.c
-cc -c -DLUA_USE_C89 lfunc.c
-cc -c -DLUA_USE_C89 lgc.c
-cc -c -DLUA_USE_C89 llex.c
-cc -c -DLUA_USE_C89 lmem.c
-cc -c -DLUA_USE_C89 lobject.c
-cc -c -DLUA_USE_C89 lopcodes.c
-cc -c -DLUA_USE_C89 lparser.c
-cc -c -DLUA_USE_C89 lstate.c
-cc -c -DLUA_USE_C89 lstring.c
-cc -c -DLUA_USE_C89 ltable.c
-cc -c -DLUA_USE_C89 ltm.c
-cc -c -DLUA_USE_C89 lundump.c
-cc -c -DLUA_USE_C89 lvm.c
-cc -c -DLUA_USE_C89 lzio.c
-cc -c -DLUA_USE_C89 lauxlib.c
-cc -c -DLUA_USE_C89 lbaselib.c
-cc -c -DLUA_USE_C89 lcorolib.c
-cc -c -DLUA_USE_C89 ldblib.c
-cc -c -DLUA_USE_C89 liolib.c
-cc -c -DLUA_USE_C89 lmathlib.c
-cc -c -DLUA_USE_C89 loadlib.c
-cc -c -DLUA_USE_C89 loslib.c
-cc -c -DLUA_USE_C89 lstrlib.c
-cc -c -DLUA_USE_C89 ltablib.c
-cc -c -DLUA_USE_C89 lutf8lib.c
-cc -c -DLUA_USE_C89 linit.c
-cc -c -DLUA_USE_C89 lua.c
-cc -o /ext/bin/lua lapi.o lcode.o lctype.o ldebug.o ldo.o ldump.o lfunc.o lgc.o llex.o lmem.o lobject.o lopcodes.o lparser.o lstate.o lstring.o ltable.o ltm.o lundump.o lvm.o lzio.o lauxlib.o lbaselib.o lcorolib.o ldblib.o liolib.o lmathlib.o loadlib.o loslib.o lstrlib.o ltablib.o lutf8lib.o linit.o lua.o
+copy Makefile Makefile
+make

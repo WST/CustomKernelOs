@@ -442,13 +442,13 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
+CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
 	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
@@ -603,7 +603,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in myos.h hwinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in myos.h build_jobs.h hwinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
@@ -907,6 +907,9 @@ tartest: $(BUILD)/cc-host $(CCROOT_READY)
 maketest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/make.c -o $(BUILD)/make-linux
 	@sh tests/make.sh $(BUILD)/make-linux
+	@python3 tests/make_parallel.py $(BUILD)/make-linux
+	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/build_jobs_test.c -o $(BUILD)/build-jobs-test
+	@./$(BUILD)/build-jobs-test
 
 cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
@@ -1316,3 +1319,18 @@ hardwaretest: $(BUILD)/os.img $(HWBUILD)/kernel.bin $(BUILD)/hwinfo-check $(BUIL
 	$(HOSTCC) -m32 -std=gnu17 -O1 -fno-builtin -ffunction-sections -fdata-sections tests/ahci_inventory_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/ahci-inventory-test
 	./$(BUILD)/ahci-inventory-test
 	python3 tests/hardware_inventory_smoke.py
+
+.PHONY: smpacpitest
+smpacpitest: | $(BUILD)
+	$(HOSTCC) -std=gnu17 -O1 -g -DHOST_TEST -fno-builtin -fsanitize=address,undefined tests/smp_acpi_test.c kernel/acpi_smp.c kernel/string.c -o $(BUILD)/smp-acpi-test
+	ASAN_OPTIONS=detect_leaks=0 UBSAN_OPTIONS=halt_on_error=1 ./$(BUILD)/smp-acpi-test
+
+$(BUILD)/user/make.o $(BUILD)/user/ext.o: user/lib/build_jobs.h
+
+$(BUILD)/make-job-probe.o: tests/make_job_probe.c user/lib/myos.h | $(BUILD)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/make-job-probe: $(BUILD)/make-job-probe.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: parallel-buildtest
+parallel-buildtest: $(BUILD)/os.img $(BUILD)/make-job-probe $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/sh $(BUILD)/user/make $(BUILD)/user/ext $(BUILD)/user/cc $(BUILD)/user/tar $(BUILD)/user/cp $(BUILD)/user/ar $(BUILD)/user/echo $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/mlib/libc.a $(BUILD)/mlib/libm.a $(BUILD)/mlib/libgfx.a
+	python3 tests/parallel_build_smoke.py

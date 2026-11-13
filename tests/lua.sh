@@ -9,11 +9,11 @@ if [ -z "$CC" ] || [ -z "$ROOT" ]; then
 fi
 
 inst=ext/instructions/lua/setup.inst
-link=$(grep '^cc -o /ext/bin/lua ' "$inst")
+link=$(grep -F '$(CC) -o /ext/bin/lua ' ext/instructions/lua/Makefile)
 words=$(printf '%s\n' "$link" | wc -w)
 bytes=$(printf '%s' "$link" | wc -c)
 if [ "$words" -ge 64 ] || [ "$bytes" -ge 1024 ]; then
-    echo "lua setup.inst link line is too long: $words words, $bytes bytes" >&2
+    echo "lua Makefile link line is too long: $words words, $bytes bytes" >&2
     exit 1
 fi
 

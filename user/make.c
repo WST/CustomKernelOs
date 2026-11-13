@@ -4,7 +4,8 @@
  * $(NAME) и ${NAME}, правила «цель: зависимости», шаблон с одним «%»,
  * рецепты со строки, начинающейся с таба. $@ $< $^ $* подставляются в рецепт,
  * @ в начале прячет строку, - игнорирует код возврата. .PHONY пересобирается
- * всегда. Рецепт запускается через sh -c.
+ * всегда. Рецепт запускается через sh -c. -jN запускает независимые цели
+ * параллельно; строки рецепта одной цели выполняются последовательно.
  *
  * Времени изменения у файлов нет. Цель устарела, если её файла нет, она
  * .PHONY, или в этом же запуске пересобралась зависимость. Правка исходника
@@ -14,6 +15,7 @@
 #include "stdio.h"
 #include "stdlib.h"
 #include "string.h"
+#include "build_jobs.h"
 
 #define MAX_VARS  48
 #define MAX_RULES 64
@@ -23,6 +25,7 @@
 #define MAX_STACK 16
 #define MAX_PHONY 32
 #define MAX_BATCH 8
+#define MAX_JOBS BUILD_JOBS_MAX
 #define NAME      80
 #define VAL       1024
 #define LINE      2048
@@ -48,12 +51,15 @@ static int nvars;
 static struct rule rules[MAX_RULES];
 static int nrules;
 static char default_goal[NAME];
-static char done_name[MAX_NODE][NAME];
-static int ndone;
-static char built_name[MAX_NODE][NAME];
-static int nbuilt;
-static char stack_name[MAX_STACK][NAME];
-static int nstack;
+enum node_state { NODE_NEW, NODE_PLANNED, NODE_RUNNING, NODE_DONE };
+struct build_node {
+    char name[NAME], stem[NAME];
+    unsigned short deps[MAX_PRE];
+    int ndep, phony, built, state, pid;
+    struct rule *recipe;
+};
+static struct build_node nodes[MAX_NODE];
+static int nnodes, jobs=1;
 static char phony_name[MAX_PHONY][NAME];
 static int nphony;
 static struct rule *batch[MAX_BATCH];
@@ -434,37 +440,6 @@ static int load_file(const char *path) {
     return 0;
 }
 
-static int on_stack(const char *name) {
-    int i;
-    for (i = 0; i < nstack; i++)
-        if (!strcmp(stack_name[i], name)) return 1;
-    return 0;
-}
-
-static int is_done(const char *name) {
-    int i;
-    for (i = 0; i < ndone; i++)
-        if (!strcmp(done_name[i], name)) return 1;
-    return 0;
-}
-
-static int was_built(const char *name) {
-    int i;
-    for (i = 0; i < nbuilt; i++)
-        if (!strcmp(built_name[i], name)) return 1;
-    return 0;
-}
-
-static int remember(char list[][NAME], int *n, int max, const char *name) {
-    if (*n >= max) {
-        fprintf(stderr, "make: too many targets\n");
-        return -1;
-    }
-    if (copy_str(list[*n], NAME, name) < 0) return -1;
-    (*n)++;
-    return 0;
-}
-
 static int subst_stem(const char *pat, const char *stem, char *out, int max) {
     int o = 0;
     while (*pat) {
@@ -564,80 +539,125 @@ static int run_recipes(struct rule *r, const char *target, const char *stem,
     return 0;
 }
 
-static int visit(const char *name) {
-    struct rule *ex, *rec_src, *pat;
-    char stem[NAME];
-    char pres[MAX_PRE][NAME];
-    int npre = 0, phony, dep_new = 0, i, need;
-    if (is_done(name)) return was_built(name);
-    if (on_stack(name)) {
-        fprintf(stderr, "make: circular dependency: %s\n", name);
-        return -1;
+/* Plan the entire graph before executing anything. Shared prerequisites have
+ * one node; a parent becomes runnable only after every dependency completes. */
+static int plan(const char *name,int depth) {
+    for(int i=0;i<nnodes;i++) if(!strcmp(nodes[i].name,name)) {
+        if(nodes[i].state==NODE_NEW) {
+            fprintf(stderr,"make: circular dependency: %s\n",name); return -1;
+        }
+        return i;
     }
-    if (nstack >= MAX_STACK) {
-        fprintf(stderr, "make: dependency stack overflow\n");
-        return -1;
+    if(depth>=MAX_STACK || nnodes>=MAX_NODE) {
+        fprintf(stderr,"make: dependency graph limit exceeded\n"); return -1;
     }
-    if (copy_str(stack_name[nstack], NAME, name) < 0) return -1;
-    nstack++;
-    stem[0] = 0;
-    ex = find_explicit(name);
-    rec_src = ex;
-    phony = listed_phony(name) || (ex && ex->phony);
-    if (ex) {
-        for (i = 0; i < ex->npre; i++)
-            if (copy_str(pres[npre], NAME, ex->pre[i]) < 0) { nstack--; return -1; }
-            else npre++;
+    int index=nnodes++; struct build_node *node=&nodes[index];
+    if(copy_str(node->name,NAME,name)<0) return -1;
+    struct rule *ex=find_explicit(name),*source=ex,*pat;
+    char pres[MAX_PRE][NAME]; int npre=0;
+    node->phony=listed_phony(name)||(ex && ex->phony);
+    if(ex) for(int i=0;i<ex->npre;i++) {
+        if(copy_str(pres[npre++],NAME,ex->pre[i])<0) return -1;
     }
-    if (!ex || ex->nrec == 0) {
-        pat = find_pattern(name, stem);
-        if (pat) {
-            for (i = 0; i < pat->npre; i++) {
+    if(!ex || !ex->nrec) {
+        pat=find_pattern(name,node->stem);
+        if(pat) {
+            for(int i=0;i<pat->npre;i++) {
                 char dep[NAME];
-                if (subst_stem(pat->pre[i], stem, dep, NAME) < 0) { nstack--; return -1; }
-                if (npre >= MAX_PRE) {
-                    fprintf(stderr, "make: too many prerequisites\n");
-                    nstack--;
-                    return -1;
-                }
-                if (copy_str(pres[npre], NAME, dep) == 0) {
-                    int k, seen = 0;
-                    for (k = 0; k < npre; k++)
-                        if (!strcmp(pres[k], dep)) seen = 1;
-                    if (!seen) npre++;
+                if(subst_stem(pat->pre[i],node->stem,dep,NAME)<0) return -1;
+                int seen=0;
+                for(int j=0;j<npre;j++) if(!strcmp(pres[j],dep)) seen=1;
+                if(!seen) {
+                    if(npre>=MAX_PRE) { fprintf(stderr,"make: too many prerequisites\n"); return -1; }
+                    if(copy_str(pres[npre++],NAME,dep)<0) return -1;
                 }
             }
-            if (!ex || ex->nrec == 0) rec_src = pat;
-        } else if (!ex) {
-            nstack--;
-            if (exists(name)) {
-                if (remember(done_name, &ndone, MAX_NODE, name) < 0) return -1;
-                return 0;
-            }
-            fprintf(stderr, "make: *** no rule to make target '%s'\n", name);
-            return -1;
+            source=pat;
+        } else if(!ex && !node->phony) {
+            if(!exists(name)) { fprintf(stderr,"make: *** no rule to make target '%s'\n",name); return -1; }
+            node->state=NODE_DONE; return index;
         }
     }
-    for (i = 0; i < npre; i++) {
-        int r = visit(pres[i]);
-        if (r < 0) { nstack--; return -1; }
-        if (r > 0) dep_new = 1;
+    node->recipe=source;
+    for(int i=0;i<npre;i++) {
+        int dep=plan(pres[i],depth+1);
+        if(dep<0) return -1;
+        node->deps[node->ndep++]=(unsigned short)dep;
     }
-    need = phony || !exists(name) || dep_new;
-    if (!need || !rec_src || rec_src->nrec == 0) {
-        nstack--;
-        if (remember(done_name, &ndone, MAX_NODE, name) < 0) return -1;
-        return 0;
-    }
-    if (run_recipes(rec_src, name, stem, pres, npre) < 0) { nstack--; return -1; }
-    nstack--;
-    if (remember(built_name, &nbuilt, MAX_NODE, name) < 0) return -1;
-    if (remember(done_name, &ndone, MAX_NODE, name) < 0) return -1;
-    return 1;
+    node->state=NODE_PLANNED;
+    return index;
 }
-
+static int node_recipes(struct build_node *node) {
+    char pres[MAX_PRE][NAME];
+    for(int i=0;i<node->ndep;i++) strcpy(pres[i],nodes[node->deps[i]].name);
+    return run_recipes(node->recipe,node->name,node->stem,pres,node->ndep);
+}
+static int reap(int block,int *active,int *failed) {
+    int status=0,pid;
+    do { pid=waitpid(-1,&status,block?0:WNOHANG); } while(pid==-EINTR);
+    if(pid<0) { fprintf(stderr,"make: waitpid failed (%d)\n",pid); return -1; }
+    if(!pid) return 0;
+    for(int i=0;i<nnodes;i++) if(nodes[i].state==NODE_RUNNING && nodes[i].pid==pid) {
+        nodes[i].state=NODE_DONE; nodes[i].built=status==0; (*active)--;
+        if(status) *failed=1;
+        return 1;
+    }
+    fprintf(stderr,"make: unexpected child %d\n",pid); return -1;
+}
+static int execute_graph(void) {
+    int active=0,failed=0;
+    for(;;) {
+        while(active) {
+            int result=reap(0,&active,&failed);
+            if(result<0) { failed=1; break; }
+            if(!result) break;
+        }
+        if(failed) break;
+        int remaining=0,progress=0;
+        for(int i=0;i<nnodes;i++) {
+            struct build_node *node=&nodes[i];
+            if(node->state==NODE_DONE) continue;
+            remaining++;
+            if(node->state!=NODE_PLANNED || active>=jobs) continue;
+            int ready=1,changed=0;
+            for(int j=0;j<node->ndep;j++) {
+                struct build_node *dep=&nodes[node->deps[j]];
+                if(dep->state!=NODE_DONE) ready=0;
+                if(dep->built) changed=1;
+            }
+            if(!ready) continue;
+            int need=node->phony || !exists(node->name) || changed;
+            if(!need || !node->recipe || !node->recipe->nrec) {
+                node->built=need; node->state=NODE_DONE; progress=1; continue;
+            }
+            any_ran=1;
+            /* Dry runs remain deterministic and never fork a recipe. */
+            if(dry_run) {
+                if(node_recipes(node)<0) { failed=1; break; }
+                node->built=1; node->state=NODE_DONE; progress=1; continue;
+            }
+            fflush(stdout); fflush(stderr);
+            int pid=fork();
+            if(pid<0) { fprintf(stderr,"make: fork failed (%d)\n",pid); failed=1; break; }
+            if(!pid) exit(node_recipes(node)<0?1:0);
+            node->pid=pid; node->state=NODE_RUNNING; active++; progress=1;
+        }
+        if(failed || !remaining) break;
+        if(!progress) {
+            if(!active || reap(1,&active,&failed)<0) { failed=1; break; }
+        }
+    }
+    /* Stop launching dependants on failure, but reap every worker already
+     * started so recipes cannot outlive make or an ext installation marker. */
+    while(active) if(reap(1,&active,&failed)<0) break;
+    return failed?-1:0;
+}
+static int job_count(const char *value) {
+    int count=build_jobs_parse(value);
+    return count<0?0:count?count:build_jobs_auto();
+}
 static void usage(void) {
-    fprintf(stderr, "usage: make [-n] [-C dir] [-f file] [target...]\n");
+    fprintf(stderr, "usage: make [-n] [-j N|-jN|--jobs=N] [-C dir] [-f file] [target...]\n");
 }
 
 int main(int argc, char **argv) {
@@ -646,6 +666,15 @@ int main(int argc, char **argv) {
     char *goals[8];
     int ngoals = 0, i;
     for (i = 1; i < argc; i++) {
+        if(!strncmp(argv[i],"-j",2) || !strncmp(argv[i],"--jobs=",7) || !strcmp(argv[i],"--jobs")) {
+            const char *value="auto";
+            if(!strncmp(argv[i],"--jobs=",7)) value=argv[i]+7;
+            else if(argv[i][1]=='j' && argv[i][2]) value=argv[i]+2;
+            else if(i+1<argc && ((argv[i+1][0]>='0' && argv[i+1][0]<='9') || !strcmp(argv[i+1],"auto"))) value=argv[++i];
+            jobs=job_count(value);
+            if(!jobs) { fprintf(stderr,"make: jobs must be auto or 1..%d\n",MAX_JOBS); return 2; }
+            continue;
+        }
         if (!strcmp(argv[i], "-n")) { dry_run = 1; continue; }
         if (!strcmp(argv[i], "--help")) { usage(); return 0; }
         if (!strcmp(argv[i], "-f") || !strcmp(argv[i], "-C")) {
@@ -676,7 +705,8 @@ int main(int argc, char **argv) {
         goals[ngoals++] = default_goal;
     }
     for (i = 0; i < ngoals; i++)
-        if (visit(goals[i]) < 0) return 2;
+        if (plan(goals[i],0) < 0) return 2;
+    if(execute_graph()<0) return 2;
     if (!any_ran) printf("make: '%s' is up to date\n", goals[0]);
     return 0;
 }

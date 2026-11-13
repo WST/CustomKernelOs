@@ -2,7 +2,7 @@
 import argparse,hashlib,os,pathlib,re,sys,tempfile
 ROOT=pathlib.Path(__file__).resolve().parents[1]
 DEFAULTS={
-    'EXT_AUTOINSTALL_PACKAGES':'',
+    'EXT_AUTOINSTALL_PACKAGES':'','EXT_BUILD_JOBS':'auto',
     'SSH_AUTHORIZED_KEY':'','SSH_AUTHORIZED_KEY_FILE':'',
     'CROSS':'i686-elf-' if sys.platform=='darwin' else '',
     'NASM':'nasm','QEMU':'qemu-system-i386','HOSTCC':'cc',

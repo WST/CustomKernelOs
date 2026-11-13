@@ -31,10 +31,30 @@
 #include "myos.h"
 #include "stdio.h"
 #include "dirent.h"
+#include "build_jobs.h"
 
 #define INST_DIR "/ext/instructions"
 #define MAX_ARG  64
 #define MAX_PKG  64
+
+static int build_jobs_override=-1;
+static int selected_jobs(void) {
+    int jobs=build_jobs_override;
+    if(jobs<0) {
+        FILE *f=fopen("/etc/ext/build-jobs","r");
+        if(f) {
+            char value[32]; int n=0,c;
+            while((c=fgetc(f))!=EOF && n<(int)sizeof(value)-1) value[n++]=c;
+            fclose(f); value[n]=0;
+            while(n && (value[n-1]=='\n' || value[n-1]=='\r' || value[n-1]==' ' || value[n-1]=='\t')) value[--n]=0;
+            jobs=c==EOF?build_jobs_parse(value):-1;
+            if(jobs<0) { dprintf(STDERR,"ext: /etc/ext/build-jobs must contain auto or 1..%d\n",BUILD_JOBS_MAX); return -1; }
+        } else if(errno!=ENOENT) {
+            dprintf(STDERR,"ext: cannot read /etc/ext/build-jobs\n"); return -1;
+        } else jobs=0;
+    }
+    return jobs?jobs:build_jobs_auto();
+}
 
 static int split_line(char *s, char **av) {
     int n = 0;
@@ -133,6 +153,19 @@ static int cmd_tool(const char *path, int argc, char **argv) {
     return run_prog(path, argv);
 }
 
+static int cmd_make(int argc,char **argv) {
+    int explicit_jobs=0;
+    for(int i=1;i<argc;i++) if(!strncmp(argv[i],"-j",2) || !strncmp(argv[i],"--jobs",6)) explicit_jobs=1;
+    if(explicit_jobs && build_jobs_override<0) return cmd_tool("/bin/make",argc,argv);
+    int jobs=selected_jobs();
+    if(jobs<1) return 1;
+    char flag[16],*av[MAX_ARG+2];
+    snprintf(flag,sizeof(flag),"-j%d",jobs);
+    for(int i=0;i<argc;i++) av[i]=argv[i];
+    av[argc]=flag; av[argc+1]=NULL;
+    return cmd_tool("/bin/make",argc+1,av);
+}
+
 static int install_name(const char *dir, const char *name);
 static int cmd_copy(const char *pkg, int argc, char **argv);
 static int cmd_patch(const char *pkg, int argc, char **argv);
@@ -165,7 +198,7 @@ static int exec_args(const char *root, const char *pkg, int argc, char **argv) {
         if (argc < 2) { dprintf(STDERR, "ext: tar: arguments required\n"); return 1; }
         return cmd_tool("/bin/tar", argc, argv);
     }
-    if (!strcmp(argv[0], "make")) return cmd_tool("/bin/make", argc, argv);
+    if (!strcmp(argv[0], "make")) return cmd_make(argc, argv);
     if (!strcmp(argv[0], "cc")) return cmd_cc(argc, argv);
     if (!strcmp(argv[0], "copy")) return cmd_copy(pkg, argc, argv);
     if (!strcmp(argv[0], "patch")) return cmd_patch(pkg, argc, argv);
@@ -806,7 +839,7 @@ static int uninstall_name(const char *dir, const char *name) {
 #include "ext-auto.inc"
 
 static void usage(void) {
-    dprintf(STDERR, "usage: ext list | ext install <name> | ext uninstall <name>\n       ext auto add|remove NAME... | ext auto list|status|run\n");
+    dprintf(STDERR, "usage: ext list | ext install [-j N|-jN] <name> | ext uninstall <name>\n       ext auto add|remove NAME... | ext auto list|status|run\n");
 }
 
 #if defined(__LINUX_TEST__)
@@ -1044,7 +1077,23 @@ int main(int argc, char **argv) {
 #endif
     if (argc == 2 && !strcmp(argv[1], "list")) return list_dir(INST_DIR);
     if(argc>=2 && !strcmp(argv[1],"auto"))return auto_command(argc,argv);
-    if (argc == 3 && !strcmp(argv[1], "install")) return ext_lock()?1:install_name(INST_DIR, argv[2]);
+    if(argc>=3 && !strcmp(argv[1],"install")) {
+        const char *name=NULL;
+        for(int i=2;i<argc;i++) {
+            if(!strncmp(argv[i],"-j",2)) {
+                const char *value=argv[i]+2;
+                if(!*value) {
+                    value="auto";
+                    if(i+1<argc && ((argv[i+1][0]>='0' && argv[i+1][0]<='9') || !strcmp(argv[i+1],"auto"))) value=argv[++i];
+                }
+                build_jobs_override=build_jobs_parse(value);
+                if(build_jobs_override<0) { dprintf(STDERR,"ext: jobs must be auto or 1..%d\n",BUILD_JOBS_MAX); return 2; }
+            } else if(!name) name=argv[i];
+            else { usage(); return 2; }
+        }
+        if(!name) { usage(); return 2; }
+        return ext_lock()?1:install_name(INST_DIR,name);
+    }
     if (argc == 3 && !strcmp(argv[1], "uninstall")) return ext_lock()?1:uninstall_name(INST_DIR, argv[2]);
     usage();
     return 2;

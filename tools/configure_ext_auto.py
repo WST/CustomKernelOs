@@ -39,8 +39,31 @@ def seed(disk,selected):
             fs('put',str(marker),'/etc/services/enabled/ext-autoinstall.service')
     print('ext auto: selected '+(', '.join(selected) if selected else 'none (disabled)'))
 
+def build_jobs(value):
+    if value=='auto':return value
+    if not re.fullmatch(r'[0-9]+',value) or not 1<=int(value)<=16:
+        raise ValueError('EXT_BUILD_JOBS must be auto or 1..16')
+    return str(int(value))
+
+
+def seed_build_jobs(disk,value):
+    value=build_jobs(value)
+    def fs(*args,check=True):return subprocess.run(['build/myfs',str(disk),*args],check=check,capture_output=True,text=True)
+    if fs('stat','/etc/ext/build-jobs',check=False).returncode==0:
+        print('ext build: preserving existing job limit');return
+    fs('mkdir','/etc/ext')
+    with tempfile.TemporaryDirectory(prefix='myos-ext-jobs-') as directory:
+        path=pathlib.Path(directory)/'build-jobs';path.write_text(value+'\n')
+        fs('put',str(path),'/etc/ext/build-jobs')
+        fs('chown','0','0','/etc/ext/build-jobs');fs('chmod','0644','/etc/ext/build-jobs')
+    print('ext build: jobs='+value)
+
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__);parser.add_argument('--disk',required=True);args=parser.parse_args()
-    try:seed(args.disk,packages(settings()['EXT_AUTOINSTALL_PACKAGES']))
+    try:
+        config=settings();jobs=build_jobs(config['EXT_BUILD_JOBS']);selected=packages(config['EXT_AUTOINSTALL_PACKAGES'])
+        seed_build_jobs(args.disk,jobs)
+        seed(args.disk,selected)
     except (ValueError,subprocess.CalledProcessError) as error:parser.exit(2,str(error)+'\n')
 if __name__=='__main__':main()

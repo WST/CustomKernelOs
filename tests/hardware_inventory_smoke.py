@@ -53,7 +53,7 @@ def live_image(root, output, temporary):
 
 
 class VM(hardware.VM):
-    def __init__(self, name, boot, extra, cpus):
+    def __init__(self, name, boot, extra, cpus, memory="256M"):
         self.temp = tempfile.TemporaryDirectory(prefix='myos-inventory-qmp-')
         self.log = Path(self.temp.name)/'serial.log'
         self.log.write_text('')
@@ -61,7 +61,7 @@ class VM(hardware.VM):
         self.sockpath = self.temp.name+'/qmp'
         self.boot_timeout = 90
         self.err = (B/(name+'.stderr')).open('w')
-        args = ['qemu-system-i386', '-cpu', 'max', '-smp', str(cpus), '-m', '256M',
+        args = ['qemu-system-i386', '-cpu', 'max', '-smp', str(cpus), '-m', memory,
                 '-display', 'none', '-no-reboot', '-nic', 'none',
                 '-serial', 'file:'+str(self.log), '-qmp', 'unix:'+self.sockpath+',server=on,wait=off',
                 '-drive', f'format=raw,file={boot},snapshot=on,index=0', *extra]
@@ -96,55 +96,60 @@ def check(vm, mode):
     assert 'HWINFO FAIL' not in text and 'PANIC' not in text and 'EXCEPTION' not in text, text[-8000:]
 
 
-with tempfile.TemporaryDirectory(prefix='myos-inventory-') as directory:
-    temporary = Path(directory)
-    disk = temporary/'sata.img'
-    root_image(disk, 32)
-    for cpus in (1, 4):
-        vm = VM('hardware-inventory-pci-'+str(cpus), B/'os.img', [
-            '-device', 'pci-bridge,id=bridge,chassis_nr=1',
-            '-device', 'e1000,bus=bridge,addr=03.0,multifunction=on',
-            '-device', 'e1000,bus=bridge,addr=03.1',
+def main():
+    with tempfile.TemporaryDirectory(prefix='myos-inventory-') as directory:
+        temporary = Path(directory)
+        disk = temporary/'sata.img'
+        root_image(disk, 32)
+        for cpus in (1, 4):
+            vm = VM('hardware-inventory-pci-'+str(cpus), B/'os.img', [
+                '-device', 'pci-bridge,id=bridge,chassis_nr=1',
+                '-device', 'e1000,bus=bridge,addr=03.0,multifunction=on',
+                '-device', 'e1000,bus=bridge,addr=03.1',
+                '-device', 'ich9-ahci,id=ahci',
+                '-drive', f'if=none,id=rootdisk,format=raw,file={disk},snapshot=on',
+                '-device', 'ide-hd,bus=ahci.0,drive=rootdisk'], cpus)
+            try:
+                login(vm)
+                check(vm, '')
+                if cpus == 1:
+                    vm.send('lspci -v', 'Ethernet controller')
+                    vm.send('lsports', 'Physical connector labels')
+                    vm.send('lsusb', 'USB inventory unavailable')
+                    text = hardware.clean(vm.log)
+                    assert '01:03.1' in text and 'SATA ports' in text, text[-8000:]
+                print(f'PCI bridge, multifunction, SATA and ABI validation, {cpus} CPU(s): PASS', flush=True)
+            finally:
+                vm.stop()
+        root = temporary/'live-root.img'
+        root_image(root, 64)
+        sata = temporary/'live-sata.img'
+        sata.write_bytes(disk.read_bytes())
+        sata_before = hardware.digest(sata)
+        image = temporary/'live.img'
+        live_image(root, image, temporary)
+        vm = VM('hardware-inventory-usb', image, [
+            '-machine', 'pc,i8042=off', '-device', 'qemu-xhci,id=xhci',
             '-device', 'ich9-ahci,id=ahci',
-            '-drive', f'if=none,id=rootdisk,format=raw,file={disk},snapshot=on',
-            '-device', 'ide-hd,bus=ahci.0,drive=rootdisk'], cpus)
+            '-drive', f'if=none,id=livesata,format=raw,file={sata},snapshot=on',
+            '-device', 'ide-hd,bus=ahci.0,drive=livesata',
+            '-device', 'usb-kbd,bus=xhci.0', '-device', 'usb-mouse,bus=xhci.0,id=testmouse',
+            '-device', 'usb-storage,bus=xhci.0,drive=usbfixture',
+            '-drive', f'if=none,id=usbfixture,format=raw,file={disk},snapshot=on'], 4)
         try:
             login(vm)
-            check(vm, '')
-            if cpus == 1:
-                vm.send('lspci -v', 'Ethernet controller')
-                vm.send('lsports', 'Physical connector labels')
-                vm.send('lsusb', 'USB inventory unavailable')
-                text = hardware.clean(vm.log)
-                assert '01:03.1' in text and 'SATA ports' in text, text[-8000:]
-            print(f'PCI bridge, multifunction, SATA and ABI validation, {cpus} CPU(s): PASS', flush=True)
+            check(vm, 'usb')
+            vm.send('lsusb -t', 'HID mouse')
+            vm.send('lsports', 'Physical connector labels')
+            assert 'not managed as a disk' in hardware.clean(vm.log)
+            assert hardware.digest(sata) == sata_before
+            vm.qmp('device_del', {'id': 'testmouse'})
+            time.sleep(1)
+            check(vm, 'removed')
+            print('xHCI root ports, boot descriptors, USB HID input and disconnect status, 4 CPUs: PASS', flush=True)
         finally:
             vm.stop()
-    root = temporary/'live-root.img'
-    root_image(root, 64)
-    sata = temporary/'live-sata.img'
-    sata.write_bytes(disk.read_bytes())
-    sata_before = hardware.digest(sata)
-    image = temporary/'live.img'
-    live_image(root, image, temporary)
-    vm = VM('hardware-inventory-usb', image, [
-        '-machine', 'pc,i8042=off', '-device', 'qemu-xhci,id=xhci',
-        '-device', 'ich9-ahci,id=ahci',
-        '-drive', f'if=none,id=livesata,format=raw,file={sata},snapshot=on',
-        '-device', 'ide-hd,bus=ahci.0,drive=livesata',
-        '-device', 'usb-kbd,bus=xhci.0', '-device', 'usb-mouse,bus=xhci.0,id=testmouse',
-        '-device', 'usb-storage,bus=xhci.0,drive=usbfixture',
-        '-drive', f'if=none,id=usbfixture,format=raw,file={disk},snapshot=on'], 4)
-    try:
-        login(vm)
-        check(vm, 'usb')
-        vm.send('lsusb -t', 'HID mouse')
-        vm.send('lsports', 'Physical connector labels')
-        assert 'not managed as a disk' in hardware.clean(vm.log)
-        assert hardware.digest(sata) == sata_before
-        vm.qmp('device_del', {'id': 'testmouse'})
-        time.sleep(1)
-        check(vm, 'removed')
-        print('xHCI root ports, boot descriptors, USB HID input and disconnect status, 4 CPUs: PASS', flush=True)
-    finally:
-        vm.stop()
+
+
+if __name__ == '__main__':
+    main()
