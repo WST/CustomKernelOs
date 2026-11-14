@@ -1664,6 +1664,7 @@ int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv) {
     return count;
 }
 int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
+int kernelinfo(struct kernel_info *out, unsigned size) { return syscall3(SYS_KERNELINFO, (int)out, size, 0); }
 int schedinfo(struct scheduler_cpu_info *out, unsigned capacity) { return syscall3(SYS_SCHEDINFO, (int)out, capacity, 0); }
 int cpuinfo(struct cpu_info *out, unsigned capacity) { return syscall3(SYS_CPUINFO, (int)out, capacity, 0); }
 int hwinfo(unsigned kind, unsigned index, void *out, unsigned size) {

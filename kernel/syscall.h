@@ -1,6 +1,7 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 #include "idt.h"
+#include "../user/lib/kernelinfo.h"
 
 /* Номера системных вызовов. ДОЛЖНЫ совпадать с user/lib/myos.h.
  * Вызов: int 0x80, eax = номер, ebx/ecx/edx = аргументы, результат в eax.
@@ -93,6 +94,7 @@ enum {
     SYS_THREAD_CTL,     /* errno/ключи, detach, cond_wait/cond_wake; номера как в myos.h */
     SYS_HWINFO,         /* read-only PCI, USB root ports and SATA inventory */
     SYS_SCHEDINFO,      /* read-only per-CPU scheduler counters */
+    SYS_KERNELINFO,    /* versioned kernel concurrency counters */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */
@@ -105,6 +107,8 @@ enum {
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
 _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
+_Static_assert(SYS_KERNELINFO == 91, "Keep the published SYS_KERNELINFO ABI stable");
+_Static_assert(sizeof(struct kernel_info)==36, "kernel_info v1 ABI");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
