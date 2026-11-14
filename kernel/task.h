@@ -3,14 +3,15 @@
 #include "types.h"
 #include "idt.h"
 #include "smp.h"
+#include "../user/lib/scheduler.h"
 
 /* Задачи (потоки ядра и пользовательские процессы) и вытесняющий планировщик. */
 
 #define MAX_TASKS   256
 #define TASK_STACK  (16 * 1024)     /* стек ядра у каждой задачи */
 #define TASK_NAME   16
-#define TIME_SLICE  2               /* тиков таймера (по 10 мс) на задачу */
-#define MAX_FDS     32  /* u32 cloexec; git/OpenSSL открывают много fd */
+#define TIME_SLICE  2               /* bootstrap/idle fallback; MLFQ quanta are in scheduler.c */
+#define MAX_FDS     32  /* cloexec is a u32; Git needs more than 16 descriptors */
 
 enum task_state { TASK_READY, TASK_RUNNING, TASK_SLEEPING, TASK_BLOCKED, TASK_ZOMBIE };
 
@@ -22,7 +23,7 @@ struct task {
     struct task *leader;           /* NULL for process leader; owns shared resources */
     u32 joiner;
     u32   id;
-    u32   cpu;                     /* pinned CPU, assigned at task_start */
+    u32   cpu;                     /* assigned CPU; only saved user contexts can migrate */
     bool  cpu_idle;
     char  name[TASK_NAME];
     enum task_state state;
@@ -37,6 +38,9 @@ struct task {
     u32   cpu_ticks;
     u32   cpu_snapshot, cpu_recent; /* для CPU% за последнюю секунду */
     u32   created;
+    struct task *rq_prev,*rq_next;
+    u32 sched_level,sched_used,sched_left,sched_active,ready_since,age_since,blocked_since,last_boost;
+    bool rq_queued,user_context;
 
     /* --- только у пользовательских процессов --- */
     bool  user;
@@ -113,6 +117,7 @@ void  mutex_lock(struct mutex *m);
 void  mutex_unlock(struct mutex *m);
 bool  mutex_trylock(struct mutex *m);   /* false: владелец другой, не засыпать */
 bool task_raw_device_busy(int disk);
+bool task_volume_busy(u32 slot);
 
 /* для idt.c */
 struct regs *sched_tick(struct regs *r);

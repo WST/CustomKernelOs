@@ -39,13 +39,14 @@ static int permissions_write(u32 b,const void *in) {
 static int permissions_block(u32 ino,bool alloc,u32 *out) {
     int ret;
     *out=0;
-    if(sb.version!=3 || !sb.permissions_root) {
+    if(sb.version<3 || !sb.permissions_root) {
         if(!alloc)return 0;
         u32 root=balloc();if(!root)return FS_ENOSPC;
         if((ret=write_zero_block(root)) || (ret=bitmap_flush())){bfree(root);return ret;}
         struct superblock old=sb;
-        if(sb.version!=3)sb.layout_version=sb.version;
-        sb.version=3;sb.permissions_root=root;
+        if(sb.version<3)sb.layout_version=sb.version;
+        if(sb.version<3)sb.version=3;
+        sb.permissions_root=root;
         if(bwrite(0,&sb)){sb=old;bfree(root);return FS_EIO;}
     }
     u32 pointers[NINDIRECT];
@@ -96,7 +97,7 @@ static int permissions_load(u32 ino,const struct inode *in,u32 *mode,u32 *uid,u3
     }
     return 0;
 }
-int myfs_setattr(u32 ino,u32 mode,u32 uid,u32 gid) {
+static int myfs_setattr_impl(u32 ino,u32 mode,u32 uid,u32 gid) {
     struct inode in;int ret=iread(ino,&in);if(ret)return ret;
     if(in.type==FS_TYPE_FREE)return FS_ENOENT;
     return permissions_store(ino,mode,uid,gid);
@@ -163,5 +164,5 @@ static u32 times_load(u32 ino) {
     if(permissions_read(block,rec)) return 0;
     return rec[ino%TIMES_PER_BLOCK];
 }
-int myfs_touch(u32 ino) { return times_store(ino,kern_now()); }
-int myfs_set_time(u32 ino, u32 when) { return times_store(ino, when ? when : kern_now()); }
+static int myfs_touch_impl(u32 ino) { return sb.version<3?0:times_store(ino,kern_now()); }
+static int myfs_set_time_impl(u32 ino, u32 when) { return times_store(ino, when ? when : kern_now()); }

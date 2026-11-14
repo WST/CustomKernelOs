@@ -32,7 +32,9 @@ start:
     mov cx,64/2
     rep stosw
     mov dword [INFO],0x534f594d
-    mov dword [INFO+4],1
+    mov dword [INFO+4],2
+    mov dword [INFO+44],ROOT_LBA
+    mov dword [INFO+48],ROOT_DISK_ID
     mov dword [INFO+8],ROOT
     mov dword [INFO+12],ROOT_SECTORS*512
     mov dword [INFO+16],FONT

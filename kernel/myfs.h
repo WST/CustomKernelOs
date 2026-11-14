@@ -8,12 +8,17 @@ int  myfs_format(void);
 int  myfs_format_legacy(void);
 #endif
 bool myfs_ready(void);
+int myfs_sync(void);
+int myfs_transaction_begin(void);
+int myfs_transaction_end(int result);
+int myfs_unmount(void);
 
 int  myfs_resolve(u32 cwd, const char *path, u32 *ino);
 int  myfs_create(u32 cwd, const char *path, int type, u32 *ino);
 int  myfs_remove(u32 cwd, const char *path);
 int myfs_remove_keep(u32 cwd,const char *path,bool keep);
 int myfs_reap_orphan(u32 ino);
+int myfs_rename_keep(u32 cwd,const char *src,const char *dst,bool keep);
 int  myfs_rename(u32 cwd, const char *src, const char *dst);
 
 int  myfs_read(u32 ino, u32 off, void *buf, u32 n);         /* -> прочитано байт */

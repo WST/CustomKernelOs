@@ -12,6 +12,7 @@
 #include "klog.h"
 #include "sysinfo.h"
 #include "hwinfo.h"
+#include "scheduler.h"
 #include "smp.h"
 #include "tty.h"
 #include "keyboard.h"
@@ -258,7 +259,7 @@ static int sys_fsync(u32 fd) {
     struct file *f = get_fd(fd);
     if (!f) return -EBADF;
     if (f->type == FILE_PIPE || f->type == FILE_SOCKET || f->type == FILE_LOCAL) return -EINVAL;
-    return block_flush() ? -EIO : 0;
+    return fs_errno(fs_sync());
 }
 
 static int sys_fstat(u32 fd, u32 ust) {
@@ -1142,6 +1143,15 @@ void syscall_dispatch(struct regs *r) {
         break;
     case SYS_READ:    ret = sys_read(a, b, c); break;
     case SYS_OPEN:    ret = sys_open(a, b); break;
+    case SYS_SYNC: ret=fs_errno(fs_sync());break;
+    case SYS_UMOUNT:
+    case SYS_FSCK: {
+        char target[FS_PATH_MAX];
+        if(!task_process(t)->authenticated || task_process(t)->uid)ret=-EPERM;
+        else if(!user_str(a,target,sizeof(target)))ret=-EFAULT;
+        else ret=fs_errno(r->eax==SYS_UMOUNT?fs_unmount(task_process(t)->cwd,target):fs_check_device(target));
+        break;
+    }
     case SYS_MOUNT: {
         if(!task_process(t)->authenticated || task_process(t)->uid!=0) {ret=-EPERM;break;}
         char device[128],target[128];
@@ -1199,18 +1209,40 @@ void syscall_dispatch(struct regs *r) {
         break;
     case SYS_KLOG_READ: {
         if(b>KLOG_CAPACITY) { ret=-EINVAL;break; }
+        u32 copy_flags=irq_save();
         if(!user_buf_ok(c,sizeof(struct klog_cursor),true) || !user_buf_ok(a,b,true)) {
-            ret=-EFAULT;break;
+            irq_restore(copy_flags);ret=-EFAULT;break;
         }
         struct klog_cursor cursor;memcpy(&cursor,(const void *)c,sizeof(cursor));
+        irq_restore(copy_flags);
         char *snapshot=b?kmalloc(b):NULL;
         if(b && !snapshot) { ret=-ENOMEM;break; }
+        u32 flags=smp_parallel_begin();
         ret=klog_read(snapshot,b,&cursor);
+        smp_parallel_end(flags);
+        copy_flags=irq_save();
+        if(!user_buf_ok(c,sizeof(cursor),true) || !user_buf_ok(a,b,true))ret=-EFAULT;
         if(ret>=0) {
             if(ret)memcpy((void *)a,snapshot,ret);
             memcpy((void *)c,&cursor,sizeof(cursor));
         }
+        irq_restore(copy_flags);
         kfree(snapshot);break;
+    }
+    case SYS_KERNELINFO: {
+        if(b<sizeof(struct kernel_info)) { ret=-EINVAL;break; }
+        u32 flags=irq_save();
+        if(!user_buf_ok(a,sizeof(struct kernel_info),true)) { irq_restore(flags);ret=-EFAULT;break; }
+        struct kernel_info sample; smp_kernel_snapshot(&sample);
+        memcpy((void *)a,&sample,sizeof(sample));irq_restore(flags);ret=0;break;
+    }
+    case SYS_SCHEDINFO: {
+        u32 count=smp_count();
+        if (b<count) { ret=-EINVAL; break; }
+        if (!user_buf_ok(a,count*sizeof(struct scheduler_cpu_info),true)) { ret=-EFAULT; break; }
+        struct scheduler_cpu_info sample[SMP_MAX_CPUS];
+        u32 flags=irq_save(); scheduler_snapshot(sample); irq_restore(flags);
+        memcpy((void *)a,sample,count*sizeof(*sample)); ret=count; break;
     }
     case SYS_CPUINFO: {
         u32 count = smp_count();
@@ -1237,9 +1269,11 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_SYSINFO: {
         if (b < sizeof(struct system_info)) { ret=-EINVAL; break; }
-        if (!user_buf_ok(a,sizeof(struct system_info),true)) { ret=-EFAULT; break; }
-        struct system_info info; sysinfo_get(&info);
-        memcpy((void *)a,&info,sizeof(info)); ret=0; break;
+        struct system_info info;
+        u32 flags=smp_parallel_begin();sysinfo_get(&info);smp_parallel_end(flags);
+        flags=irq_save();
+        if(!user_buf_ok(a,sizeof(info),true)) { irq_restore(flags);ret=-EFAULT;break; }
+        memcpy((void *)a,&info,sizeof(info));irq_restore(flags);ret=0;break;
     }
     case SYS_CLOSE:   ret = sys_close(a); break;
     case SYS_LSEEK:   ret = sys_lseek(a, b, c); break;
@@ -1335,6 +1369,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_REBOOT:
         if (!task_process(t)->authenticated || task_process(t)->uid != 0) { ret=-EPERM; break; }
         if (a != RB_POWEROFF && a != RB_REBOOT) { ret = -EINVAL; break; }
+        ret=fs_errno(fs_sync());if(ret)break;
         machine_reset((int)a);
     case SYS_THREAD_CTL:
         if (a == TC_SET_TCB) {

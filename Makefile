@@ -94,9 +94,11 @@ FORCE_BUILD_INFO:
 $(BUILD)/build_info.h: FORCE_BUILD_INFO VERSION tools/build_info.py | $(BUILD)
 	python3 tools/build_info.py $@
 $(BUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
+$(BUILD)/myfs.o $(HWBUILD)/myfs.o: kernel/myfs-journal.inc kernel/myfs-check.inc
+$(BUILD)/xhci.o $(HWBUILD)/xhci.o: kernel/xhci-storage.inc
 $(BUILD)/sysinfo.o: $(BUILD)/build_info.h
-$(OBJS): user/lib/sysinfo.h user/lib/hwinfo.h
-$(BUILD)/user/libc.o $(BUILD)/user/libc.so: user/lib/sysinfo.h user/lib/hwinfo.h
+$(OBJS): user/lib/sysinfo.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h
+$(BUILD)/user/libc.o $(BUILD)/user/libc.so: user/lib/sysinfo.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h
 CFLAGS += -I$(BUILD)
 
 
@@ -207,7 +209,7 @@ $(BUILD)/user/win.o: user/lib/win.c user/lib/win.h user/lib/gfx.h user/lib/myos.
 
 $(BUILD)/user/code.o: user/code_features.h user/code_index.h user/code_workspace.h user/code_chrome.h user/code_signature.h
 
-$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
+$(BUILD)/user/%.o: user/%.c user/lib/myos.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h | $(BUILD)/user
 	$(CC) $(UCFLAGS) -c $< -o $@
 
 # sh и cc остаются статическими: оболочка и компилятор стартуют даже со сломанной libc.so.
@@ -436,13 +438,13 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h $(wildcard $(OSSL_SRC)/include/openssl/*.h) $(wildcard $(OSSL_BLD)/include/openssl/*.h) $(wildcard $(CURL_SRC)/include/curl/*.h)
+CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h $(wildcard $(OSSL_SRC)/include/openssl/*.h) $(wildcard $(OSSL_BLD)/include/openssl/*.h) $(wildcard $(CURL_SRC)/include/curl/*.h)
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC) $(OSSL_BLD)/.configured
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/include/openssl $(CCROOT)/include/curl $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
 	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
@@ -608,7 +610,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in myos.h build_jobs.h hwinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in myos.h build_jobs.h hwinfo.h scheduler.h kernelinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
@@ -713,7 +715,7 @@ test: | $(BUILD)
 	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
-	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==3, v'
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==5, v'
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
 	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
@@ -800,7 +802,7 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	python3 tests/cc_crlf.py $(BUILD)/cc-host $(CCROOT)
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
-	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
+	@if ! $(BUILD)/cct_probe 2>/dev/null; then \
 	    echo "32-bit programs cannot run here - only checking that tests and cc itself compile"; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_x || exit 1; done; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_x || exit 1; done; \
@@ -810,17 +812,17 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	fi; \
 	for t in tests/cc/*.c; do \
 	    n=$$(basename $$t .c); \
-	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && ./$(BUILD)/cct_$$n || exit 1; \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && $(BUILD)/cct_$$n || exit 1; \
 	done; \
 	for t in tests/cc/*.c; do \
 	    n=$$(basename $$t .c); \
-	    $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_pic_$$n && ./$(BUILD)/cct_pic_$$n || exit 1; \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_pic_$$n && $(BUILD)/cct_pic_$$n || exit 1; \
 	done; \
 	echo "cc -fPIC: OK"; \
 	rm -f $(BUILD)/cct_cc1 $(BUILD)/cct_cc2 $(BUILD)/cct_cc3; \
 	$(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
-	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
-	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
+	$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
+	$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)" && \
 	sh tests/cclink.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclink.sh $(BUILD)/cct_cc2 $(CCROOT) && \
 	sh tests/cclib.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclib.sh $(BUILD)/cct_cc2 $(CCROOT) && \
@@ -920,7 +922,7 @@ maketest: $(BUILD)/cc-host $(CCROOT_READY)
 	@sh tests/make.sh $(BUILD)/make-linux
 	@python3 tests/make_parallel.py $(BUILD)/make-linux
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/build_jobs_test.c -o $(BUILD)/build-jobs-test
-	@./$(BUILD)/build-jobs-test
+	@$(BUILD)/build-jobs-test
 
 cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux
@@ -1042,7 +1044,7 @@ $(HWBUILD)/x86emu/%.o: drivers/video/x86emu/%.c drivers/video/x86emu/include/*.h
 	mkdir -p $(@D)
 	$(CC) $(CFLAGS) -ffunction-sections -fdata-sections -w -c $< -o $@
 HWOBJS := $(HWBUILD)/entry.o $(HWBUILD)/isr.o $(HWBUILD)/ap.o $(patsubst kernel/%.c,$(HWBUILD)/%.o,$(C_SRC)) $(patsubst drivers/video/%.c,$(HWBUILD)/video/%.o,$(VIDEO_SRC))
-$(HWOBJS): user/lib/hwinfo.h
+$(HWOBJS): user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h
 $(HWBUILD):
 	mkdir -p $@
 $(HWBUILD)/%.o: kernel/%.c kernel/*.h $(BUILD)/build_info.h | $(HWBUILD)
@@ -1193,9 +1195,9 @@ $(BUILD)/file.o $(HWBUILD)/file.o: kernel/fs.h
 $(BUILD)/fs.o $(HWBUILD)/fs.o: kernel/fs-permissions.inc
 $(BUILD)/myfs.o $(HWBUILD)/myfs.o: kernel/myfs-permissions.inc
 $(BUILD)/syscall.o $(HWBUILD)/syscall.o: kernel/fs-syscall.inc
-$(BUILD)/myfs: kernel/fs-permissions.inc kernel/myfs-permissions.inc
+$(BUILD)/myfs: kernel/fs-permissions.inc kernel/myfs-permissions.inc kernel/myfs-journal.inc kernel/myfs-check.inc
 
-$(BUILD)/fs-permissions-test: tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c kernel/fs-permissions.inc kernel/myfs-permissions.inc $(BUILD)/myfs
+$(BUILD)/fs-permissions-test: tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c kernel/fs-permissions.inc kernel/myfs-permissions.inc kernel/myfs-journal.inc kernel/myfs-check.inc $(BUILD)/myfs
 	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -DFS_PERMISSIONS_TEST -Ikernel tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $@
 .PHONY: permissionstest
 permissionstest: $(BUILD)/fs-permissions-test
@@ -1358,3 +1360,48 @@ $(BUILD)/usb-hotplug-check: $(BUILD)/usb-hotplug-check.o $(ULIB) user/user.ld
 .PHONY: usbhotplugtest
 usbhotplugtest: $(HWBUILD)/kernel.bin $(BUILD)/usb-hotplug-check $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/sh $(BUILD)/user/lsusb $(BUILD)/user/lsports $(BUILD)/user/libc.so usblifecycletest
 	python3 tests/usb_hotplug_smoke.py
+
+$(BUILD)/scheduler-probe.o: tests/scheduler_probe.c user/lib/myos.h user/lib/scheduler.h user/lib/kernelinfo.h | $(BUILD)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/scheduler-probe: $(BUILD)/scheduler-probe.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+$(BUILD)/pthread-native: tests/pthread_test.c $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libc.a
+	$(BUILD)/cc-host -B $(CCROOT) -nostdlib $< $(BUILD)/mlib/libpthread.a $(BUILD)/mlib/libc.a -o $@
+.PHONY: schedtest
+schedtest: $(BUILD)/os.img $(BUILD)/scheduler-probe $(BUILD)/user/sh $(BUILD)/myfs $(BUILD)/user/dragcheck $(BUILD)/user/schedstat $(BUILD)/pthread-native $(BUILD)/user/libpthread.so $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/ld.so
+	python3 tests/scheduler_smoke.py
+
+.PHONY: schedpolicytest
+schedpolicytest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/scheduler_policy_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/scheduler-policy-test
+	./$(BUILD)/scheduler-policy-test
+
+$(BUILD)/kernel-parallel-check.o: tests/kernel_parallel_check.c user/lib/myos.h user/lib/kernelinfo.h | $(BUILD)
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/kernel-parallel-check: $(BUILD)/kernel-parallel-check.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: kernellocktest kernelparalleltest
+kernellocktest: | $(BUILD)
+	$(HOSTCC) -m32 -std=gnu11 -O1 -g -fno-builtin -pthread -ffunction-sections -fdata-sections -fsanitize=address,undefined tests/kernel_parallel_host.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/kernel-parallel-host
+	./$(BUILD)/kernel-parallel-host
+kernelparalleltest: $(BUILD)/os.img $(BUILD)/kernel-parallel-check $(BUILD)/user/kernelstat $(BUILD)/user/sh $(BUILD)/user/smpbench $(BUILD)/user/klogcheck $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/ld.so $(BUILD)/myfs
+	python3 tests/kernel_parallel_smoke.py
+
+.PHONY: persistence-test
+persistence-test: storage-recoverytest
+	$(HOSTCC) -std=gnu17 -O1 -g -fno-builtin -DHOST_TEST -Ikernel tests/myfs_powercut_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c -o $(BUILD)/myfs-powercut-test
+	./$(BUILD)/myfs-powercut-test
+
+$(BUILD)/user/storage_lifecycle_check.o: tests/storage_lifecycle_check.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/storage_lifecycle_check: $(BUILD)/user/storage_lifecycle_check.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: persistence-usb-smoke
+persistence-usb-smoke: usb-image
+	python3 tests/persistence_usb_smoke.py
+
+.PHONY: persistence-lifecycle-smoke persistence-large-test
+persistence-lifecycle-smoke:
+	python3 tests/persistence_lifecycle_smoke.py
+persistence-large-test: $(BUILD)/myfs
+	python3 tests/myfs_large_reclaim.py
