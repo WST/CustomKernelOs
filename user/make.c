@@ -1232,11 +1232,9 @@ static int add_rule_line(char *s, int force) {
         free_words(ts, nt); free(tg); free(pr); free(line);
         return 0;
     }
-    int any_real = 0;
     nbatch = 0;
     for (int i = 0; i < nt; i++) {
         if (special_target(ts[i], pre, npre)) continue;
-        any_real = 1;
         if (strchr(ts[i], '%')) {
             struct rule *r = new_rule(ts[i]);
             r->pattern = 1; r->dcolon = dcolon;
@@ -1259,7 +1257,9 @@ static int add_rule_line(char *s, int force) {
     }
     free_words(pre, npre); free_words(ord, nord);
     free_words(ts, nt); free(tg); free(pr); free(line); free(prcopy);
-    if (any_real) rule_open = 1;
+    /* GNU make still consumes following recipe lines when the target list
+     * expands to nothing (e.g. empty $(CLAR_TEST_PROG):). */
+    rule_open = 1;
     return 0;
 }
 static void add_recipe(const char *body) {

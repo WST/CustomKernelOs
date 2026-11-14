@@ -658,7 +658,7 @@ QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive if=none,id=sysdisk,file=$(DISK),format=raw \
                -device ich9-ahci,id=ahci \
                -device ide-hd,drive=sysdisk,bus=ahci.0
-QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
+QEMU_CPU_FLAGS = $(if $(QEMU_ACCEL),-accel $(QEMU_ACCEL)) $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 ifneq ($(strip $(DATA_DISK)),)
 QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk

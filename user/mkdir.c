@@ -13,6 +13,14 @@ static int mkdir_p(const char *path) {
         if (buf[i] != '/' && buf[i] != 0) continue;
         buf[i] = 0;
         if (!buf[0]) { buf[i] = path[i]; continue; }
+        {
+            const char *base = buf, *sl;
+            for (sl = buf; *sl; sl++) if (*sl == '/') base = sl + 1;
+            if (!base[0] || !strcmp(base, ".") || !strcmp(base, "..")) {
+                buf[i] = (i == n) ? 0 : path[i];
+                continue;
+            }
+        }
         r = mkdir(buf);
         if (r < 0 && r != -EEXIST) return r;
         if (stat(buf, &st) < 0) return -1;
