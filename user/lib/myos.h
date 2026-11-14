@@ -4,6 +4,7 @@
 #define MYOS_H
 #include "sysinfo.h"
 #include "hwinfo.h"
+#include "scheduler.h"
 int sysinfo(struct system_info *out, unsigned size);
 /* Returns online CPU count, or negative errno; capacity is in records. */
 int cpuinfo(struct cpu_info *out, unsigned capacity);
@@ -68,7 +69,7 @@ enum {
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
     SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL,
     SYS_REBOOT,
-    SYS_THREAD_CTL, SYS_HWINFO
+    SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0

@@ -1,4 +1,4 @@
-/* First SMP implementation: parallel ring 3, serialized kernel, pinned tasks.
+/* First SMP implementation: parallel ring 3, serialized kernel, migratable user contexts.
  * Legacy IRQs stay on the BSP. PIT broadcasts scheduler IPIs to the APs.
  * No kernel code outside the entry/exit/idle paths executes without the BKL.
  */
@@ -128,9 +128,8 @@ void smp_user_tlb_flush(u32 dir) {
 void smp_tick(void) { if(online>1) ipi(0,0xc0000|0x82); }
 void smp_wake(u32 cpu) {
     cpu_states[cpu].resched=true;
-    if(enabled && cpu<online && cpu!=smp_cpu() &&
-       cpu_states[cpu].running==cpu_states[cpu].idle) {
-        /* Publish READY and resched before notifying the idle target CPU. */
+    if(enabled && cpu<online && cpu!=smp_cpu()) {
+        /* Publish READY before a wakeup IPI; sched_maybe checks priority. */
         __sync_synchronize();
         ipi(cpu_apic[cpu],0x83);
     }

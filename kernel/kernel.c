@@ -112,7 +112,7 @@ void kmain(void) {
     boot_stage("FPU and task scheduler");
     fpu_init();
     tasking_init();
-    ok("Multitasking: preemptive round robin, %u ms time slice", TIME_SLICE * 10);
+    ok("Multitasking: per-CPU MLFQ, 10/20/40 ms quanta");
 
     boot_stage("timer and PS/2 input");
     timer_init();

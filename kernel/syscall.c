@@ -12,6 +12,7 @@
 #include "klog.h"
 #include "sysinfo.h"
 #include "hwinfo.h"
+#include "scheduler.h"
 #include "smp.h"
 #include "tty.h"
 #include "keyboard.h"
@@ -1129,6 +1130,14 @@ void syscall_dispatch(struct regs *r) {
             memcpy((void *)c,&cursor,sizeof(cursor));
         }
         kfree(snapshot);break;
+    }
+    case SYS_SCHEDINFO: {
+        u32 count=smp_count();
+        if (b<count) { ret=-EINVAL; break; }
+        if (!user_buf_ok(a,count*sizeof(struct scheduler_cpu_info),true)) { ret=-EFAULT; break; }
+        struct scheduler_cpu_info sample[SMP_MAX_CPUS];
+        u32 flags=irq_save(); scheduler_snapshot(sample); irq_restore(flags);
+        memcpy((void *)a,sample,count*sizeof(*sample)); ret=count; break;
     }
     case SYS_CPUINFO: {
         u32 count = smp_count();
