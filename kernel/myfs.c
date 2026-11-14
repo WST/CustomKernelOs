@@ -3,6 +3,9 @@
 #include "block.h"
 #include "string.h"
 #include "task.h"
+#ifndef HOST_TEST
+#include "ipc.h"
+#endif
 #ifdef HOST_TEST
 void *malloc(unsigned long); void free(void *);
 #define bitmap_alloc(n) malloc(n)
@@ -15,7 +18,7 @@ void *malloc(unsigned long); void free(void *);
 
 #define BS            512                       /* размер блока */
 #define MAGIC         0x5346594D                /* "MYFS" в little-endian */
-#define VERSION       4                       /* format() пишет её; монтирование принимает и 1 */
+#define VERSION       5                       /* format() пишет её; монтирование принимает и 1 */
 #define VERSION_MIN   1
 #define NDIRECT       12                        /* версия 1; у версии 2 последний слот — тройной косвенный */
 #define NDIRECT_V2    11
@@ -38,7 +41,8 @@ struct superblock {
     u32 data_start;
     u32 layout_version, permissions_root; /* version 3; inode/data layout stays v1/v2 */
     u32 journal_start, journal_blocks; /* v4: reserved tail, physical redo log */
-    u8 pad[BS - 13 * 4];
+    u32 times_root; /* v4 extension: preserve journal offsets 44/48 */
+    u8 pad[BS - 14 * 4];
 } __attribute__((packed));
 
 struct inode {
@@ -598,6 +602,7 @@ static int myfs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
         done += chunk;
     }
     if (off + done > in.size) in.size = off + done;
+    if((r=myfs_touch(ino)))return r;
     int meta = sync_meta();
     int w = iwrite(ino, &in);
     if (r && !(r==FS_ENOSPC && done)) return r;
@@ -611,6 +616,7 @@ static int myfs_truncate_impl(u32 ino) {
     if (r) return r;
     if (in.type != FS_TYPE_FILE) return FS_EISDIR;
     free_all_blocks(&in);
+    if((r=myfs_touch(ino)))return r;
     int w = iwrite(ino, &in);
     int meta = sync_meta();
     if (w) return w;
@@ -626,6 +632,7 @@ static int myfs_stat_impl(u32 ino, struct fs_stat *st) {
     st->links=in.links;
     st->size = in.size;
     r=permissions_load(ino,&in,&st->mode,&st->uid,&st->gid);if(r)return r;
+    st->mtime=st->atime=st->ctime=times_load(ino);
     u32 data = (in.size + BS - 1) / BS;
     u32 nd = n_direct();
     st->blocks = data + (in.indirect ? 1 : 0);
@@ -945,7 +952,7 @@ static int myfs_remove_impl(u32 cwd, const char *path,bool keep) {
     return r;
 }
 
-static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
+static int myfs_rename_impl(u32 cwd, const char *src, const char *dst,bool keep_victim) {
     if (!mounted) return FS_ENODEV;
     u32 sparent, soff, dparent, existing;
     char sname[FS_NAME_MAX + 1], dname[FS_NAME_MAX + 1];
@@ -963,10 +970,23 @@ static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
     } else if ((r = resolve_parent(cwd, dst, &dparent, dname))) {
         return r;
     }
-    u32 taken;
-    r = dir_lookup(dparent, dname, &taken, NULL);
+    u32 taken, toff = 0;
+    r = dir_lookup(dparent, dname, &taken, &toff);
     if (r) return r;
-    if (taken) return FS_EEXIST;
+    if (taken) {
+        /* POSIX: rename поверх существующего файла заменяет его. */
+        if (taken == ino) return FS_OK;
+        if (dir_check(taken) == FS_OK) return FS_EEXIST; /* каталог не затираем */
+        struct inode victim;
+        if ((r = iread(taken, &victim))) return r;
+        if ((r = dir_set(dparent, toff, 0, NULL))) return r;
+        struct inode source;if((r=iread(ino,&source)))return r;
+        if(source.type==FS_TYPE_DIR)return FS_ENOTDIR;
+        victim.links = 0;
+        if(!keep_victim) {free_all_blocks(&victim);victim.type=FS_TYPE_FREE;ino_note_free(taken);}
+        if ((r = iwrite(taken, &victim))) return r;
+        if(!keep_victim)available_inodes++;
+    }
 
     /* нельзя переместить каталог внутрь самого себя */
     for (u32 p = dparent; ;) {
@@ -1115,7 +1135,12 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
            sb.journal_start!=sb.total_blocks-JOURNAL_BLOCKS || sb.journal_start<=sb.data_start)return FS_EINVAL;
         if(journal_recover())return FS_EIO;
         if(bread(0,&sb))return FS_EIO;
-    } else { sb.journal_start=sb.journal_blocks=0; }
+    } else {
+        /* The PR's v3 timestamp extension occupied offset 44 before v4 existed. */
+        if(sb.version==3 && !sb.times_root)sb.times_root=sb.journal_start;
+        if(sb.version<3)sb.times_root=0;
+        sb.journal_start=sb.journal_blocks=0;
+    }
     int allocation=prepare_bitmap(sb.bitmap_blocks * BS);
     if(allocation) return allocation;
     states[selected].hint=sb.data_start;
@@ -1133,7 +1158,13 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
         if(sb.version<3)sb.layout_version=sb.version;
         sb.journal_start=start;sb.journal_blocks=JOURNAL_BLOCKS;
         if(journal_clear())return FS_EIO;
-        sb.version=4;
+        sb.version=VERSION;
+        if(bwrite(0,&sb) || disk_barrier())return FS_EIO;
+    }
+    if(sb.version==4) {
+        /* Publish the new format before any timestamp metadata can be logged.
+         * Older v4 checkers do not know this sidecar and must refuse the volume. */
+        sb.version=VERSION;
         if(bwrite(0,&sb) || disk_barrier())return FS_EIO;
     }
     mounted = true;
@@ -1239,7 +1270,7 @@ static int myfs_reap_orphan_impl(u32 ino) {
     available_inodes++;
     return sync_meta();
 }
-int myfs_rename(u32 cwd, const char *src, const char *dst) { int e=transaction_begin();if(e)return e; int r = myfs_rename_impl(cwd, src, dst); return transaction_end(r); }
+int myfs_rename(u32 cwd, const char *src, const char *dst) { int e=transaction_begin();if(e)return e; int r = myfs_rename_impl(cwd, src, dst,false); return transaction_end(r); }
 int myfs_read(u32 ino, u32 off, void *buf, u32 n) { int r = myfs_read_impl(ino, off, buf, n); return r; }
 int myfs_reap_orphan(u32 ino) {int e=transaction_begin();return e?e:transaction_end(myfs_reap_orphan_impl(ino));}
 int myfs_setattr(u32 ino,u32 mode,u32 uid,u32 gid) {int e=transaction_begin();return e?e:transaction_end(myfs_setattr_impl(ino,mode,uid,gid));}
@@ -1258,6 +1289,18 @@ int myfs_write(u32 ino, u32 off, const void *buf, u32 n) {
     return done;
 }
 int myfs_truncate(u32 ino) { int e=transaction_begin();if(e)return e; int r = myfs_truncate_impl(ino); return transaction_end(r); }
+static int myfs_set_size_impl(u32 ino, u32 size) {
+    struct inode in;
+    int r = iread(ino, &in);
+    if (r) return r;
+    if (in.type != FS_TYPE_FILE) return FS_EISDIR;
+    if (size > in.size) return FS_EINVAL;
+    in.size = size;
+    if((r=myfs_touch(ino)))return r;
+    r = iwrite(ino, &in);
+    if (r) return r;
+    return sync_meta();
+}
 int myfs_stat(u32 ino, struct fs_stat *st) { int r = myfs_stat_impl(ino, st); return r; }
 int myfs_readdir(u32 dir, u32 *pos, struct fs_dirent *out) { int r = myfs_readdir_impl(dir, pos, out); return r; }
 int myfs_getpath(u32 ino, char *buf, u32 len) { int r = myfs_getpath_impl(ino, buf, len); return r; }
@@ -1279,3 +1322,9 @@ int myfs_unmount(void) {int r=myfs_sync();if(r)return r;mounted=false;cache_drop
 
 int myfs_transaction_begin(void){return transaction_begin();}
 int myfs_transaction_end(int result){return transaction_end(result);}
+
+int myfs_touch(u32 ino) {int r=transaction_begin();return r?r:transaction_end(myfs_touch_impl(ino));}
+int myfs_set_time(u32 ino,u32 when) {int r=transaction_begin();return r?r:transaction_end(myfs_set_time_impl(ino,when));}
+int myfs_set_size(u32 ino,u32 size) {int r=transaction_begin();return r?r:transaction_end(myfs_set_size_impl(ino,size));}
+
+int myfs_rename_keep(u32 cwd,const char *src,const char *dst,bool keep) {int r=transaction_begin();return r?r:transaction_end(myfs_rename_impl(cwd,src,dst,keep));}

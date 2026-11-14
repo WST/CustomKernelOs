@@ -41,6 +41,7 @@ static int myfs_check_impl(bool repair) {
     for(u32 b=0;b<sb.data_start;b++)check_bits[b/8]|=1u<<(b%8);
     if(sb.version>=4)for(u32 b=sb.journal_start;b<sb.total_blocks;b++)check_bits[b/8]|=1u<<(b%8);
     if(sb.version>=3 && sb.permissions_root && check_tree(sb.permissions_root,2)){CHECK_ERROR();}
+    if(sb.times_root && check_tree(sb.times_root,2)){CHECK_ERROR();}
     struct inode in;
     for(u32 ino=FS_ROOT;ino<sb.inode_count;ino++) {
         if(iread(ino,&in)){CHECK_ERROR();}

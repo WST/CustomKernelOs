@@ -11,7 +11,7 @@
 #define TASK_STACK  (16 * 1024)     /* стек ядра у каждой задачи */
 #define TASK_NAME   16
 #define TIME_SLICE  2               /* bootstrap/idle fallback; MLFQ quanta are in scheduler.c */
-#define MAX_FDS     16
+#define MAX_FDS     32  /* cloexec is a u32; Git needs more than 16 descriptors */
 
 enum task_state { TASK_READY, TASK_RUNNING, TASK_SLEEPING, TASK_BLOCKED, TASK_ZOMBIE };
 
@@ -48,6 +48,8 @@ struct task {
     u32   brk_start, brk;           /* куча программы (sbrk) */
     u32   user_pages;               /* сколько страниц RAM занимает программа */
     u32   cwd;                      /* текущий каталог (inode) */
+    char *env_buf;                  /* упакованные строки KEY=VAL, принадлежат процессу */
+    u32   env_len;
     struct file *syscall_fds[MAX_FDS]; /* transient refs while a syscall blocks */
     struct file *fds[MAX_FDS];      /* открытые файлы (общие объекты, см. file.h) */
     u32 uid;

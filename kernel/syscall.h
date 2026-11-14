@@ -96,6 +96,7 @@ enum {
     SYS_SCHEDINFO,      /* read-only per-CPU scheduler counters */
     SYS_KERNELINFO,    /* versioned kernel concurrency counters */
     SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
+    SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */
@@ -106,11 +107,13 @@ enum {
 #define TC_COND_WAIT 4
 #define TC_COND_WAKE 5
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_FSYNC == 94 && SYS_FSCK == 95 && SYS_PREAD == 96, "Keep persistence syscall ABI stable");
 _Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
 _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
 _Static_assert(SYS_KERNELINFO == 91, "Keep the published SYS_KERNELINFO ABI stable");
 _Static_assert(sizeof(struct kernel_info)==36, "kernel_info v1 ABI");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
+_Static_assert(SYS_FSCK + 1 == SYS_PREAD, "SYS_PREAD follows SYS_FSCK in user/lib/myos.h");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 

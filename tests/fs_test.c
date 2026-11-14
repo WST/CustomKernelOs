@@ -162,7 +162,11 @@ int main(){
     CHECK(fs_symlink(1, "/hello", "abs")==0 && fs_resolve(1, "abs", &a)==0 && a==hello);
     CHECK(fs_resolve(1, "alias/", &a)==FS_ENOTDIR);
     CHECK(fs_symlink(1, "b", "blink")==0);
-    CHECK(fs_rename(1, "hello", "blink")==FS_EEXIST && fs_resolve(1, "hello", &a)==0 && a==hello);
+    u32 replacement;
+    CHECK(fs_create(1,"replacement",FS_TYPE_FILE,&replacement)==0);
+    CHECK(fs_rename(1,"replacement","blink")==0 && fs_resolve(1,"blink",&a)==0 && a==replacement);
+    CHECK(fs_resolve(1,"replacement",&a)==FS_ENOENT && fs_read(hello,0,rd,2)==2);
+    CHECK(fs_remove(1,"blink")==0 && fs_symlink(1,"b","blink")==0);
     CHECK(fs_create(1, "blink/via", FS_TYPE_FILE, &a)==0 && fs_resolve(1, "b/via", &a)==0);
     CHECK(fs_rename(1, "alias", "alias2")==0);
     CHECK(fs_readlink(1, "alias2", tbuf, sizeof tbuf)==5 && fs_resolve(1, "alias", &a)==FS_ENOENT);

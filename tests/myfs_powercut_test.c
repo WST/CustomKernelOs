@@ -8,13 +8,13 @@ int printf(const char *,...);void exit(int);
 static u8 stable[N][512],drive[N][512],baseline[N][512],after[N][512];
 static void *jump[5];
 static unsigned events,cut,policy;
-static bool armed,fail_flush,fail_write;
+static bool armed,fail_flush,fail_write,capture_commit;
 static u32 file;
 #define CHECK(x) do{if(!(x)){printf("POWER FAIL %d policy=%u cut=%u events=%u: %s\n",__LINE__,policy,cut,events,#x);exit(1);}}while(0)
 void mutex_lock(struct mutex *m){(void)m;}void mutex_unlock(struct mutex *m){(void)m;}
 u32 ata_sectors(void){return N;}
 int ata_read(u32 b,void *p){if(b>=N)return -1;memcpy(p,drive[b],512);return 0;}
-static void event(void){events++;if(armed && events==cut)__builtin_longjmp(jump,1);}
+static void event(void){events++;if(armed && (events==cut || (capture_commit && ((u32 *)stable[((u32 *)stable[0])[11]])[0]==0x314c4e4au)))__builtin_longjmp(jump,1);}
 int ata_write(u32 b,const void *p){
  if(b>=N || fail_write)return -1;
  memcpy(drive[b],p,512);
@@ -61,8 +61,8 @@ int main(void){
   printf("POWER operation %u: %u sector-write/barrier cuts x 3 cache policies PASS\n",op,count);
  }
  /* Cut power again while replaying a committed log: recovery is restartable. */
- policy=1;reset();cut=5;armed=true;
- if(!__builtin_setjmp(jump)){operation(0);CHECK(false);}armed=false;
+ policy=1;reset();cut=~0u;capture_commit=true;armed=true;
+ if(!__builtin_setjmp(jump)){operation(0);CHECK(false);}armed=false;capture_commit=false;
  static u8 replay[N][512];memcpy(replay,stable,sizeof(stable));
  events=0;boot();unsigned replay_events=events;memcpy(after,stable,sizeof(stable));
  for(unsigned point=1;point<=replay_events;point++){
@@ -119,6 +119,17 @@ int main(void){
   boot();u32 found;char contents[6];CHECK(fs_resolve(1,"/legacy",&found)==0 && fs_read(found,0,contents,6)==6 && !memcmp(contents,"legacy",6));crashes++;
  }
  printf("POWER migration: %u upgrade cuts x 3 cache policies PASS\n",upgrade_events);
+ /* Existing v4 volumes upgrade before timestamp metadata is modified. */
+ reset();((u32 *)stable[0])[1]=4;boot();CHECK(((u32 *)stable[0])[1]==5);
+ CHECK(fs_read(file,0,readback,2048)==2048 && !memcmp(readback,data,2048));
+ /* Timestamp metadata survives v3 -> v4 migration at its original offset. */
+ reset();CHECK(myfs_set_time(file,123456789u)==0 && fs_sync()==0);
+ u32 *legacy_super=(u32 *)stable[0];u32 journal_start=legacy_super[11];
+ legacy_super[1]=3;legacy_super[11]=legacy_super[13];legacy_super[12]=legacy_super[13]=0;
+ for(u32 block=journal_start;block<N;block++)stable[1+block/4096][(block%4096)/8]&=(u8)~(1u<<(block%8));
+ boot();struct fs_stat time_stat;CHECK(fs_stat(file,&time_stat)==0 && time_stat.mtime==123456789u);
+ boot();CHECK(fs_stat(file,&time_stat)==0 && time_stat.mtime==123456789u);
+ printf("TIMESTAMP MIGRATION PASS: legacy timestamps and v4 journal offsets preserved in v5\n");
  /* Return the fixture to a valid disk before atexit flush. */
  reset();
  printf("POWER CUT PASS: %u crashes; bitmap repair, duplicate rejection, I/O errors, idempotent recovery\n",crashes);

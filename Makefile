@@ -303,12 +303,17 @@ OSSL_FLAGS := linux-x86 no-asm no-threads no-thread-pool no-dgram no-dso no-modu
 	-DNO_SYSLOG -DMYOS_HOST_LIBC -D__STDC_NO_ATOMICS__ \
 	-I$(abspath user/include) -I$(abspath user/lib) \
 	--prefix=$(abspath $(OSSL_BLD))/prefix
-$(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
+# Заголовки появляются уже после Configure. Отдельная отметка, чтобы ccroot
+# не ждал всю компиляцию OpenSSL и не подхватывал их только на следующем make.
+$(OSSL_BLD)/.configured: $(OSSL_SRC)/Configure
+	@if [ -f $(OSSL_BLD)/.built ] && [ ! -f $@ ]; then touch -r $(OSSL_BLD)/.built $@; exit 0; fi
 	rm -rf $(OSSL_BLD)
 	mkdir -p $(OSSL_BLD)
 	cd $(OSSL_BLD) && perl $(abspath $(OSSL_SRC))/Configure $(OSSL_FLAGS)
 	# Configure дописывает -O3 в конец CFLAGS, поэтому более ранний -Oz он затирает.
 	sed -i 's/ -O3 / $(SIZE_FLAGS) /' $(OSSL_BLD)/Makefile
+	touch $@
+$(OSSL_BLD)/.built: $(OSSL_BLD)/.configured
 	$(MAKE) -C $(OSSL_BLD) -j$(shell nproc)
 	touch $@
 $(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
@@ -320,7 +325,8 @@ $(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/
 
 # curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста
 # по зафиксированному curl_config.h, без configure. Объекты с R_386_GOT32X,
-# поэтому cc их не линкует. .so собираем сами.
+# поэтому cc их не линкует. .so собираем сами. curl-config — скрипт этого
+# пресета: exec запускает его по #!/bin/sh.
 CURL_SRC := user/lib/curl
 CURL_BLD := $(BUILD)/curl
 CURL_PRESET := user/lib/curl-preset
@@ -432,16 +438,18 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
+CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h $(wildcard $(OSSL_SRC)/include/openssl/*.h) $(wildcard $(OSSL_BLD)/include/openssl/*.h) $(wildcard $(CURL_SRC)/include/curl/*.h)
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
-$(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/lib
+$(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC) $(OSSL_BLD)/.configured
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/include/openssl $(CCROOT)/include/curl $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
 	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
+	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; cp $$f $(CCROOT)/include/openssl/; done
+	@for f in $(CURL_SRC)/include/curl/*.h; do test -f $$f || continue; cp $$f $(CCROOT)/include/curl/; done
 	@cp $(CC_LIBSRC) $(CCROOT)/lib/
 	@touch $@
 
@@ -561,7 +569,10 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so | $(DISK)
+$(BUILD)/cert.pem: certs/roots.der tools/roots_pem.py
+	python3 tools/roots_pem.py certs/roots.der $@
+
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so $(BUILD)/cert.pem | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -622,6 +633,8 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcrypto.so /lib/libcrypto.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libssl.so /lib/libssl.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcurl.so /lib/libcurl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put user/lib/curl-preset/curl-config /bin/curl-config >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) chmod 0755 /bin/curl-config || exit 1
 	@$(BUILD)/myfs $(DISK) mkdir /include/openssl >/dev/null 2>&1 || true
 	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; $(BUILD)/myfs $(DISK) put $$f /include/openssl/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/curl >/dev/null 2>&1 || true
@@ -635,6 +648,10 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@echo "==> корневые сертификаты (список Mozilla) в /etc/certs.der"
 	@$(BUILD)/myfs $(DISK) mkdir /etc >/dev/null 2>&1 || true
 	@$(BUILD)/myfs $(DISK) put certs/roots.der /etc/certs.der >/dev/null
+	@$(BUILD)/myfs $(DISK) mkdir /etc/ssl >/dev/null
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/cert.pem /etc/ssl/cert.pem >/dev/null
+	@$(BUILD)/myfs $(DISK) mkdir /ext/etc >/dev/null
+	@$(BUILD)/myfs $(DISK) put ext/instructions/git/gitconfig /ext/etc/gitconfig >/dev/null
 
 	@for d in /etc/services /etc/services/enabled; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null || exit 1; done
 	@for f in services/*.service; do \
@@ -652,7 +669,7 @@ QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
                -drive if=none,id=sysdisk,file=$(DISK),format=raw \
                -device ich9-ahci,id=ahci \
                -device ide-hd,drive=sysdisk,bus=ahci.0
-QEMU_CPU_FLAGS = $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
+QEMU_CPU_FLAGS = $(if $(QEMU_ACCEL),-accel $(QEMU_ACCEL)) $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 ifneq ($(strip $(DATA_DISK)),)
 QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk
@@ -698,7 +715,7 @@ test: | $(BUILD)
 	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
-	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==4, v'
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==5, v'
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
 	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
@@ -785,7 +802,7 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	python3 tests/cc_crlf.py $(BUILD)/cc-host $(CCROOT)
 	@echo 'int main(void) { return 0; }' > $(BUILD)/cct_probe.c
 	@$(BUILD)/cc-host -B $(CCROOT) -linux $(BUILD)/cct_probe.c -o $(BUILD)/cct_probe
-	@if ! ./$(BUILD)/cct_probe 2>/dev/null; then \
+	@if ! $(BUILD)/cct_probe 2>/dev/null; then \
 	    echo "32-bit programs cannot run here - only checking that tests and cc itself compile"; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_x || exit 1; done; \
 	    for t in tests/cc/*.c; do $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_x || exit 1; done; \
@@ -795,17 +812,17 @@ cctest: $(BUILD)/cc-host $(CCROOT_READY)
 	fi; \
 	for t in tests/cc/*.c; do \
 	    n=$$(basename $$t .c); \
-	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && ./$(BUILD)/cct_$$n || exit 1; \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux $$t -o $(BUILD)/cct_$$n && $(BUILD)/cct_$$n || exit 1; \
 	done; \
 	for t in tests/cc/*.c; do \
 	    n=$$(basename $$t .c); \
-	    $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_pic_$$n && ./$(BUILD)/cct_pic_$$n || exit 1; \
+	    $(BUILD)/cc-host -B $(CCROOT) -linux -fPIC $$t -o $(BUILD)/cct_pic_$$n && $(BUILD)/cct_pic_$$n || exit 1; \
 	done; \
 	echo "cc -fPIC: OK"; \
 	rm -f $(BUILD)/cct_cc1 $(BUILD)/cct_cc2 $(BUILD)/cct_cc3; \
 	$(BUILD)/cc-host -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc1 && \
-	./$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
-	./$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
+	$(BUILD)/cct_cc1 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc2 && \
+	$(BUILD)/cct_cc2 -B $(CCROOT) -linux $(CC_SRC) -o $(BUILD)/cct_cc3 && \
 	cmp $(BUILD)/cct_cc2 $(BUILD)/cct_cc3 && echo "cc compiles itself: OK (stage 2 == stage 3)" && \
 	sh tests/cclink.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclink.sh $(BUILD)/cct_cc2 $(CCROOT) && \
 	sh tests/cclib.sh $(BUILD)/cc-host $(CCROOT) && sh tests/cclib.sh $(BUILD)/cct_cc2 $(CCROOT) && \
@@ -905,7 +922,7 @@ maketest: $(BUILD)/cc-host $(CCROOT_READY)
 	@sh tests/make.sh $(BUILD)/make-linux
 	@python3 tests/make_parallel.py $(BUILD)/make-linux
 	@$(BUILD)/cc-host -B $(CCROOT) -linux tests/build_jobs_test.c -o $(BUILD)/build-jobs-test
-	@./$(BUILD)/build-jobs-test
+	@$(BUILD)/build-jobs-test
 
 cptest: $(BUILD)/cc-host $(CCROOT_READY)
 	@$(BUILD)/cc-host -B $(CCROOT) -linux user/cp.c -o $(BUILD)/cp-linux

@@ -517,15 +517,37 @@ int fs_rename(u32 cwd,const char *src,const char *dst) {
     if(!r)r=access_impl(sp,3,false);
     if(!r)r=access_impl(dp,3,false);
     if(!r)r=sticky_check(sp,ino);
+    struct fs_orphan *victim_orphan=NULL;u32 victim=0;bool keep_victim=false;
+    if(!r) {
+        int found=lookup(dp,dn,&victim);
+        if(found!=FS_ENOENT && found)r=found;
+        if(!r && !found && victim!=ino) {
+            if(protected(victim))r=FS_EBUSY;
+            if(!r)r=sticky_check(dp,victim);
+            keep_victim=!r && file_disk_busy(victim);
+            if(keep_victim){victim_orphan=lookup_alloc(sizeof(*victim_orphan));if(!victim_orphan)r=FS_ENOSPC;}
+        }
+    }
     if(!r) {
         char destpath[FS_PATH_MAX]; r=select_inode(dp);
         if(!r) r=myfs_getpath(LOCAL(dp),destpath,sizeof(destpath));
         if(!r) { u32 n=strlen(destpath),l=strlen(dn);
             if(n+l+2>sizeof(destpath)) r=FS_ENAMETOOLONG;
-            else { if(n>1) destpath[n++]='/'; strcpy(destpath+n,dn); r=myfs_rename(LOCAL(sp),sn,destpath); }
+            else { if(n>1) destpath[n++]='/'; strcpy(destpath+n,dn); r=myfs_rename_keep(LOCAL(sp),sn,destpath,keep_victim); }
         }
     }
+    if(victim_orphan) {
+        if(!r){victim_orphan->ino=victim;victim_orphan->next=orphans;orphans=victim_orphan;}
+        else lookup_free(victim_orphan);
+    }
     lookup_cache_clear(); mutex_unlock(&lock); return r;
+}
+int fs_set_size(u32 ino, u32 size) {
+    mutex_lock(&lock);
+    int r = select_inode(ino);
+    if (!r) r = myfs_set_size(LOCAL(ino), size);
+    mutex_unlock(&lock);
+    return r;
 }
 int fs_truncate(u32 ino) {
     mutex_lock(&lock); int r;
