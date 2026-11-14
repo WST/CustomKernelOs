@@ -3,6 +3,7 @@
  * функции, $(...), ${VAR:-…} ${VAR#pat}, $(( )), test, перенаправления.
  */
 #include "myos.h"
+#include "fcntl.h"
 #include "sys/stat.h"
 #include "sys/wait.h"
 
@@ -1330,8 +1331,10 @@ static int apply_redir(struct redir *r) {
 static int push_redirs(struct redir *r, int n) {
     int mark = nsaves;
     for (int i = 0; i < n; i++) {
-        int spare = 50 + nsaves;
-        int ok = dup2(r[i].fd, spare) >= 0;
+        /* spare через F_DUPFD: раньше 50+nsaves при MAX_FDS=16/32 всегда
+         * промахивался, pop закрывал stdout без восстановления. */
+        int spare = fcntl(r[i].fd, F_DUPFD, 3);
+        int ok = spare >= 0;
         if (nsaves < 40) { saves[nsaves].fd = r[i].fd; saves[nsaves].spare = spare; saves[nsaves].ok = ok; nsaves++; }
         if (apply_redir(&r[i]) < 0) {
             while (nsaves > mark) {

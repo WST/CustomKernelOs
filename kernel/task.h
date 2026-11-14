@@ -10,7 +10,7 @@
 #define TASK_STACK  (16 * 1024)     /* стек ядра у каждой задачи */
 #define TASK_NAME   16
 #define TIME_SLICE  2               /* тиков таймера (по 10 мс) на задачу */
-#define MAX_FDS     16
+#define MAX_FDS     32  /* u32 cloexec; git/OpenSSL открывают много fd */
 
 enum task_state { TASK_READY, TASK_RUNNING, TASK_SLEEPING, TASK_BLOCKED, TASK_ZOMBIE };
 
