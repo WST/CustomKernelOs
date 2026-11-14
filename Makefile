@@ -562,7 +562,10 @@ $(DISK):
 $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 	$(BUILD)/cc-host -B $(CCROOT) -shared -nostdlib -o $@ user/ldso.c
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so | $(DISK)
+$(BUILD)/cert.pem: certs/roots.der tools/roots_pem.py
+	python3 tools/roots_pem.py certs/roots.der $@
+
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so $(BUILD)/cert.pem | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -638,6 +641,10 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@echo "==> корневые сертификаты (список Mozilla) в /etc/certs.der"
 	@$(BUILD)/myfs $(DISK) mkdir /etc >/dev/null 2>&1 || true
 	@$(BUILD)/myfs $(DISK) put certs/roots.der /etc/certs.der >/dev/null
+	@$(BUILD)/myfs $(DISK) mkdir /etc/ssl >/dev/null
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/cert.pem /etc/ssl/cert.pem >/dev/null
+	@$(BUILD)/myfs $(DISK) mkdir /ext/etc >/dev/null
+	@$(BUILD)/myfs $(DISK) put ext/instructions/git/gitconfig /ext/etc/gitconfig >/dev/null
 
 	@for d in /etc/services /etc/services/enabled; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null || exit 1; done
 	@for f in services/*.service; do \

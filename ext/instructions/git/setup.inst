@@ -10,3 +10,5 @@ copy config.mak config.mak
 # не влезают в 512 МБ, которые QEMU даёт по умолчанию.
 make -j2
 make -j2 install
+# Тот же список корней, что у download: /etc/ssl/cert.pem ставит образ системы.
+copy gitconfig /ext/etc/gitconfig

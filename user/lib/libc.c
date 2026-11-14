@@ -30,6 +30,8 @@
 #include "termios.h"
 #include "grp.h"
 #include "fnmatch.h"
+#include "glob.h"
+#include "spawn.h"
 #include "sys/utsname.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
@@ -436,6 +438,24 @@ int execlp(const char *file, const char *arg0, ...) {
     exec_collect(argv, 64, arg0, ap);
     va_end(ap);
     return execvp(file, argv);
+}
+int posix_spawnp(pid_t *pid, const char *file,
+                 const posix_spawn_file_actions_t *file_actions,
+                 const posix_spawnattr_t *attrp,
+                 char *const argv[], char *const envp[]) {
+    int child;
+    (void)file_actions;
+    (void)attrp;
+    if (!pid || !file || !argv) { errno = EINVAL; return EINVAL; }
+    child = fork();
+    if (child < 0) return errno;
+    if (child == 0) {
+        if (envp) environ = (char **)envp;
+        execvp(file, argv);
+        _exit(127);
+    }
+    *pid = child;
+    return 0;
 }
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
 int   getppid(void)                              { return syscall3(SYS_GETPPID, 0, 0, 0); }
@@ -2296,12 +2316,34 @@ FILE *fdopen(int fd, const char *mode) {
     return file_new(fd, acc);
 }
 
+static void memstream_sync(FILE *f) {
+    if (!f->ms_buf || !f->mem) return;
+    if (f->mem_len < 0) f->mem_len = 0;
+    if (f->mem_len >= f->mem_cap) {
+        int cap = f->mem_len + 1;
+        char *grown = realloc(f->mem, (size_t)cap);
+        if (!grown) return;
+        f->mem = grown;
+        f->mem_cap = cap;
+    }
+    f->mem[f->mem_len] = 0;
+    *f->ms_buf = f->mem;
+    if (f->ms_size) *f->ms_size = (size_t)f->mem_len;
+}
+
 int fclose(FILE *f) {
-    int r = 0;
+    int r = 0, pooled;
     if (!f) return EOF;
+    if (f->ms_buf) {
+        memstream_sync(f);
+        f->mem = NULL;
+        f->ms_buf = NULL;
+    }
     if (f->mem) { free(f->mem); f->mem = NULL; }
     if (f->fd >= 0) r = close(f->fd);
     f->fd = -1;
+    pooled = f >= stdfiles && f < stdfiles + (int)(sizeof stdfiles / sizeof stdfiles[0]);
+    if (!pooled) free(f);
     return r < 0 ? EOF : 0;
 }
 
@@ -2318,10 +2360,34 @@ FILE *fmemopen(void *buf, size_t size, const char *mode) {
     f->mem = m;
     f->mem_pos = 0;
     f->mem_len = (int)size;
+    f->mem_cap = (int)size;
     return f;
 }
 
-int fflush(FILE *f) { (void)f; return 0; }
+FILE *open_memstream(char **ptr, size_t *sizeloc) {
+    FILE *f;
+    char *m;
+    if (!ptr || !sizeloc) { errno = EINVAL; return NULL; }
+    f = file_new(-1, FF_WRITE);
+    if (!f) return NULL;
+    m = malloc(64);
+    if (!m) { fclose(f); return NULL; }
+    m[0] = 0;
+    f->mem = m;
+    f->mem_pos = 0;
+    f->mem_len = 0;
+    f->mem_cap = 64;
+    f->ms_buf = ptr;
+    f->ms_size = sizeloc;
+    *ptr = m;
+    *sizeloc = 0;
+    return f;
+}
+
+int fflush(FILE *f) {
+    if (f && f->ms_buf) memstream_sync(f);
+    return 0;
+}
 int fileno(FILE *f) { return f ? f->fd : -1; }
 int feof(FILE *f) { return f && (f->flags & FF_EOF); }
 int ferror(FILE *f) { return f && (f->flags & FF_ERR); }
@@ -2374,7 +2440,35 @@ size_t fwrite(const void *ptr, size_t size, size_t nmemb, FILE *f) {
     int want = (int)(size * nmemb), off = 0;
     const char *s = ptr;
     while (off < want) {
-        int r = write(f->fd, s + off, (size_t)(want - off));
+        int r, chunk;
+        if (f->mem) {
+            chunk = want - off;
+            if (f->ms_buf) {
+                while (f->mem_pos > f->mem_cap - chunk - 1) {
+                    int cap = f->mem_cap > 0 ? f->mem_cap * 2 : 64;
+                    char *grown;
+                    if (cap < f->mem_pos + chunk + 1) cap = f->mem_pos + chunk + 1;
+                    if (cap < f->mem_cap) { f->flags |= FF_ERR; chunk = 0; break; }
+                    grown = realloc(f->mem, (size_t)cap);
+                    if (!grown) { f->flags |= FF_ERR; chunk = 0; break; }
+                    f->mem = grown;
+                    f->mem_cap = cap;
+                }
+            } else if (f->mem_pos >= f->mem_cap) {
+                f->flags |= FF_ERR;
+                break;
+            } else if (chunk > f->mem_cap - f->mem_pos) {
+                chunk = f->mem_cap - f->mem_pos;
+            }
+            if (chunk <= 0) break;
+            memcpy(f->mem + f->mem_pos, s + off, (size_t)chunk);
+            f->mem_pos += chunk;
+            if (f->mem_pos > f->mem_len) f->mem_len = f->mem_pos;
+            if (f->ms_buf) memstream_sync(f);
+            off += chunk;
+            continue;
+        }
+        r = write(f->fd, s + off, (size_t)(want - off));
         if (r <= 0) { f->flags |= FF_ERR; break; }
         off += r;
     }
@@ -2491,6 +2585,12 @@ ssize_t getline(char **line, size_t *n, FILE *stream) {
 mode_t umask(mode_t mask){return fs_call(9,mask,0);}
 int access(const char *path,int mode){return ioerr(fs_call(8,(int)path,mode));}
 int chmod(const char *path,mode_t mode){return ioerr(fs_call(4,(int)path,mode));}
+int mkfifo(const char *path, mode_t mode) {
+    (void)path;
+    (void)mode;
+    errno = ENOSYS;
+    return -1;
+}
 int fchmod(int fd,mode_t mode){return ioerr(fs_call(5,fd,mode));}
 int chown(const char *path,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(6,(int)path,(int)ids));}
 int fchown(int fd,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(7,fd,(int)ids));}
@@ -2691,6 +2791,99 @@ struct dirent *readdir(DIR *dir) {
 int closedir(DIR *dir) {
     if (!dir) { errno = EBADF; return -1; }
     free(dir);
+    return 0;
+}
+
+static int glob_add(glob_t *p, const char *path) {
+    size_t n = p->gl_pathc;
+    char **v = realloc(p->gl_pathv, (n + 2) * sizeof *v);
+    char *copy;
+    if (!v) return -1;
+    p->gl_pathv = v;
+    copy = strdup(path);
+    if (!copy) return -1;
+    v[n] = copy;
+    v[n + 1] = NULL;
+    p->gl_pathc = n + 1;
+    return 0;
+}
+
+static int glob_cmp(const void *a, const void *b) {
+    return strcmp(*(char *const *)a, *(char *const *)b);
+}
+
+void globfree(glob_t *pglob) {
+    size_t i;
+    if (!pglob || !pglob->gl_pathv) return;
+    for (i = 0; i < pglob->gl_pathc; i++) free(pglob->gl_pathv[i]);
+    free(pglob->gl_pathv);
+    pglob->gl_pathv = NULL;
+    pglob->gl_pathc = 0;
+}
+
+int glob(const char *pattern, int flags, int (*errfunc)(const char *, int), glob_t *pglob) {
+    const char *slash, *base;
+    char dirbuf[512], path[512];
+    const char *dir;
+    DIR *dp;
+    struct dirent *ent;
+    int matched = 0;
+    (void)flags;
+    (void)errfunc;
+    if (!pglob) return GLOB_NOSPACE;
+    pglob->gl_pathc = 0;
+    pglob->gl_pathv = NULL;
+    pglob->gl_offs = 0;
+    if (!pattern || !pattern[0]) return GLOB_NOMATCH;
+    if (!strpbrk(pattern, "*?[")) {
+        struct stat st;
+        if (stat(pattern, &st) != 0) return GLOB_NOMATCH;
+        return glob_add(pglob, pattern) < 0 ? GLOB_NOSPACE : 0;
+    }
+    slash = strrchr(pattern, '/');
+    if (!slash) {
+        dir = ".";
+        base = pattern;
+    } else if (slash == pattern) {
+        dir = "/";
+        base = slash + 1;
+    } else {
+        int n = (int)(slash - pattern);
+        if (n >= (int)sizeof dirbuf) return GLOB_NOSPACE;
+        memcpy(dirbuf, pattern, (size_t)n);
+        dirbuf[n] = 0;
+        dir = dirbuf;
+        base = slash + 1;
+    }
+    if (strpbrk(dir, "*?[")) return GLOB_NOMATCH;
+    dp = opendir(dir);
+    if (!dp) return GLOB_NOMATCH;
+    while ((ent = readdir(dp))) {
+        int nd, nn;
+        if (ent->d_name[0] == '.' && base[0] != '.') continue;
+        if (fnmatch(base, ent->d_name, 0) != 0) continue;
+        nd = (int)strlen(dir);
+        nn = (int)strlen(ent->d_name);
+        if (nd == 1 && dir[0] == '/') {
+            if (nn + 2 >= (int)sizeof path) continue;
+            path[0] = '/';
+            memcpy(path + 1, ent->d_name, (size_t)nn + 1);
+        } else {
+            if (nd + nn + 2 >= (int)sizeof path) continue;
+            memcpy(path, dir, (size_t)nd);
+            path[nd] = '/';
+            memcpy(path + nd + 1, ent->d_name, (size_t)nn + 1);
+        }
+        if (glob_add(pglob, path) < 0) {
+            closedir(dp);
+            globfree(pglob);
+            return GLOB_NOSPACE;
+        }
+        matched = 1;
+    }
+    closedir(dp);
+    if (!matched) return GLOB_NOMATCH;
+    qsort(pglob->gl_pathv, pglob->gl_pathc, sizeof(char *), glob_cmp);
     return 0;
 }
 
@@ -3081,6 +3274,9 @@ double strtod(const char *nptr, char **end) {
     else if (exp < 0) x /= dpow10(-exp);
     return sign < 0 ? -x : x;
 }
+
+float strtof(const char *nptr, char **end) { return (float)strtod(nptr, end); }
+long double strtold(const char *nptr, char **end) { return (long double)strtod(nptr, end); }
 
 long strtol(const char *nptr, char **end, int base) {
     int saved = errno;
@@ -3782,6 +3978,14 @@ struct tm *gmtime_r(const time_t *tp, struct tm *out) {
 
 struct tm *localtime_r(const time_t *tp, struct tm *out) { return gmtime_r(tp, out); }
 
+char *ctime_r(const time_t *tp, char *buf) {
+    struct tm tm;
+    if (!tp || !buf) { errno = EINVAL; return NULL; }
+    if (!localtime_r(tp, &tm)) return NULL;
+    if (strftime(buf, 26, "%a %b %e %H:%M:%S %Y\n", &tm) == 0) return NULL;
+    return buf;
+}
+
 struct tm *gmtime(const time_t *tp) {
     static struct tm buf;
     return gmtime_r(tp, &buf);
@@ -4053,6 +4257,16 @@ int getrlimit(int resource, struct rlimit *rlim) {
 #else
     if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
     rlim->rlim_cur = rlim->rlim_max = 16;
+    return 0;
+#endif
+}
+int getrusage(int who, struct rusage *usage) {
+    if (!usage) { errno = EFAULT; return -1; }
+#if defined(__LINUX_TEST__)
+    return ioerr(__syscall(77, who, (int)usage));
+#else
+    (void)who;
+    memset(usage, 0, sizeof *usage);
     return 0;
 #endif
 }

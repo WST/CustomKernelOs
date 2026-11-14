@@ -1556,8 +1556,14 @@ static Node *cast(Token **rest, Token *tok) {
         Type *ty = typename_(&tok, tok->next);
         tok = skip(tok, ")");
         if (equal(tok, "{")) {
-            /* (тип){...} — безымянная локальная переменная с инициализатором. */
-            if (!current_fn) error_tok(start, "compound literal outside a function");
+            /* (тип){...} — безымянный объект с инициализатором.
+             * На уровне файла это статический объект: его адрес — константа. */
+            if (!current_fn) {
+                Obj *var = new_anon_gvar(ty);
+                gvar_initializer(&tok, tok, var);
+                *rest = tok;
+                return new_var_node(var, start);
+            }
             Obj *var = new_lvar(new_unique_name(), ty);
             Node *init = lvar_initializer(&tok, tok, var);
             *rest = tok;

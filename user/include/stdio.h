@@ -15,8 +15,10 @@
 typedef struct FILE {
     int fd;
     int flags;
-    char *mem;          /* буфер fmemopen, иначе NULL */
-    int mem_pos, mem_len;
+    char *mem;          /* буфер fmemopen или open_memstream, иначе NULL */
+    int mem_pos, mem_len, mem_cap;
+    char **ms_buf;      /* open_memstream: куда отдать буфер */
+    size_t *ms_size;    /* длина без завершающего нуля */
 } FILE;
 
 extern FILE *stdin, *stdout, *stderr;
@@ -27,6 +29,7 @@ FILE *tmpfile(void);
 char *tmpnam(char *s);
 FILE *fdopen(int fd, const char *mode);
 FILE *fmemopen(void *buf, size_t size, const char *mode);
+FILE *open_memstream(char **ptr, size_t *sizeloc);
 int fclose(FILE *f);
 int fflush(FILE *f);
 int fileno(FILE *f);
