@@ -485,7 +485,10 @@ int proc_spawn_child(const char *path, int argc, char **argv, char **env, struct
  * того же самого fork(), но получает 0, а родитель — номер потомка. */
 int proc_fork(struct regs *r) {
     struct task *parent = task_current();
-    if (parent->leader || task_has_threads(parent)) return PROC_EBUSY;
+    /* Как Linux: fork только у лидера; другие потоки в ребёнка не копируем.
+     * Раньше task_has_threads() давал EBUSY — git+libpthread не мог index-pack. */
+    if (parent->leader) return PROC_EBUSY;
+    parent = task_process(parent);
     u32 pages;
     u32 dir = vmm_clone_user(parent->page_dir, &pages);
     if (!dir) return PROC_ENOMEM;

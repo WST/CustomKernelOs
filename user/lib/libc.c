@@ -1472,10 +1472,24 @@ void *reallocarray(void *p, size_t n, size_t size) {
 
 void *realloc(void *p, size_t n) {
     if (!p) return malloc(n);
+    thread_mutex_lock(&heap_lock);
     struct hdr *h = (struct hdr *)p - 1;
-    if (h->size >= n) return p;
-    void *q = malloc(n);
-    if (q) { memcpy(q, p, h->size); free(p); }
+    if (h->magic != HEAP_MAGIC) {
+        thread_mutex_unlock(&heap_lock);
+        errno = EINVAL;
+        return NULL;
+    }
+    if (h->size >= n) {
+        thread_mutex_unlock(&heap_lock);
+        return p;
+    }
+    size_t old = h->size;
+    void *q = malloc_unlocked(n);
+    if (q) {
+        memcpy(q, p, old);
+        free_unlocked(p);
+    }
+    thread_mutex_unlock(&heap_lock);
     return q;
 }
 
