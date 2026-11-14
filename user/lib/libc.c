@@ -369,7 +369,7 @@ int gettid(void) { return syscall3(SYS_GETTID,0,0,0); }
 int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,0,0); }
 int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
 int thread_mutex_trylock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,2,0); }
-int   fork(void)                                 { return syscall3(SYS_FORK, 0, 0, 0); }
+int   fork(void)                                 { return ioerr(syscall3(SYS_FORK, 0, 0, 0)); }
 int   execve(const char *path, char *const argv[], char *const envp[]) {
     return syscall3(SYS_EXEC, (int)path, (int)argv, (int)(envp ? envp : environ));
 }
