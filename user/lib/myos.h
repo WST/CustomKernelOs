@@ -428,7 +428,7 @@ int   service_register(const char *name);           /* «я — служба nam
 int   service_find(const char *name);               /* -> pid службы или 0 */
 
 struct datetime { unsigned year, month, day, hour, min, sec; };
-int   get_time(struct datetime *t);                 /* часы компьютера */
+int   datetime_get(struct datetime *t);             /* часы компьютера (не get_time: так зовёт Git) */
 
 enum { UNIT_LIST, UNIT_STATUS, UNIT_START, UNIT_STOP, UNIT_RESTART,
        UNIT_ENABLE, UNIT_DISABLE, UNIT_RELOAD };

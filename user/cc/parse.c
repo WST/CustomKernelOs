@@ -1816,9 +1816,16 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
         } else {
             fn = new_gvar(name, ty);
             fn->is_function = true;
-            fn->is_static = attr->is_static || (attr->is_inline && !attr->is_extern);
-            if (fn->is_static) fn->name = static_name(name);
             fn->is_definition = false;
+        }
+        /* new_gvar ставит is_static=true; для обычных функций сбрасываем.
+         * static на определении перекрывает прежнее extern из заголовка
+         * (иначе get_time из myos.h делал static get_time в date.c глобальным). */
+        if (attr->is_static || (attr->is_inline && !attr->is_extern)) {
+            fn->is_static = true;
+            if (!strchr(fn->name, '.')) fn->name = static_name(name);
+        } else {
+            fn->is_static = false;
         }
         fn->tok = ty->name;
         fn->is_definition = fn->is_definition || equal(tok, "{");

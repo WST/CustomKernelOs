@@ -960,10 +960,23 @@ static int myfs_rename_impl(u32 cwd, const char *src, const char *dst) {
     } else if ((r = resolve_parent(cwd, dst, &dparent, dname))) {
         return r;
     }
-    u32 taken;
-    r = dir_lookup(dparent, dname, &taken, NULL);
+    u32 taken, toff = 0;
+    r = dir_lookup(dparent, dname, &taken, &toff);
     if (r) return r;
-    if (taken) return FS_EEXIST;
+    if (taken) {
+        /* POSIX: rename поверх существующего файла заменяет его. */
+        if (taken == ino) return FS_OK;
+        if (dir_check(taken) == FS_OK) return FS_EEXIST; /* каталог не затираем */
+        struct inode victim;
+        if ((r = iread(taken, &victim))) return r;
+        if ((r = dir_set(dparent, toff, 0, NULL))) return r;
+        victim.links = 0;
+        free_all_blocks(&victim);
+        victim.type = FS_TYPE_FREE;
+        ino_note_free(taken);
+        if ((r = iwrite(taken, &victim))) return r;
+        available_inodes++;
+    }
 
     /* нельзя переместить каталог внутрь самого себя */
     for (u32 p = dparent; ;) {

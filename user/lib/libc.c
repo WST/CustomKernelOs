@@ -2023,7 +2023,8 @@ int unitctl(unsigned op, const char *name, struct unit_info *out, unsigned index
 
 int service_register(const char *name)          { return syscall3(SYS_SERVICE, 1, (int)name, 0); }
 int service_find(const char *name)              { return syscall3(SYS_SERVICE, 2, (int)name, 0); }
-int get_time(struct datetime *t)                { return syscall3(SYS_TIME, (int)t, 0, 0); }
+int datetime_get(struct datetime *t)            { return syscall3(SYS_TIME, (int)t, 0, 0); }
+int get_time(struct datetime *t)                { return datetime_get(t); } /* устар. имя */
 
 
 
@@ -3616,7 +3617,7 @@ time_t time(time_t *tloc) {
     struct datetime d;
     unsigned y;
     long long days;
-    if (get_time(&d) < 0 || d.year < 1970 || d.month < 1 || d.month > 12) return (time_t)-1;
+    if (datetime_get(&d) < 0 || d.year < 1970 || d.month < 1 || d.month > 12) return (time_t)-1;
     days = 0;
     for (y = 1970; y < d.year; y++) days += leap(y) ? 366 : 365;
     days += md[d.month - 1];
