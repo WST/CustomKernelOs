@@ -12,6 +12,7 @@
  * мы загружаем его CR3 и пишем вершину его стека ядра в TSS (esp0): когда в
  * программе случится прерывание, процессор перейдёт именно на этот стек. */
 #include "task.h"
+#include "scheduler.h"
 #include "block.h"
 #include "tty.h"
 #include "ipc.h"
@@ -44,11 +45,18 @@ bool task_raw_device_busy(int disk) {
         }
     irq_restore(flags); return busy;
 }
+bool task_volume_busy(u32 slot) {
+    u32 flags=irq_save();bool busy=false;
+    for(int i=0;i<MAX_TASKS;i++)if(tasks[i] && tasks[i]->state!=TASK_ZOMBIE) {
+        struct task *t=task_process(tasks[i]);
+        if((t->cwd>>24)==slot || (t->fs_root && (t->fs_root>>24)==slot))busy=true;
+    }
+    irq_restore(flags);return busy;
+}
 static struct task  task0;          /* kmain / оболочка: живёт на стеке загрузчика */
 static u32 next_id;
 #define slice (cpu_states[smp_cpu()].slice)
 #define need_resched (cpu_states[smp_cpu()].resched)
-static u32 next_cpu;
 static struct task ap_idle[SMP_MAX_CPUS];
 
 /* ---------------------------------------------------------------- служебное */
@@ -135,6 +143,7 @@ static void release_user_stack(struct task *t) {
  * Файлы закрываем сразу — чтобы, например, читатель канала увидел конец. */
 static void make_zombie(struct task *t, int code) {
     if (t->state == TASK_ZOMBIE) return;
+    scheduler_remove(t);
     release_mutex(t);
     for (int i=0; i<MAX_FDS; i++) {
         struct file *f=t->syscall_fds[i]; t->syscall_fds[i]=NULL; file_close(f);
@@ -187,6 +196,7 @@ bool task_stack_busy(u32 dir,u32 start,u32 end) {
     }return false;
 }
 static void free_task(struct task *t) {
+    scheduler_remove(t);
     if(t->leader && t->guard_va){u32 frame;
         if(vmm_lookup(t->page_dir,t->guard_va,&frame,NULL))vmm_map_in(t->page_dir,t->guard_va,frame,t->guard_flags);
         t->guard_va=0;
@@ -251,16 +261,6 @@ void fpu_copy_current(struct task *to) {
 
 /* ---------------------------------------------------------------- планировщик */
 
-static struct task *pick_next(void) {
-    int cur = slot_of(current);
-    for (int i = 1; i <= MAX_TASKS; i++) {
-        struct task *t = tasks[(cur + i) % MAX_TASKS];
-        if (t && !t->cpu_idle && t->cpu == smp_cpu() && t != current && t->state == TASK_READY) return t;
-    }
-    if (current != idle_task && current->state == TASK_READY) return current;
-    return idle_task;
-}
-
 struct regs *schedule(struct regs *r) {
     if (!current) return r;
 
@@ -271,16 +271,19 @@ struct regs *schedule(struct regs *r) {
         kprintf("\n[task %u '%s' killed: kernel stack overflow]\n", current->id, current->name);
         make_zombie(current, 134);
     }
+    current->user_context=current->user && !current->in_syscall && (r->cs&3);
     if (current->state == TASK_RUNNING) current->state = TASK_READY;
+    if(current->state==TASK_READY)scheduler_enqueue(current,true);
 
-    struct task *next = pick_next();
+    struct task *next = scheduler_pick(smp_cpu());
+    scheduler_dispatch(current,next);
     if (next->state == TASK_READY) next->state = TASK_RUNNING;
     if (next != current) {
         if (current->user && current->state != TASK_ZOMBIE) fpu_save(current);
         if (next->user) fpu_restore(next);
     }
     current = next;
-    slice = TIME_SLICE;
+    slice = next->cpu_idle?TIME_SLICE:next->sched_left;
     need_resched = false;
 
     vmm_switch(next->page_dir);                     /* адресное пространство задачи */
@@ -297,18 +300,17 @@ struct regs *sched_tick(struct regs *r) {
     if (current->cpu_idle) cpu_states[smp_cpu()].idle_ticks++;
 
     u32 now = timer_ticks();
-    for (int i = 0; i < MAX_TASKS; i++) {
+    if(smp_cpu()==0) for (int i = 0; i < MAX_TASKS; i++) {
         struct task *t = tasks[i];
         if (t && t->state == TASK_SLEEPING && (i32)(now - t->wake_tick) >= 0) {
-            t->state = TASK_READY;
-            smp_wake(t->cpu);
+            scheduler_wake(t);
         }
         if (t && t->state == TASK_BLOCKED && t->wait_deadline &&
             (i32)(now - t->wait_deadline) >= 0) {       /* ждал с тайм-аутом — время вышло */
-            t->state = TASK_READY;
-            smp_wake(t->cpu);
+            scheduler_wake(t);
         }
     }
+    if(smp_cpu()==0)scheduler_maintenance();
     if (smp_cpu() == 0 && now % TIMER_HZ == 0) {                      /* CPU% за последнюю секунду */
         for (int i = 0; i < MAX_TASKS; i++) {
             struct task *t = tasks[i];
@@ -319,16 +321,16 @@ struct regs *sched_tick(struct regs *r) {
     }
 
     if (current->state == TASK_ZOMBIE) return schedule(r);
-    if (current == idle_task && need_resched) return schedule(r);
-    if (slice) slice--;
-    if (slice == 0) return schedule(r);             /* квант исчерпан — вытесняем */
+    if (current == idle_task) return schedule(r);
+    scheduler_charge(current);slice=current->sched_left;
+    if (!slice || scheduler_preempt(smp_cpu(),current)) return schedule(r);             /* квант исчерпан — вытесняем */
     return r;
 }
 
 struct regs *sched_maybe(struct regs *r) {
     if (!current) return r;
     if (current->state == TASK_ZOMBIE) return schedule(r);   /* например, убит по Ctrl+C */
-    if (need_resched && current == idle_task) return schedule(r);
+    if (need_resched && scheduler_preempt(smp_cpu(),current)) return schedule(r);
     return r;
 }
 
@@ -353,6 +355,7 @@ void tasking_init(void) {
     task0.id = next_id++;
     memcpy(task0.name, "shell", 6);
     task0.state = TASK_RUNNING;
+    scheduler_init_task(&task0,NULL);
     task0.page_dir = vmm_kernel_dir();
     tasks[0] = &task0;
     current = &task0;
@@ -361,6 +364,7 @@ void tasking_init(void) {
     task_create("idle", idle_loop, NULL);   /* займёт слот 1 */
     idle_task = tasks[1];
     idle_task->cpu_idle = true;
+    scheduler_remove(idle_task);
 }
 
 void tasking_init_ap(void) {
@@ -409,8 +413,10 @@ u32 task_start(struct task *t) {
     for (int i = 0; i < MAX_TASKS; i++) if (!tasks[i]) { slot = i; break; }
     if (slot >= 0) {
         t->id = next_id++;
-        t->cpu = t->user ? next_cpu++ % smp_count() : 0;
+        scheduler_init_task(t,current);
+        t->cpu = t->user ? scheduler_choose_cpu() : 0;
         tasks[slot] = t;
+        scheduler_enqueue(t,true);
         smp_wake(t->cpu);
     }
     if (slot >= 0 && !t->pgid) t->pgid = t->id;   /* новая группа (fork задаёт свою) */
@@ -566,8 +572,8 @@ int task_kill(u32 id) {
          * Deliver at the next ring-3 timer interrupt or syscall return. */
         if (!t->kill_pending) t->pending_code=137;
         t->kill_pending = true;
-        if (t->state == TASK_SLEEPING || t->state == TASK_BLOCKED) t->state = TASK_READY;
-        smp_wake(t->cpu);
+        if (t->state == TASK_SLEEPING || t->state == TASK_BLOCKED) scheduler_wake(t);
+        else smp_wake(t->cpu);
     } else {
         make_zombie(t, 137);                 /* как SIGKILL в Unix: 128 + 9 */
     }
@@ -641,6 +647,7 @@ void task_sleep_ticks(u32 ticks) {
     u32 f = irq_save();
     if (current->user && current->kill_pending) { irq_restore(f); return; }
     current->wake_tick = timer_ticks() + ticks;
+    scheduler_block(current);
     current->state = TASK_SLEEPING;
     task_yield();
     irq_restore(f);
@@ -650,6 +657,7 @@ void task_sleep_ticks(u32 ticks) {
 void task_wait(void *chan) {
     current->wait_chan = chan;
     current->wait_deadline = 0;
+    scheduler_block(current);
     current->state = TASK_BLOCKED;
     task_yield();
     current->wait_chan = NULL;
@@ -660,6 +668,7 @@ bool task_wait_timeout(void *chan, u32 ticks) {
     u32 deadline = timer_ticks() + (ticks ? ticks : 1);
     current->wait_chan = chan;
     current->wait_deadline = deadline;
+    scheduler_block(current);
     current->state = TASK_BLOCKED;
     task_yield();
     current->wait_chan = NULL;
@@ -672,8 +681,7 @@ void task_wakeup(void *chan) {
     for (int i = 0; i < MAX_TASKS; i++) {
         struct task *t = tasks[i];
         if (t && t->state == TASK_BLOCKED && t->wait_chan == chan) {
-            t->state = TASK_READY;
-            smp_wake(t->cpu);
+            scheduler_wake(t);
         }
     }
     irq_restore(f);
@@ -684,8 +692,7 @@ void task_wake_one(void *chan) {
     for (int i = 0; i < MAX_TASKS; i++) {
         struct task *t = tasks[i];
         if (t && t->state == TASK_BLOCKED && t->wait_chan == chan) {
-            t->state = TASK_READY;
-            smp_wake(t->cpu);
+            scheduler_wake(t);
             break;
         }
     }

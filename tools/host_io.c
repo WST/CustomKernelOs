@@ -9,6 +9,8 @@
 static FILE *img;
 static unsigned img_sectors;
 void host_close_image(void);
+int host_flush_image(void) {return !img || fflush(img) || fsync(fileno(img)) ? -1 : 0;}
+int ata_unit_flush(int unit) {return unit ? -1 : host_flush_image();}
 
 int host_open_image(const char *path) {
     host_close_image();

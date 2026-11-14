@@ -1,9 +1,10 @@
 /* Minimal polling xHCI 1.x + USB HID boot protocol.
  * DMA lives in PMM pages below 1 GiB, never in the virtual kernel heap.
- * Hotplug and USB 2.x hubs; HID input. Mass-storage transport is not implemented.
+ * Hotplug and USB 2.x hubs; HID input. Boot media use Bulk-Only/SCSI transport.
  * Reference: Intel xHCI 1.2, sections 4.3, 4.5, 6.2 and 6.4.
  */
 #include "xhci.h"
+#include "bootinfo.h"
 #include "pci.h"
 #include "pmm.h"
 #include "paging.h"
@@ -35,6 +36,10 @@ struct usbdev {
     u32 *context,*input;
     struct ring control;
     u8 *buffer;
+    struct ring bulk[2];
+    unsigned bulk_dci[2];
+    u8 *storage_buffer;
+    u32 storage_sectors;
 };
 struct hid {
     struct usbdev *dev;
@@ -61,7 +66,7 @@ static struct usbdev devices[NDEV];
 static struct hid hids[NHID];
 static u8 root_seen[256],key_refs[256],mod_refs[8];
 static unsigned generation;
-static u32 waiting,wait_code,wait_slot,waiting_slot,waiting_dci;
+static u32 waiting,wait_code,wait_slot,waiting_slot,waiting_dci,wait_left;
 static bool running,poisoned;
 static bool inventory_ready;
 static struct pci_dev inventory_controller;
@@ -213,7 +218,7 @@ static void pump(void) {
         if (((type==33 && !waiting_slot && e.lo==waiting) ||
              (type==32 && waiting_slot==(ctl>>24) && waiting_dci==((ctl>>16)&31) &&
               (e.lo==waiting || (code!=1 && code!=13)))) && waiting && !e.hi) {
-            wait_code=code; wait_slot=ctl>>24;
+            wait_code=code; wait_slot=ctl>>24;wait_left=e.status&0xffffff;
         } else if (type==32) {
             for (unsigned i=0;i<NHID;i++) {
                 struct hid *h=&hids[i];
@@ -244,7 +249,7 @@ static void pump(void) {
     repeat_keys();
 }
 static unsigned completion(u32 pointer,unsigned ms,bool fatal) {
-    waiting=pointer; wait_code=0; wait_slot=0;
+    waiting=pointer; wait_code=0; wait_slot=0;wait_left=0;
     u32 start=timer_ticks();
     do {
         pump();
@@ -335,6 +340,8 @@ static bool configure_hub(struct usbdev *d,unsigned config) {
     kprintf("USB hub: root %u route %x, slot %u, %u ports (single TT)\n",d->port,d->route,d->slot,count);
     return true;
 }
+#include "xhci-storage.inc"
+
 static bool configure(struct usbdev *d) {
     if (!control(d,0x80,6,0x100,0,8)) return false;
     unsigned mps=d->buffer[7];
@@ -366,6 +373,12 @@ static bool configure(struct usbdev *d) {
     if (total<9 || total>512 || !control(d,0x80,6,0x200,0,total)) return false;
     if(info->device_class==9) return configure_hub(d,config);
     u8 descriptors[512]; memcpy(descriptors,d->buffer,total);
+    for(unsigned pos=0;pos+2<=total;) {
+        const u8 *p=descriptors+pos;unsigned len=p[0];if(len<2 || pos+len>total)break;
+        if(p[1]==4 && len>=9 && p[3]==0 && p[5]==8 && p[6]==6 && p[7]==0x50)
+            return configure_storage(d,descriptors,total,config);
+        pos+=len;
+    }
     unsigned found=0,protocol=0,iface=0,maxdci=1,report_bytes=0;
     copy_slot(d); d->input[1]=1;
     for (unsigned pos=0;pos+2<=total;) {
@@ -428,6 +441,7 @@ static void free_page(void *p) { if(p) pmm_free((u32)p); }
 static bool detach(struct usbdev *d) {
     if(!d->used || d->removing) return !d->quarantined;
     d->removing=true; d->published=false;
+    if(root_storage==d)root_ambiguous=true; /* never rebind a mounted device after unplug */
     if(d->parent<0) memset(&inventory[d->port-1],0,sizeof(inventory[0]));
     for(unsigned i=0;i<NHID;i++) if(hids[i].dev==d) release_hid(&hids[i]);
     for(unsigned i=0;i<NDEV;i++) if(devices[i].used && devices[i].parent==(int)(d-devices))
@@ -443,6 +457,7 @@ static bool detach(struct usbdev *d) {
     for(unsigned i=0;i<NHID;i++) if(hids[i].dev==d) {
         free_page(hids[i].ring.base); free_page(hids[i].report); memset(&hids[i],0,sizeof(hids[i]));
     }
+    free_page(d->bulk[0].base);free_page(d->bulk[1].base);free_page(d->storage_buffer);
     free_page(d->control.base); free_page(d->context); free_page(d->input); free_page(d->buffer);
     kprintf("USB disconnected: root %u route %x slot %u\n",d->port,d->route,d->slot);
     memset(d,0,sizeof(*d)); return true;
@@ -572,8 +587,10 @@ static void stop_controller(void) {
 static void worker(void *unused) {
     (void)unused; u32 next=0;
     while(running && !poisoned) {
+        mutex_lock(&usb_lock);
         pump();
         if((i32)(timer_ticks()-next)>=0) { topology_poll(); next=timer_ticks()+TIMER_HZ/10; }
+        mutex_unlock(&usb_lock);
         sleep_ms(10);
     }
     stop_controller();
@@ -712,6 +729,9 @@ bool xhci_init(void) {
     return true;
 }
 #else
+u32 xhci_root_sectors(void){return 0;}
+int xhci_root_io(u32 lba,void *p,u32 count,bool write){(void)lba;(void)p;(void)count;(void)write;return -1;}
+int xhci_root_flush(void){return -1;}
 int xhci_port_info(unsigned index, struct hw_usb_info *out) { (void)index; (void)out; return 0; }
 int xhci_device_info(unsigned index, struct hw_usb_device_info *out) { (void)index; (void)out; return 0; }
 bool xhci_init(void) { return false; }

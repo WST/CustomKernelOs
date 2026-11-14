@@ -21,7 +21,7 @@ a.o: a.c
 	cat a.c > a.o
 EOF
 printf 'hello\n' > a.c
-"$G" > run1.out || fail first
+MAKEFLAGS=" -- LABEL=silent-dry-run-name" "$G" > run1.out || fail first
 cmp run1.out - << 'EOF' || fail first-out
 cat a.c > a.o
 cat a.o > prog

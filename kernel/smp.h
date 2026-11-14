@@ -1,6 +1,7 @@
 #ifndef SMP_H
 #define SMP_H
 #include "types.h"
+#include "../user/lib/kernelinfo.h"
 #define SMP_MAX_CPUS 8
 struct regs;
 struct task;
@@ -18,6 +19,13 @@ u32 smp_count(void);
 void smp_init(void);
 void smp_early_init(void); /* before paging: BIOS data area is in page zero */
 void smp_enter(void);
+/* Trusted, bounded leaf work only: IRQs remain off, no user memory, allocator,
+ * scheduler or BKL acquisition until smp_parallel_end. Drop all leaf locks
+ * before ending. Caller revalidates user buffers after reacquiring the BKL. */
+u32 smp_parallel_begin(void);
+void smp_parallel_end(u32 flags);
+bool smp_syscall_fast(struct regs *r);
+void smp_kernel_snapshot(struct kernel_info *out);
 void smp_user_tlb_flush(u32 dir);
 void smp_kernel_mapping_changed(void);
 void smp_leave(struct regs *r);

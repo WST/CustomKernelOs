@@ -1,5 +1,6 @@
 #include "myos.h"
 #include "sys/stat.h"
+#include "sys/wait.h"
 #define CHECK(x) do { if(!(x)) { printf("SPAWN FAIL line %d: %s\n",__LINE__,#x); return 1; } } while(0)
 static int child(int argc,char **argv) {
     CHECK(argc==7 && !strcmp(argv[1],"child"));
@@ -23,7 +24,7 @@ static int exercise(void) {
     int pid=spawn("/bin/spawncheck",args,input); CHECK(pid>0);
     close(input); close(fds[1]);
     CHECK(read(fds[0],reply,2)==2 && !strcmp(reply,"ok")); close(fds[0]);
-    int status=-1; CHECK(waitpid(pid,&status,0)==pid && status==23);
+    int status=-1; CHECK(waitpid(pid,&status,0)==pid && WIFEXITED(status) && WEXITSTATUS(status)==23);
     char after[128]; CHECK(getcwd(after,sizeof(after))==after && !strcmp(after,cwd));
     CHECK(spawn("/missing",args,-1)==-ENOENT);
     CHECK(spawn((char *)0xffffffff,args,-1)==-EFAULT);

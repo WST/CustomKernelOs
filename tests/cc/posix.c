@@ -55,7 +55,7 @@ int main(void) {
     for (i = 1; i < 6; i++) CHECK(nums[i - 1] <= nums[i]);
     CHECK(nums[0] == -2 && nums[5] == 9);
 
-    CHECK(getenv("HOME") == NULL);
+    CHECK(getenv("HOME") != NULL);
     CHECK(getenv("POSIXLY_CORRECT") == NULL);
 #ifdef __LINUX_TEST__
     CHECK(getuid() == (uid_t)__syscall(199) && geteuid() == (uid_t)__syscall(201) && getgid() == (gid_t)__syscall(200));

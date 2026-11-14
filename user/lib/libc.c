@@ -1874,6 +1874,8 @@ int select(int nfds, fd_set *r, fd_set *w, fd_set *e, struct timeval *tv) {
     return count;
 }
 int sysinfo(struct system_info *out, unsigned size) { return syscall3(SYS_SYSINFO, (int)out, size, 0); }
+int kernelinfo(struct kernel_info *out, unsigned size) { return syscall3(SYS_KERNELINFO, (int)out, size, 0); }
+int schedinfo(struct scheduler_cpu_info *out, unsigned capacity) { return syscall3(SYS_SCHEDINFO, (int)out, capacity, 0); }
 int cpuinfo(struct cpu_info *out, unsigned capacity) { return syscall3(SYS_CPUINFO, (int)out, capacity, 0); }
 int hwinfo(unsigned kind, unsigned index, void *out, unsigned size) {
     return syscall5(SYS_HWINFO,kind,index,(int)out,size,0);
@@ -4256,7 +4258,7 @@ int getrlimit(int resource, struct rlimit *rlim) {
     return ioerr(__syscall(76, resource, (int)rlim));
 #else
     if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
-    rlim->rlim_cur = rlim->rlim_max = 16;
+    rlim->rlim_cur = rlim->rlim_max = 32;
     return 0;
 #endif
 }
@@ -4276,7 +4278,7 @@ int setrlimit(int resource, const struct rlimit *rlim) {
     return ioerr(__syscall(75, resource, (int)rlim));
 #else
     if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
-    if (rlim->rlim_cur > 16 || rlim->rlim_max > 16) { errno = EPERM; return -1; }
+    if (rlim->rlim_cur > 32 || rlim->rlim_max > 32) { errno = EPERM; return -1; }
     return 0;
 #endif
 }
@@ -4656,3 +4658,7 @@ int system(const char *cmd) {
 }
 
 #include "regex.c"
+
+int umount(const char *target) {return syscall3(SYS_UMOUNT,(int)target,0,0);}
+int sync(void) {return syscall3(SYS_SYNC,0,0,0);}
+int fsck(const char *device) {return syscall3(SYS_FSCK,(int)device,0,0);}

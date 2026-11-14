@@ -344,3 +344,5 @@ int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
     copy_out(buf, count * 512);
     return issue(slot, 0x35, lba, count, true);
 }
+
+int ahci_flush(int slot) {return ahci_present(slot)?issue(slot,0xea,0,0,false):-1;}

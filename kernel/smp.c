@@ -1,6 +1,6 @@
-/* First SMP implementation: parallel ring 3, serialized kernel, pinned tasks.
+/* SMP: parallel ring 3 and bounded kernel leaf work, migratable user contexts.
  * Legacy IRQs stay on the BSP. PIT broadcasts scheduler IPIs to the APs.
- * No kernel code outside the entry/exit/idle paths executes without the BKL.
+ * Bounded leaf sections and scalar syscalls may execute outside the BKL.
  */
 #include "smp.h"
 #include "acpi_smp.h"
@@ -11,6 +11,7 @@
 #include "heap.h"
 #include "string.h"
 #include "timer.h"
+#include "syscall.h"
 #include "vga.h"
 
 struct cpu_state cpu_states[SMP_MAX_CPUS];
@@ -18,6 +19,13 @@ static u8 cpu_map[256];
 static u8 cpu_apic[SMP_MAX_CPUS];
 static volatile u32 online = 1;
 static volatile u32 kernel_lock;
+static volatile u32 bkl_acquires,bkl_contended,fast_calls,leaf_sections;
+static volatile u32 parallel_active,parallel_peak,overlap_with_bkl;
+static void parallel_started(void) {
+    u32 active=__sync_add_and_fetch(&parallel_active,1),peak=parallel_peak;
+    while(active>peak && !__sync_bool_compare_and_swap(&parallel_peak,peak,active))peak=parallel_peak;
+}
+
 static volatile u32 owner;
 static bool enabled;
 static volatile u32 *lapic;
@@ -69,9 +77,10 @@ void smp_enter(void) {
     poll_user_tlb();
     u32 me=smp_cpu()+1;
     if (owner==me) return;
+    if(kernel_lock)__sync_fetch_and_add(&bkl_contended,1);
     while (__sync_lock_test_and_set(&kernel_lock,1))
         while (kernel_lock) { poll_user_tlb(); __asm__ volatile("pause" ::: "memory"); }
-    owner=me;
+    owner=me;__sync_fetch_and_add(&bkl_acquires,1);
     poll_user_tlb();
     /* Kernel mappings are shared, but most entries change no mapping.
      * Only flush when another serialized kernel operation changed them. */
@@ -86,6 +95,40 @@ static void unlock(void) {
     if (!enabled) return;
     owner=0;
     __sync_lock_release(&kernel_lock);
+}
+u32 smp_parallel_begin(void) {
+    u32 flags=irq_save();
+    if(enabled && owner!=smp_cpu()+1)kpanic("parallel section without BKL");
+    unlock();
+    __sync_fetch_and_add(&leaf_sections,1);parallel_started();
+    if(owner)__sync_fetch_and_add(&overlap_with_bkl,1);
+    return flags;
+}
+void smp_parallel_end(u32 flags) {
+    __sync_fetch_and_sub(&parallel_active,1);
+    smp_enter(); /* services pending TLB shootdowns while waiting */
+    irq_restore(flags);
+}
+bool smp_syscall_fast(struct regs *r) {
+    if(r->int_no!=0x80 || !(r->cs&3) ||
+       (r->eax!=SYS_GETPID && r->eax!=SYS_GETTID && r->eax!=SYS_TICKS))return false;
+    poll_user_tlb();
+    struct task *t=cpu_states[smp_cpu()].running;
+    /* The active task and its leader cannot be reaped. Their IDs never change.
+     * Pending kills take the normal path before any syscall is dispatched. */
+    if(!t || t->state!=TASK_RUNNING || t->kill_pending)return false;
+    parallel_started();
+    if(owner)__sync_fetch_and_add(&overlap_with_bkl,1);
+    u32 op=r->eax;
+    r->eax=op==SYS_TICKS?timer_ticks()*(1000/TIMER_HZ):
+           op==SYS_GETTID?t->id:task_process(t)->id;
+    __sync_fetch_and_add(&fast_calls,1);
+    __sync_fetch_and_sub(&parallel_active,1);
+    return true;
+}
+void smp_kernel_snapshot(struct kernel_info *out) {
+    *out=(struct kernel_info){KERNELINFO_ABI,sizeof(*out),online,bkl_acquires,
+        bkl_contended,fast_calls,leaf_sections,parallel_peak,overlap_with_bkl};
 }
 void smp_leave(struct regs *r) { if (r->cs & 3) unlock(); }
 void smp_idle(void) {
@@ -128,9 +171,8 @@ void smp_user_tlb_flush(u32 dir) {
 void smp_tick(void) { if(online>1) ipi(0,0xc0000|0x82); }
 void smp_wake(u32 cpu) {
     cpu_states[cpu].resched=true;
-    if(enabled && cpu<online && cpu!=smp_cpu() &&
-       cpu_states[cpu].running==cpu_states[cpu].idle) {
-        /* Publish READY and resched before notifying the idle target CPU. */
+    if(enabled && cpu<online && cpu!=smp_cpu()) {
+        /* Publish READY before a wakeup IPI; sched_maybe checks priority. */
         __sync_synchronize();
         ipi(cpu_apic[cpu],0x83);
     }
@@ -257,5 +299,5 @@ void smp_init(void) {
         if(!arrived) { kprintf("SMP: CPU APIC %u startup timeout\n",ids[i]); break; }
         online=i+1;
     }
-    kprintf("SMP: %u CPUs online (parallel userspace, serialized kernel)\n",online);
+    kprintf("SMP: %u CPUs online (parallel userspace and leaf kernel operations)\n",online);
 }
