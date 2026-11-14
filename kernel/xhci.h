@@ -6,4 +6,7 @@ int xhci_port_info(unsigned index, struct hw_usb_info *out);
 int xhci_device_info(unsigned index,struct hw_usb_device_info *out);
 /* One xHCI controller, hotplug, USB2 hubs and HID keyboards/mice. */
 bool xhci_init(void);
+u32 xhci_root_sectors(void);
+int xhci_root_io(u32 lba,void *buf,u32 count,bool write);
+int xhci_root_flush(void);
 #endif

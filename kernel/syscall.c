@@ -1061,6 +1061,22 @@ void syscall_dispatch(struct regs *r) {
         break;
     case SYS_READ:    ret = sys_read(a, b, c); break;
     case SYS_OPEN:    ret = sys_open(a, b); break;
+    case SYS_SYNC: ret=fs_errno(fs_sync());break;
+    case SYS_FSYNC: {
+        struct file *f=get_fd(a);
+        if(!f)ret=-EBADF;
+        else if(f->type!=FILE_DISK)ret=-EINVAL;
+        else ret=fs_errno(fs_sync());
+        break;
+    }
+    case SYS_UMOUNT:
+    case SYS_FSCK: {
+        char target[FS_PATH_MAX];
+        if(!task_process(t)->authenticated || task_process(t)->uid)ret=-EPERM;
+        else if(!user_str(a,target,sizeof(target)))ret=-EFAULT;
+        else ret=fs_errno(r->eax==SYS_UMOUNT?fs_unmount(task_process(t)->cwd,target):fs_check_device(target));
+        break;
+    }
     case SYS_MOUNT: {
         if(!task_process(t)->authenticated || task_process(t)->uid!=0) {ret=-EPERM;break;}
         char device[128],target[128];
@@ -1274,6 +1290,7 @@ void syscall_dispatch(struct regs *r) {
     case SYS_REBOOT:
         if (!task_process(t)->authenticated || task_process(t)->uid != 0) { ret=-EPERM; break; }
         if (a != RB_POWEROFF && a != RB_REBOOT) { ret = -EINVAL; break; }
+        ret=fs_errno(fs_sync());if(ret)break;
         machine_reset((int)a);
     case SYS_THREAD_CTL:
         if (a == TC_SET_TCB) {

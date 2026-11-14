@@ -8,6 +8,10 @@ int  myfs_format(void);
 int  myfs_format_legacy(void);
 #endif
 bool myfs_ready(void);
+int myfs_sync(void);
+int myfs_transaction_begin(void);
+int myfs_transaction_end(int result);
+int myfs_unmount(void);
 
 int  myfs_resolve(u32 cwd, const char *path, u32 *ino);
 int  myfs_create(u32 cwd, const char *path, int type, u32 *ino);

@@ -27,7 +27,7 @@ def save_png(ppm,png):
                     chunk(b'IDAT',zlib.compress(rows))+chunk(b'IEND',b''))
 
 class VM:
-    def __init__(self,name,usb=True,vga='std',memory=None,machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None,netboot_url=None):
+    def __init__(self,name,usb=True,vga='std',memory=None,machine='pc',usb_version=2,legacy=False,cpu='max',cpus=1,extra=None,netboot_url=None,persistent=False):
         self.temp=tempfile.TemporaryDirectory(prefix='myos-usb-')
         # Poll a native filesystem log: DrvFS can return ENODATA while a Windows
         # file is concurrently extended by QEMU.
@@ -48,7 +48,7 @@ class VM:
         elif usb:
             # No PS/2 controller: all injected keys must traverse the xHCI driver.
             args+=['-machine',machine+',i8042=off','-device','qemu-xhci,id=xhci',
-                   '-drive',f'if=none,id=stick,format=raw,file={IMAGE},snapshot=on',
+                   '-drive',f'if=none,id=stick,format=raw,file={IMAGE},snapshot='+('off' if persistent else 'on'),
                    '-device','usb-storage,bus=xhci.0,drive=stick,bootindex=1',
                    '-device',f'usb-kbd,bus=xhci.0,usb_version={usb_version}','-device','usb-mouse,bus=xhci.0']
         elif legacy:

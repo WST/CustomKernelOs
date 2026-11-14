@@ -11,6 +11,7 @@ void *malloc(unsigned long);void free(void*);
 #define lookup_free(p) free(p)
 #define file_disk_busy(i) false
 #define file_disk_volume_busy(i) false
+#define task_volume_busy(i) false
 #else
 #include "heap.h"
 #include "file.h"
@@ -328,6 +329,26 @@ int fs_mount(u32 cwd,const char *device,const char *target) {
     if(!r) { mounts[slot].used=true; mounts[slot].device=d; mounts[slot].covered=ino; mounts[slot].parent=parent; }
     lookup_cache_clear(); mutex_unlock(&lock); return r;
 }
+int fs_sync(void) {
+    mutex_lock(&lock);reap_orphans();int r=0;
+    for(int s=0;s<4;s++)if(mounts[s].used){myfs_select(s,mounts[s].device);if(myfs_sync())r=FS_EIO;}
+    mutex_unlock(&lock);return r;
+}
+int fs_unmount(u32 cwd,const char *target) {
+    mutex_lock(&lock);reap_orphans();u32 ino=0;int r=resolve_impl(cwd,target,&ino,true);
+    if(!r && ino>=DEVBASE && ino<DEVBASE+BLOCK_MAX) {
+        int d=(int)(ino-DEVBASE);ino=0;
+        for(unsigned s=0;s<4;s++)if(mounts[s].used && mounts[s].device==d){ino=HANDLE(s,FS_ROOT);break;}
+        if(!ino)r=FS_EINVAL;
+    }
+    unsigned slot=SLOT(ino);
+    if(!r && !slot && ino==FS_ROOT)r=FS_EBUSY;
+    if(!r && (isdev(ino) || !slot || slot>=4 || LOCAL(ino)!=FS_ROOT))r=FS_EINVAL;
+    if(!r && (file_disk_volume_busy(slot) || task_volume_busy(slot)))r=FS_EBUSY;
+    for(unsigned s=1;!r && s<4;s++)if(mounts[s].used && s!=slot && SLOT(mounts[s].covered)==slot)r=FS_EBUSY;
+    if(!r) {myfs_select(slot,mounts[slot].device);r=myfs_unmount();if(!r)memset(&mounts[slot],0,sizeof(mounts[slot]));}
+    lookup_cache_clear();mutex_unlock(&lock);return r;
+}
 int fs_mount_info(u32 index,char *device,char *target) {
     mutex_lock(&lock); int r=0;
     if(index<4 && mounts[index].used) {
@@ -348,6 +369,13 @@ static bool device_busy(int d,bool whole_disk) {
         if(whole_disk || (a->start<b->start+b->sectors && b->start<a->start+a->sectors)) return true;
     }
     return false;
+}
+int fs_check_device(const char *device) {
+    mutex_lock(&lock);int d=block_find(device),r=0;
+    if(d<0)r=FS_ENODEV;
+    else if(device_busy(d,false))r=FS_EBUSY;
+    else {bool formatted;myfs_select(4,d);r=myfs_init(&formatted,false);if(!r)r=myfs_unmount();}
+    mutex_unlock(&lock);return r;
 }
 int fs_mkfs(const char *device) {
     mutex_lock(&lock); int d=block_find(device),r=0;
@@ -409,6 +437,7 @@ int fs_symlink(u32 cwd,const char *target,const char *linkpath) {
     if(!r && (isdev(parent) || (parent==FS_ROOT && !strcmp(name,"dev")))) r=FS_EROFS;
     if(!r) {
         r=select_inode(parent);
+        if(!r)r=myfs_transaction_begin();
         if(!r) r=myfs_create(LOCAL(parent),name,FS_TYPE_LINK,&ino);
         if(!r) {
             u32 uid,gid,mask;credentials(&uid,&gid,&mask,false);
@@ -418,6 +447,7 @@ int fs_symlink(u32 cwd,const char *target,const char *linkpath) {
             if(r) myfs_remove(LOCAL(parent),name);
         }
     }
+    r=myfs_transaction_end(r);
     mutex_unlock(&lock); return r;
 }
 int fs_readlink(u32 cwd,const char *path,char *buf,u32 len) {
@@ -445,7 +475,7 @@ int fs_create_mode(u32 cwd,const char *path,int type,u32 mode,u32 *out) {
     if(!r && (isdev(parent) || (parent==FS_ROOT && !strcmp(name,"dev"))))r=FS_EROFS;
     if(!r && type!=FS_TYPE_DIR && type!=FS_TYPE_FILE)r=FS_EINVAL;
     if(!r) {
-        r=select_inode(parent);if(!r)r=myfs_create(LOCAL(parent),name,type,&ino);
+        r=select_inode(parent);if(!r)r=myfs_transaction_begin();if(!r)r=myfs_create(LOCAL(parent),name,type,&ino);
         if(!r) {
             u32 uid,gid,mask;credentials(&uid,&gid,&mask,false);
             r=myfs_setattr(ino,mode&0777&~mask,uid,gid);
@@ -453,6 +483,7 @@ int fs_create_mode(u32 cwd,const char *path,int type,u32 mode,u32 *out) {
             else if(out)*out=HANDLE(SLOT(parent),ino);
         }
     }
+    r=myfs_transaction_end(r);
     mutex_unlock(&lock);return r;
 }
 int fs_create(u32 cwd,const char *path,int type,u32 *out) {
@@ -540,3 +571,38 @@ const char *fs_strerror(int e) {
 }
 
 
+
+/* fstab is read once before service startup. Never formats or creates targets. */
+int fs_automount(void) {
+    u32 ino;int r=fs_resolve(FS_ROOT,"/etc/fstab",&ino);if(r==FS_ENOENT)return 0;if(r)return r;
+    struct fs_stat st;if(fs_stat(ino,&st))return FS_EIO;
+    if(st.type!=FS_TYPE_FILE || st.uid || (st.mode&0022) || st.size>4096)return FS_EINVAL;
+    char *text=lookup_alloc(st.size+1);if(!text)return FS_ENOSPC;
+    r=fs_read(ino,0,text,st.size);if(r!=(int)st.size){lookup_free(text);return FS_EIO;}text[st.size]=0;
+    int result=0;
+    for(char *line=text;*line;) {
+        char *next=line;while(*next && *next!='\n')next++;if(*next)*next++=0;
+        char *fields[6];unsigned count=0;char *q=line;
+        while(*q && *q!='#') {
+            while(*q==' ' || *q=='\t' || *q=='\r')q++;
+            if(!*q || *q=='#')break;
+            if(count==6){count=7;break;}fields[count++]=q;
+            while(*q && *q!=' ' && *q!='\t' && *q!='\r' && *q!='#')q++;
+            if(*q=='#'){*q=0;break;}if(*q)*q++=0;
+        }
+        if(count) {
+            bool noauto=false,nofail=false,valid=count>=3 && count<=6 && !strcmp(fields[2],"myfs");
+            if(valid && count>=4) {
+                char *opt=fields[3];
+                while(*opt) {char *end=opt;while(*end && *end!=',')end++;if(*end)*end++=0;
+                    if(!strcmp(opt,"noauto"))noauto=true;else if(!strcmp(opt,"nofail"))nofail=true;
+                    else if(strcmp(opt,"defaults") && strcmp(opt,"rw") && strcmp(opt,"auto"))valid=false;
+                    opt=end;
+                }
+            }
+            if(!noauto) {r=valid?fs_mount(FS_ROOT,fields[0],fields[1]):FS_EINVAL;if(r && !nofail && !result)result=r;}
+        }
+        line=next;
+    }
+    lookup_free(text);return result;
+}

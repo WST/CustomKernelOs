@@ -52,6 +52,10 @@ enum {
 
 /* VFS: up to four MyFS volumes; /dev is a virtual filesystem. */
 int fs_mount(u32 cwd, const char *device, const char *target);
+int fs_unmount(u32 cwd,const char *target);
+int fs_sync(void);
+int fs_automount(void);
+int fs_check_device(const char *device);
 int fs_mount_info(u32 index, char *device, char *target);
 int fs_mkfs(const char *device);
 int fs_partition(const char *device,u32 op,u32 slot,u32 start,u32 sectors);

@@ -346,7 +346,8 @@ int main(int argc, char **argv) {
     if (formatted) say("myfs: %s had no file system - formatted\n", argv[1]);
 
     const char *cmd = argv[2];
-    if (!strcmp(cmd, "ls"))                       r = cmd_ls(argc > 3 ? argv[3] : "/");
+    if (!strcmp(cmd,"fsck")) r=fs_sync();
+    else if (!strcmp(cmd, "ls"))                       r = cmd_ls(argc > 3 ? argv[3] : "/");
     else if (!strcmp(cmd, "mkdir") && argc > 3)   r = mkdir_p(argv[3]);
     else if (!strcmp(cmd, "put") && argc > 4)     r = cmd_put(argv[3], argv[4]);
     else if (!strcmp(cmd, "cat") && argc > 3)     r = cmd_cat(argv[3]);

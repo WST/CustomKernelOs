@@ -45,6 +45,14 @@ bool task_raw_device_busy(int disk) {
         }
     irq_restore(flags); return busy;
 }
+bool task_volume_busy(u32 slot) {
+    u32 flags=irq_save();bool busy=false;
+    for(int i=0;i<MAX_TASKS;i++)if(tasks[i] && tasks[i]->state!=TASK_ZOMBIE) {
+        struct task *t=task_process(tasks[i]);
+        if((t->cwd>>24)==slot || (t->fs_root && (t->fs_root>>24)==slot))busy=true;
+    }
+    irq_restore(flags);return busy;
+}
 static struct task  task0;          /* kmain / оболочка: живёт на стеке загрузчика */
 static u32 next_id;
 #define slice (cpu_states[smp_cpu()].slice)

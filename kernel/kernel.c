@@ -131,7 +131,7 @@ void kmain(void) {
     boot_stage("xHCI and USB HID input");
     if (xhci_init()) ok("USB xHCI ready: hotplug, USB2 hubs and HID input");
     else fail("USB HID", "no supported direct keyboard/mouse; PS/2 or BIOS legacy may still work");
-    if (boot_info_get()) ok("LIVE MODE: filesystem changes stay in RAM; internal ATA disks are hidden");
+    if (boot_info_get()) ok("LIVE MODE: boot USB persistence when available; internal ATA disks are hidden");
 #endif
 
     boot_stage("network adapter");
@@ -157,6 +157,8 @@ void kmain(void) {
             fs_info(&fi);
             ok("MyFS %s, %u KB free",
                formatted ? "created (new disk formatted)" : "mounted", fi.free_blocks / 2);
+            int automount=fs_automount();
+            if(automount)fail("fstab",fs_strerror(automount));
             struct fb_info before, after;
             fb_get_info(&before);
             boot_stage("saved display settings");

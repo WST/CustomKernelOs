@@ -341,15 +341,15 @@ static void cmd_peek(char *a) {
 
 static void cmd_reboot(char *a) {
     (void)a;
-    block_flush();
+    if(fs_sync()){kprintf("Cannot reboot: storage sync failed\n");return;}
     kprintf("Rebooting...\n");
     machine_reset(RB_REBOOT);
 }
 
 static void cmd_halt(char *a) {
     (void)a;
+    if(fs_sync()){kprintf("Cannot power off: storage sync failed\n");return;}
     kprintf("System halted. It is now safe to turn off your computer.\n");
-    block_flush();
     machine_reset(RB_POWEROFF);
 }
 

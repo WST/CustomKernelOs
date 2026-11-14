@@ -64,8 +64,10 @@ def main():
                    check=True,stdout=subprocess.DEVNULL)
     sectors=(len(kernel)+511)//512
     root_lba=(33+sectors+2047)//2048*2048
+    import secrets
+    disk_id=secrets.randbelow(0xffffffff)+1
     defines=[f'-DKERNEL_LBA=33',f'-DKERNEL_SECTORS={sectors}',f'-DKERNEL_END={end}',
-             f'-DROOT_LBA={root_lba}',f'-DROOT_SECTORS={size//512}',
+             f'-DROOT_DISK_ID={disk_id}',f'-DROOT_LBA={root_lba}',f'-DROOT_SECTORS={size//512}',
              f'-DROOT_PHYS={root_phys}',f'-DROOT_MIN_BYTES={root_min*1048576}',
              f'-DROOT_MAX_BYTES={root_max*1048576}',f'-DROOT_RESERVE_BYTES={reserve_mb*1048576}',*video_defines]
     for src,out in [('hardware.asm','mbr.bin'),('hardware-stage2.asm','stage2.bin')]:
@@ -82,7 +84,7 @@ def main():
         for chunk in iter(lambda: source.read(1024*1024),b''): digest.update(chunk)
     manifest={'image':str(output),'bytes':output.stat().st_size,
               'sha256':digest.hexdigest(),
-              'boot':'BIOS/CSM only','filesystem':'volatile RAM copy','video_request':args.video,
+              'boot':'BIOS/CSM only','filesystem':'persistent boot USB (xHCI BOT); RAM fallback on unsupported hardware','disk_id':disk_id,'video_request':args.video,
               'kernel_lba':33,'root_lba':root_lba,'root_bytes':size,'root_phys':root_phys,
               'root_mb':args.root_mb,'ram_reserve_mb':reserve_mb,
               'minimum_usable_end':root_phys+size+reserve_mb*1048576}

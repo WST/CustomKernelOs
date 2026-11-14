@@ -3525,3 +3525,8 @@ int system(const char *cmd) {
 }
 
 #include "regex.c"
+
+int umount(const char *target) {return syscall3(SYS_UMOUNT,(int)target,0,0);}
+int sync(void) {return syscall3(SYS_SYNC,0,0,0);}
+int fsync(int fd) {int r=syscall3(SYS_FSYNC,fd,0,0);if(r<0){errno=-r;return -1;}return r;}
+int fsck(const char *device) {return syscall3(SYS_FSCK,(int)device,0,0);}

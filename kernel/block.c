@@ -41,6 +41,7 @@ struct cache_ent {
 static struct cache_ent *cache;
 static u8 *run_buf;
 static u32 cache_clock;
+static bool device_dirty[2];
 
 static int ensure_cache(void) {
     if (cache && run_buf) return 0;
@@ -76,6 +77,7 @@ static int device_read(int u,u32 lba,void *buf) {
 #endif
 }
 static int device_write_run(int u,u32 lba,const void *buf,u32 n) {
+    if(u>=0 && u<2)device_dirty[u]=true;
     if (!n || n>CACHE_RUN) return -1;
 #ifdef HOST_TEST
     if (u) return -1;
@@ -170,9 +172,29 @@ static int flush_locked(void) {
     }
     return rc;
 }
+static int barrier_locked(int unit) {
+    if(!device_dirty[unit])return 0;
+#ifdef HOST_TEST
+    /* Host fixtures may override this to model a volatile drive cache. */
+    extern int ata_unit_flush(int) __attribute__((weak));
+    int r=ata_unit_flush?ata_unit_flush(unit):0;
+#else
+    int r=ahci_present(unit)?ahci_flush(unit):ata_unit_flush(unit);
+#endif
+    if(!r)device_dirty[unit]=false;
+    return r;
+}
+int block_flush_device(int id) {
+    if(!block_get(id))return -1;
+    mutex_lock(&block_lock);
+    int r=flush_locked();
+    if(!r)r=barrier_locked(id/5);
+    mutex_unlock(&block_lock);return r;
+}
 int block_flush(void) {
     mutex_lock(&block_lock);
     int rc=flush_locked();
+    for(int u=0;u<2;u++)if(barrier_locked(u))rc=-1;
     mutex_unlock(&block_lock);
     return rc;
 }

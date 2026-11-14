@@ -70,7 +70,8 @@ enum {
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
     SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL,
     SYS_REBOOT,
-    SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO
+    SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO,
+    SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0
@@ -205,6 +206,10 @@ int account(int op, const char *name, const char *password);
 /* Enumerate public account names (24-byte output), zero-based, -ENOENT at end. */
 int account_list(char *name, unsigned index);
 int mount(const char *device,const char *target);
+int umount(const char *target);
+int sync(void);
+int fsync(int fd);
+int fsck(const char *device);
 int mountinfo(unsigned index,char device[128],char target[128]);
 int blockinfo(unsigned index,struct block_info *info);
 int mkfs(const char *device);

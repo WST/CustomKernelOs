@@ -1,14 +1,14 @@
 /* ATA PIO, LBA28. Primary master is the boot disk and is never exposed.
  * The VFS serializes I/O across both channels. A task sleeps for IRQ 14 or 15
  * only after a short poll; the drive's nIEN bit stays set the rest of the
- * time, including the data transfer. FLUSH CACHE is not sent: QEMU turns it
- * into an image fsync. */
+ * time, including the data transfer. Durability barriers issue FLUSH CACHE. */
 #include "ata.h"
 #include "string.h"
 #include "vga.h"
 #include "timer.h"
 #include "task.h"
 #include "bootinfo.h"
+#include "xhci.h"
 static struct { u16 base,control; u8 slave; u32 sectors; char model[41]; } units[2] = {
     { .base=0x1f0, .control=0x3f6, .slave=0x10 },
     { .base=0x170, .control=0x376, .slave=0 }
@@ -109,13 +109,16 @@ static bool identify(int u) {
     return units[u].sectors!=0;
 }
 static const struct boot_info *live;
+static bool live_persistent;
 bool ata_init(void) {
     live=boot_info_get();
     if (!boot_root_valid(live)) live=NULL;
     if (live) {
         /* Live mode deliberately does not probe or expose internal ATA disks. */
         units[0].sectors=live->root_bytes/512;
-        strcpy(units[0].model,"USB live RAM disk (volatile)");
+        live_persistent=xhci_root_sectors()!=0;
+        strcpy(units[0].model,live_persistent?"USB boot disk (persistent)":"Live RAM disk (VOLATILE)");
+        if(!live_persistent)kprintf("WARNING: no matching writable boot USB; changes are VOLATILE\n");
         units[1].sectors=0;
         return true;
     }
@@ -153,13 +156,12 @@ static int setup(int u,u32 lba,u8 cmd,u8 count) {
     outb(b+2,count); outb(b+3,lba); outb(b+4,lba>>8); outb(b+5,lba>>16);
     outb(b+7,cmd); delay(u); return wait(u,true);
 }
-/* count is 1..32. PIO repeats DRQ once per sector; a count register of 0 means 256.
- * FLUSH CACHE is not sent: QEMU turns it into an image fsync and the status
- * poll then occupies the CPU for the whole write. */
+/* count is 1..32. Durability is requested separately with ata_unit_flush. */
 static int pio(int u,u32 lba,void *buf,u32 count,bool write) {
     if(!count || count>32) return -1;
     if (live) {
         if (u || lba>=units[0].sectors || count>units[0].sectors-lba) return -1;
+        if(live_persistent)return xhci_root_io(lba,buf,count,write);
         u8 *disk=(u8 *)live->root_phys+lba*512;
         if (write) memcpy(disk,buf,count*512); else memcpy(buf,disk,count*512);
         return 0;
@@ -180,3 +182,12 @@ int ata_unit_read_sectors(int u,u32 lba,void *buf,u32 count) { return pio(u,lba,
 int ata_unit_write_sectors(int u,u32 lba,const void *buf,u32 count) { return pio(u,lba,(void *)buf,count,true); }
 int ata_read(u32 lba,void *buf) { return ata_unit_read(0,lba,buf); }
 int ata_write(u32 lba,const void *buf) { return ata_unit_write(0,lba,buf); }
+
+int ata_unit_flush(int u) {
+    if(!ata_unit_sectors(u))return -1;
+    if(live)return u?-1:live_persistent?xhci_root_flush():0;
+    dev_irq(u,false);outb(units[u].base+6,0xe0|units[u].slave);delay(u);
+    if(wait(u,false)<0)return -1;
+    outb(units[u].base+7,0xe7);delay(u);
+    return wait(u,false);
+}

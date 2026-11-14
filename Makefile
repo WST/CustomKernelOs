@@ -94,6 +94,8 @@ FORCE_BUILD_INFO:
 $(BUILD)/build_info.h: FORCE_BUILD_INFO VERSION tools/build_info.py | $(BUILD)
 	python3 tools/build_info.py $@
 $(BUILD)/virtgpu.o: kernel/virtgpu_render.inc kernel/virtgpu_cursor.inc
+$(BUILD)/myfs.o $(HWBUILD)/myfs.o: kernel/myfs-journal.inc kernel/myfs-check.inc
+$(BUILD)/xhci.o $(HWBUILD)/xhci.o: kernel/xhci-storage.inc
 $(BUILD)/sysinfo.o: $(BUILD)/build_info.h
 $(OBJS): user/lib/sysinfo.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h
 $(BUILD)/user/libc.o $(BUILD)/user/libc.so: user/lib/sysinfo.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h
@@ -696,7 +698,7 @@ test: | $(BUILD)
 	./$(BUILD)/myfs $(BUILD)/v1.img ls /keep | grep -q '<LNK>'
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /keep/alias | grep -q v1-ok
 	./$(BUILD)/myfs $(BUILD)/v1.img cat /$$(python3 -c 'print("n"*27)') | grep -q long
-	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==3, v'
+	python3 -c 'd=open("$(BUILD)/v1.img","rb").read(8); v=int.from_bytes(d[4:8],"little"); assert d[:4]==b"MYFS" and v==4, v'
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("d"*40)')
 	./$(BUILD)/myfs $(BUILD)/v1.img mkdir /$$(python3 -c 'print("p"*180)')
 	rm -f $(BUILD)/v1.img $(BUILD)/v1.img.bak
@@ -1176,9 +1178,9 @@ $(BUILD)/file.o $(HWBUILD)/file.o: kernel/fs.h
 $(BUILD)/fs.o $(HWBUILD)/fs.o: kernel/fs-permissions.inc
 $(BUILD)/myfs.o $(HWBUILD)/myfs.o: kernel/myfs-permissions.inc
 $(BUILD)/syscall.o $(HWBUILD)/syscall.o: kernel/fs-syscall.inc
-$(BUILD)/myfs: kernel/fs-permissions.inc kernel/myfs-permissions.inc
+$(BUILD)/myfs: kernel/fs-permissions.inc kernel/myfs-permissions.inc kernel/myfs-journal.inc kernel/myfs-check.inc
 
-$(BUILD)/fs-permissions-test: tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c kernel/fs-permissions.inc kernel/myfs-permissions.inc $(BUILD)/myfs
+$(BUILD)/fs-permissions-test: tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c kernel/fs-permissions.inc kernel/myfs-permissions.inc kernel/myfs-journal.inc kernel/myfs-check.inc $(BUILD)/myfs
 	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -DFS_PERMISSIONS_TEST -Ikernel tests/fs_permissions_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c $(BUILD)/host_io.o -o $@
 .PHONY: permissionstest
 permissionstest: $(BUILD)/fs-permissions-test
@@ -1367,3 +1369,22 @@ kernellocktest: | $(BUILD)
 	./$(BUILD)/kernel-parallel-host
 kernelparalleltest: $(BUILD)/os.img $(BUILD)/kernel-parallel-check $(BUILD)/user/kernelstat $(BUILD)/user/sh $(BUILD)/user/smpbench $(BUILD)/user/klogcheck $(BUILD)/user/libc.so $(BUILD)/user/libgfx.so $(BUILD)/ld.so $(BUILD)/myfs
 	python3 tests/kernel_parallel_smoke.py
+
+.PHONY: persistence-test
+persistence-test: storage-recoverytest
+	$(HOSTCC) -std=gnu17 -O1 -g -fno-builtin -DHOST_TEST -Ikernel tests/myfs_powercut_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c -o $(BUILD)/myfs-powercut-test
+	./$(BUILD)/myfs-powercut-test
+
+$(BUILD)/user/storage_lifecycle_check.o: tests/storage_lifecycle_check.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/storage_lifecycle_check: $(BUILD)/user/storage_lifecycle_check.o $(ULIB) user/user.ld
+	$(LD) $(ULDFLAGS) $< $(ULIB) -o $@
+.PHONY: persistence-usb-smoke
+persistence-usb-smoke: usb-image
+	python3 tests/persistence_usb_smoke.py
+
+.PHONY: persistence-lifecycle-smoke persistence-large-test
+persistence-lifecycle-smoke:
+	python3 tests/persistence_lifecycle_smoke.py
+persistence-large-test: $(BUILD)/myfs
+	python3 tests/myfs_large_reclaim.py

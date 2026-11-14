@@ -95,6 +95,7 @@ enum {
     SYS_HWINFO,         /* read-only PCI, USB root ports and SATA inventory */
     SYS_SCHEDINFO,      /* read-only per-CPU scheduler counters */
     SYS_KERNELINFO,    /* versioned kernel concurrency counters */
+    SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */

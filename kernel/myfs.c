@@ -15,7 +15,7 @@ void *malloc(unsigned long); void free(void *);
 
 #define BS            512                       /* размер блока */
 #define MAGIC         0x5346594D                /* "MYFS" в little-endian */
-#define VERSION       3                       /* format() пишет её; монтирование принимает и 1 */
+#define VERSION       4                       /* format() пишет её; монтирование принимает и 1 */
 #define VERSION_MIN   1
 #define NDIRECT       12                        /* версия 1; у версии 2 последний слот — тройной косвенный */
 #define NDIRECT_V2    11
@@ -37,7 +37,8 @@ struct superblock {
     u32 inode_start, inode_blocks, inode_count;
     u32 data_start;
     u32 layout_version, permissions_root; /* version 3; inode/data layout stays v1/v2 */
-    u8  pad[BS - 11 * 4];
+    u32 journal_start, journal_blocks; /* v4: reserved tail, physical redo log */
+    u8 pad[BS - 13 * 4];
 } __attribute__((packed));
 
 struct inode {
@@ -77,6 +78,7 @@ struct fs_state {
     u32 nblocks, ninodes;
     int device;
     u8 bitmap_dirty[BITMAP_DIRTY_BYTES];
+    u8 bitmap_alloc_dirty[BITMAP_DIRTY_BYTES];
 };
 static struct fs_state states[5];
 static int selected;
@@ -94,12 +96,13 @@ static int prepare_bitmap(u32 bytes) {
 
 /* ---------------------------------------------------------------- блоки */
 
-static int bread(u32 b, void *buf)        { return block_read(states[selected].device, b, buf)  ? FS_EIO : FS_OK; }
+#include "myfs-journal.inc"
+static int bread(u32 b, void *buf) { return journal_read(b,buf); }
 static int bwrite(u32 b, const void *buf) {
-    return block_write_through(states[selected].device, b, buf) ? FS_EIO : FS_OK;
+    return journal_write(b,buf,false);
 }
 static int bwrite_data(u32 b, const void *buf) {
-    return block_write(states[selected].device, b, buf) ? FS_EIO : FS_OK;
+    return journal_write(b,buf,true);
 }
 
 static bool bit_get(u32 b) { return bitmap[b / 8] & (1 << (b % 8)); }
@@ -122,8 +125,12 @@ static int bitmap_flush(void) {
         u8 bit = (u8)(1u << (sec % 8));
         u8 *cell = &states[selected].bitmap_dirty[sec / 8];
         if (!(*cell & bit)) continue;
+        /* Freed blocks may stay allocated on disk until after the inode commit.
+         * Mount fsck reclaims this safe leak if power fails in between. */
+        if(transaction_depth && !(states[selected].bitmap_alloc_dirty[sec/8]&bit))continue;
         if (bwrite(sb.bitmap_start + sec, bitmap + sec * BS)) return FS_EIO;
         *cell = (u8)(*cell & (u8)~bit);
+        states[selected].bitmap_alloc_dirty[sec/8]&=(u8)~bit;
     }
     return 0;
 }
@@ -137,6 +144,7 @@ static u32 balloc(void) {
         if (!bit_get(b)) {
             bit_set(b, true);
             bitmap_mark(b);
+            u32 sec=b/BITS_PER_BLK;states[selected].bitmap_alloc_dirty[sec/8]|=1u<<(sec%8);
             states[selected].hint=b+1;
             available_blocks--;
             return b;
@@ -272,6 +280,7 @@ static void cache_drop_all(void) {
     ind_level.valid = ind_double.valid = ind_triple.valid = false;
     ind_level.dirty = ind_double.dirty = ind_triple.dirty = false;
     memset(states[selected].bitmap_dirty, 0, sizeof states[selected].bitmap_dirty);
+    memset(states[selected].bitmap_alloc_dirty,0,sizeof states[selected].bitmap_alloc_dirty);
     permissions_cache_clear();
 }
 
@@ -591,7 +600,7 @@ static int myfs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
     if (off + done > in.size) in.size = off + done;
     int meta = sync_meta();
     int w = iwrite(ino, &in);
-    if (r) return r;
+    if (r && !(r==FS_ENOSPC && done)) return r;
     if (meta) return meta;
     return w ? w : (int)done;
 }
@@ -644,7 +653,7 @@ static int dir_check(u32 dir) {
     return in.type == FS_TYPE_DIR ? FS_OK : FS_ENOTDIR;
 }
 
-static int legacy(void) { return sb.version==1 || (sb.version==3 && sb.layout_version==1); }
+static int legacy(void) { return sb.version==1 || (sb.version>=3 && sb.layout_version==1); }
 static u32 name_max(void) { return legacy() ? NAME_V1 : (u32)FS_NAME_MAX; }
 
 /* Длина записи версии 2: заголовок, имя и нуль, округление вверх до 4. */
@@ -1016,6 +1025,7 @@ static int myfs_getpath_impl(u32 ino, char *buf, u32 len) {
 static int myfs_format_impl(u32 version) {
     static u8 zero[BS];
     cache_drop_all();
+    journal_enabled[selected]=journal_failed[selected]=false;
     u32 total = block_get(states[selected].device)->sectors;
     if (!total) return FS_ENODEV;
     if (version < VERSION_MIN || version > VERSION) return FS_EINVAL;
@@ -1037,11 +1047,17 @@ static int myfs_format_impl(u32 version) {
     sb.inode_count = (sb.inode_count + INODES_PER_BLK - 1) / INODES_PER_BLK * INODES_PER_BLK;
     sb.inode_blocks  = sb.inode_count / INODES_PER_BLK;
     sb.data_start    = sb.inode_start + sb.inode_blocks;
-    if (sb.data_start + 16 > total) return FS_ENOSPC;
+    if (sb.data_start + 16 + JOURNAL_BLOCKS > total) return FS_ENOSPC;
+    if(version>=4) { sb.journal_start=total-JOURNAL_BLOCKS;sb.journal_blocks=JOURNAL_BLOCKS; }
+
 
     /* битмап: служебные блоки заняты */
     memset(bitmap, 0, sb.bitmap_blocks * BS);
     for (u32 b = 0; b < sb.data_start; b++) bit_set(b, true);
+    if(version>=4) {
+        for(u32 b=sb.journal_start;b<total;b++)bit_set(b,true);
+        if(journal_clear())return FS_EIO;
+    }
     for (u32 i = 0; i < sb.bitmap_blocks; i++)
         if (bwrite(sb.bitmap_start + i, bitmap + i * BS)) return FS_EIO;
     for (u32 i = 0; i < sb.inode_blocks; i++)
@@ -1050,7 +1066,7 @@ static int myfs_format_impl(u32 version) {
 
     states[selected].hint=sb.data_start;
     states[selected].ino_hint=FS_ROOT+1;
-    available_blocks = total - sb.data_start;
+    available_blocks = total - sb.data_start - sb.journal_blocks;
     available_inodes = sb.inode_count - 1;
     mounted = true;
 
@@ -1060,14 +1076,21 @@ static int myfs_format_impl(u32 version) {
     root.type = FS_TYPE_DIR;
     root.links = 1;
     if (iwrite(FS_ROOT, &root)) return FS_EIO;
-    if(version==3 && permissions_store(FS_ROOT,0755,0,0)) return FS_EIO;
+    if(version>=3 && permissions_store(FS_ROOT,0755,0,0)) return FS_EIO;
     available_inodes--;
     int r;
     if ((r = dir_add(FS_ROOT, ".", FS_ROOT)) || (r = dir_add(FS_ROOT, "..", FS_ROOT))) return r;
+    if(disk_barrier())return FS_EIO;
+    journal_enabled[selected]=version>=4;
     return FS_OK;
 }
 
+#include "myfs-check.inc"
+
 static int myfs_init_impl(bool *formatted, bool allow_format) {
+    mounted=false; /* remount/crash must never flush stale backend state */
+    transaction_depth=transaction_count=0;
+    journal_enabled[selected]=journal_failed[selected]=false;
     cache_drop_all();
     *formatted = false;
     mounted = false;
@@ -1087,26 +1110,40 @@ static int myfs_init_impl(bool *formatted, bool allow_format) {
         sb.inode_start != 1 + sb.bitmap_blocks || (sb.inode_count < MIN_INODES || sb.inode_count > MAX_INODES || sb.inode_count % INODES_PER_BLK) ||
         sb.inode_blocks != sb.inode_count / INODES_PER_BLK || sb.data_start != sb.inode_start + sb.inode_blocks ||
         sb.data_start >= sb.total_blocks) return FS_EINVAL;
+    if(sb.version>=4) {
+        if(sb.journal_blocks!=JOURNAL_BLOCKS || sb.total_blocks<JOURNAL_BLOCKS ||
+           sb.journal_start!=sb.total_blocks-JOURNAL_BLOCKS || sb.journal_start<=sb.data_start)return FS_EINVAL;
+        if(journal_recover())return FS_EIO;
+        if(bread(0,&sb))return FS_EIO;
+    } else { sb.journal_start=sb.journal_blocks=0; }
     int allocation=prepare_bitmap(sb.bitmap_blocks * BS);
     if(allocation) return allocation;
     states[selected].hint=sb.data_start;
     states[selected].ino_hint=0;
     for (u32 i = 0; i < sb.bitmap_blocks; i++)
         if (bread(sb.bitmap_start + i, bitmap + i * BS)) return FS_EIO;
-    if(sb.version==3 && ((sb.layout_version!=1 && sb.layout_version!=2) ||
-       (sb.permissions_root && !permissions_block_valid(sb.permissions_root)))) return FS_EINVAL;
-    mounted = true;
-
-    available_blocks = 0;
-    for (u32 b = sb.data_start; b < sb.total_blocks; b++) if (!bit_get(b)) available_blocks++;
-    available_inodes = 0;
-    struct inode in;
-    for (u32 i = FS_ROOT; i < sb.inode_count; i++) {
-        if(iread(i,&in))return FS_EIO;
-        if(in.type==FS_TYPE_FREE){available_inodes++;if(!states[selected].ino_hint)states[selected].ino_hint=i;}
-        else if(i!=FS_ROOT && !in.links){free_all_blocks(&in);in.type=FS_TYPE_FREE;ino_note_free(i);if(iwrite(i,&in))return FS_EIO;available_inodes++;}
+    if(sb.version>=3 && ((sb.layout_version!=1 && sb.layout_version!=2) ||
+       (sb.permissions_root && (sb.permissions_root<sb.data_start || sb.permissions_root>=sb.total_blocks)))) return FS_EINVAL;
+    /* Upgrade only when the entire tail is free. Never overwrite existing data. */
+    if(sb.version<4) {
+        if(sb.total_blocks<=sb.data_start+JOURNAL_BLOCKS)return FS_ENOSPC;
+        mounted=true;int validation=myfs_check_impl(false);mounted=false;if(validation)return validation;
+        u32 start=sb.total_blocks-JOURNAL_BLOCKS;
+        for(u32 b=start;b<sb.total_blocks;b++)if(bit_get(b))return FS_ENOSPC;
+        if(sb.version<3)sb.layout_version=sb.version;
+        sb.journal_start=start;sb.journal_blocks=JOURNAL_BLOCKS;
+        if(journal_clear())return FS_EIO;
+        sb.version=4;
+        if(bwrite(0,&sb) || disk_barrier())return FS_EIO;
     }
-    return sync_meta();
+    mounted = true;
+    journal_enabled[selected]=true;
+    /* The superblock reserves the tail even if power failed during upgrade. */
+    for(u32 b=sb.journal_start;b<sb.total_blocks;b++)if(!bit_get(b)){bit_set(b,true);bitmap_mark(b);}
+
+    int r=myfs_check_impl(true);
+    if(r){mounted=false;journal_failed[selected]=true;return r;}
+    return myfs_sync();
 }
 
 bool myfs_ready(void) { return mounted; }
@@ -1139,6 +1176,47 @@ const char *myfs_strerror(int err) {
     }
 }
 
+/* Drain free-only bitmap sectors in bounded transactions after inode removal.
+ * This makes truncation/unlink independent of the number of freed blocks. */
+static int bitmap_drain(void) {
+    for(;;) {
+        transaction_count=0;transaction_error=0;transaction_depth=1;
+        for(u32 sec=0;sec<sb.bitmap_blocks && transaction_count<64;sec++) {
+            u8 bit=1u<<(sec%8);u8 *dirty=&states[selected].bitmap_dirty[sec/8];
+            if(!(*dirty&bit))continue;
+            if(bwrite(sb.bitmap_start+sec,bitmap+sec*BS)) {transaction_depth=0;return FS_EIO;}
+            *dirty&=(u8)~bit;states[selected].bitmap_alloc_dirty[sec/8]&=(u8)~bit;
+        }
+        transaction_depth=0;
+        if(!transaction_count)return 0;
+        if(transaction_commit())return FS_EIO;
+    }
+}
+static int transaction_end(int result) {
+    if(!transaction_depth)return result;
+    if(result<0 && !transaction_error)transaction_error=result;
+    if(transaction_depth==1 && !transaction_error && sync_meta())transaction_error=FS_EIO;
+    if(--transaction_depth)return result;
+    int err=transaction_error;
+    if(!err)err=transaction_commit();
+    if(!err)err=bitmap_drain();
+    transaction_count=0;
+    if(err) {
+        mounted=false;cache_drop_all();
+        /* A failed barrier may have committed: only mount recovery can decide. */
+        if(err==FS_EIO) {journal_failed[selected]=true;return err;}
+        if(disk_read(0,&sb)) {journal_failed[selected]=true;return FS_EIO;}
+        available_blocks=available_inodes=0;
+        for(u32 i=0;i<sb.bitmap_blocks;i++)if(disk_read(sb.bitmap_start+i,bitmap+i*BS)) {journal_failed[selected]=true;return FS_EIO;}
+        for(u32 b=sb.data_start;b<sb.total_blocks;b++)if(!bit_get(b))available_blocks++;
+        struct inode in;
+        for(u32 i=FS_ROOT;i<sb.inode_count;i++){if(iread(i,&in)){journal_failed[selected]=true;return FS_EIO;}if(!in.type)available_inodes++;}
+        states[selected].hint=sb.data_start;states[selected].ino_hint=FS_ROOT+1;mounted=true;
+        return err;
+    }
+    return result;
+}
+
 /* ---------------------------------------------------------------- блокировка
  * Файловая система общая для всех задач, а операции с ней долгие (диск!),
  * поэтому вместо запрета прерываний — мьютекс: ждущая задача спит, а не крутится.
@@ -1150,10 +1228,10 @@ int myfs_format(void) { int r = myfs_format_impl(VERSION); return r; }
 int myfs_format_legacy(void) { int r = myfs_format_impl(1); return r; }
 #endif
 int myfs_resolve(u32 cwd, const char *path, u32 *ino) { int r = myfs_resolve_impl(cwd, path, ino); return r; }
-int myfs_create(u32 cwd, const char *path, int type, u32 *out) { int r = myfs_create_impl(cwd, path, type, out); return r; }
-int myfs_remove(u32 cwd, const char *path) { int r = myfs_remove_impl(cwd, path,false); return r; }
-int myfs_remove_keep(u32 cwd,const char *path,bool keep){return myfs_remove_impl(cwd,path,keep);}
-int myfs_reap_orphan(u32 ino) {
+int myfs_create(u32 cwd, const char *path, int type, u32 *out) { int e=transaction_begin();if(e)return e; int r = myfs_create_impl(cwd, path, type, out); return transaction_end(r); }
+int myfs_remove(u32 cwd, const char *path) { int e=transaction_begin();if(e)return e; int r = myfs_remove_impl(cwd, path,false); return transaction_end(r); }
+int myfs_remove_keep(u32 cwd,const char *path,bool keep){int e=transaction_begin();return e?e:transaction_end(myfs_remove_impl(cwd,path,keep));}
+static int myfs_reap_orphan_impl(u32 ino) {
     struct inode in;int ret=iread(ino,&in);if(ret)return ret;
     if(ino==FS_ROOT || in.type==FS_TYPE_FREE || in.links)return FS_EINVAL;
     free_all_blocks(&in);in.type=FS_TYPE_FREE;ino_note_free(ino);ret=iwrite(ino,&in);
@@ -1161,10 +1239,25 @@ int myfs_reap_orphan(u32 ino) {
     available_inodes++;
     return sync_meta();
 }
-int myfs_rename(u32 cwd, const char *src, const char *dst) { int r = myfs_rename_impl(cwd, src, dst); return r; }
+int myfs_rename(u32 cwd, const char *src, const char *dst) { int e=transaction_begin();if(e)return e; int r = myfs_rename_impl(cwd, src, dst); return transaction_end(r); }
 int myfs_read(u32 ino, u32 off, void *buf, u32 n) { int r = myfs_read_impl(ino, off, buf, n); return r; }
-int myfs_write(u32 ino, u32 off, const void *buf, u32 n) { int r = myfs_write_impl(ino, off, buf, n); return r; }
-int myfs_truncate(u32 ino) { int r = myfs_truncate_impl(ino); return r; }
+int myfs_reap_orphan(u32 ino) {int e=transaction_begin();return e?e:transaction_end(myfs_reap_orphan_impl(ino));}
+int myfs_setattr(u32 ino,u32 mode,u32 uid,u32 gid) {int e=transaction_begin();return e?e:transaction_end(myfs_setattr_impl(ino,mode,uid,gid));}
+int myfs_write(u32 ino, u32 off, const void *buf, u32 n) {
+    /* Nested directory updates belong to their enclosing namespace transaction. */
+    if(transaction_depth || !journal_enabled[selected])return myfs_write_impl(ino,off,buf,n);
+    if(n>0xffffffffu-off)return FS_EFBIG;
+    u32 done=0;
+    while(done<n) {
+        u32 count=n-done;if(count>16384)count=16384;
+        int r=transaction_begin();if(!r)r=transaction_end(myfs_write_impl(ino,off+done,(const u8 *)buf+done,count));
+        if(r<0)return done?(int)done:r;
+        if(!r)break;
+        done+=r;
+    }
+    return done;
+}
+int myfs_truncate(u32 ino) { int e=transaction_begin();if(e)return e; int r = myfs_truncate_impl(ino); return transaction_end(r); }
 int myfs_stat(u32 ino, struct fs_stat *st) { int r = myfs_stat_impl(ino, st); return r; }
 int myfs_readdir(u32 dir, u32 *pos, struct fs_dirent *out) { int r = myfs_readdir_impl(dir, pos, out); return r; }
 int myfs_getpath(u32 ino, char *buf, u32 len) { int r = myfs_getpath_impl(ino, buf, len); return r; }
@@ -1175,3 +1268,14 @@ void myfs_info(struct fs_info *info) { myfs_info_impl(info); }
 
 
 
+
+int myfs_sync(void) {
+    if(journal_failed[selected])return FS_EIO;
+    int r=transaction_begin();if(r)return r;
+    r=transaction_end(sync_meta());
+    return r?r:disk_barrier();
+}
+int myfs_unmount(void) {int r=myfs_sync();if(r)return r;mounted=false;cache_drop_all();journal_enabled[selected]=false;return 0;}
+
+int myfs_transaction_begin(void){return transaction_begin();}
+int myfs_transaction_end(int result){return transaction_end(result);}
