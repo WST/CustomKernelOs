@@ -1,6 +1,0 @@
-# OpenBSD usr.bin/wc/wc.c, ревизия e291b8af (wc.c 1.32). Файл совпадает с копией в репозитории.
-name wc
-descr OpenBSD wc
-workdir /tmp/ext/wc
-fetch https://raw.githubusercontent.com/openbsd/src/e291b8af02e5c2b53d7ddb1f0c9c0fd608b97d45/usr.bin/wc/wc.c wc.c
-cc -o /ext/bin/wc wc.c

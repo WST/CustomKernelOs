@@ -104,8 +104,9 @@ UTF-8, поиск, отмена изменений и работа по SSH. [У
   (`user/lib/img.c`: inflate, LZW, Хаффман, обратное ДКП) — страница показывается сразу,
   картинки догружаются по одной, не мешая щёлкать и листать.
 - **HTTPS с проверкой сертификатов**: цепочка до корневого центра (список Mozilla в
-  `/etc/certs.der`), имя сайта, сроки; подписи RSA (PKCS#1 и PSS) и ECDSA P-256/P-384
-  (`user/lib/x509.c`); обмен ключами X25519 или P-256.
+  `/etc/certs.der`), имя сайта, сроки. Браузер проверяет сам (`user/lib/x509.c`,
+  RSA PKCS#1 и PSS, ECDSA P-256/P-384, обмен ключами X25519 или P-256).
+  `wget` и `download` проверяют те же корни через libcurl и OpenSSL.
 - **Стили CSS** в браузере (`user/lib/css.c`): `<style>`, `<link rel=stylesheet>`,
   `@import`, каскад, `var(--x)`, `calc()`, `@media` — сайты на Bootstrap и с тёмными
   шапками выглядят похоже на себя: цвета, фон, рамки, отступы, колонка по центру,
@@ -230,7 +231,7 @@ BIOS ──> сектор 0 (boot.bin) по адресу 0x7C00, 16-битный
 - Ограничение: RAM используется только до 1 ГБ. Адреса 1–3 ГБ отданы программам.
 
 Попробуй: `mem`, `heaptest 5000`, `peek 0xB8000 64`, `peek 0xD0000000`, `panic pf`.
-Запуск с другим объёмом RAM: `make run QEMU_MEM=512M` (по умолчанию 256 МБ).
+Запуск с другим объёмом RAM: `make run QEMU_MEM=256M` (по умолчанию 512 МБ).
 
 ## Многозадачность
 
@@ -803,8 +804,8 @@ int main(void) {
 
 ### HTTPS (TLS 1.3)
 
-`wget https://example.com/` и браузер ходят по HTTPS. Всё написано с нуля в
-`user/lib/tls.c` (~1000 строк), без OpenSSL и других библиотек:
+Браузер ходит по HTTPS своим стеком, написанным с нуля в `user/lib/tls.c`
+(~1000 строк), без OpenSSL:
 
 | Что | Зачем |
 |---|---|
@@ -838,19 +839,22 @@ int main(void) {
 кривые — якобиевы координаты, `u1·G + u2·Q` одним проходом. Проверка цепочки
 RSA-4096 → ECDSA P-384 → P-256 в QEMU занимает доли секунды.
 
+`wget` и `download` не дублируют этот разбор: они передают запрос libcurl, а TLS
+делает OpenSSL. Корневые сертификаты те же. Перед запросом `/etc/certs.der`
+перекладывается в PEM и отдаётся libcurl. `-k` по-прежнему отключает проверку.
+
 ```
 sh:/$ wget https://example.com/
 Connecting to example.com:443... connected.
-TLS handshake... TLS 1.3, ChaCha20-Poly1305, certificate OK: DigiCert Inc
 HTTP/1.1 200 OK
 sh:/$ wget https://self-signed.badssl.com/
-wget: certificate problem: issuer is not trusted: *.badssl.com
+wget: certificate problem: SSL certificate problem: self-signed certificate
 (use -k to download anyway)
 ```
 
 ![HTTPS в браузере](docs/screenshot-https.png)
 
-Чего пока нет: TLS 1.2, отзыва сертификатов (OCSP/CRL), кривой P-521 и Ed25519 (таких
+Чего пока нет у браузерного стека: TLS 1.2, отзыва сертификатов (OCSP/CRL), кривой P-521 и Ed25519 (таких
 корней и сайтов единицы), защиты от атак по времени в P-256 (наш ключ одноразовый).
 Проверить у себя: `openssl s_server -accept 4433 -cert c.pem -key k.pem -WWW` и в MyOS
 `wget -k https://10.0.2.2:4433/файл` (свой самоподписанный сертификат — с `-k`).
@@ -859,7 +863,8 @@ wget: certificate problem: issuer is not trusted: *.badssl.com
 подписи PSS/PKCS#1/ECDSA — нужен `pip install cryptography`).
 
 `tls.c` и `x509.c` собираются gcc (там 64-битная арифметика, которой нет в `cc` внутри
-MyOS) и подключаются только к `browser` и `wget`. Своей программе:
+MyOS) и подключаются к `browser`. `wget` и `download` линкуются с `libcurl.so`.
+Своей программе на этом стеке:
 `#include "tls.h"`, `tls_open(fd, host, err, n)`, `tls_cert_ok(t)` / `tls_cert_error(t)`,
 `tls_read`, `tls_write`, `tls_close`.
 
@@ -1117,7 +1122,7 @@ kernel/net.c       Ethernet, ARP, IPv4, ICMP, UDP, DHCP, поток net
 kernel/tcp.c       TCP
 kernel/socket.c    сокеты для программ
 kernel/ipc.c       общая память, сообщения, имена служб, часы RTC
-user/ifconfig.c ping.c host.c wget.c httpd.c   сетевые программы
+user/ifconfig.c ping.c host.c wget.c download.c httpd.c   сетевые программы
 user/desktop.c     рабочий стол в стиле Ubuntu: панель, док, обзор, окна, тени, значки
 user/lib/vec.c     сглаженная векторная графика: контуры, скругления, тени, прозрачность
 user/lib/font.c    шрифты TrueType (Ubuntu, Ubuntu Mono): разбор .ttf, кэш глифов, UTF-8

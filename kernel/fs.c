@@ -14,7 +14,6 @@ void *malloc(unsigned long);void free(void*);
 #else
 #include "heap.h"
 #include "file.h"
-#include "timer.h"
 #define lookup_alloc(n) kmalloc(n)
 #define lookup_free(p) kfree(p)
 #endif
@@ -22,8 +21,8 @@ void *malloc(unsigned long);void free(void*);
 #define DEVBASE 0xf0000010u
 #define DEVNULL 0xf0000100u
 #define DEVZERO 0xf0000101u
-#define DEVURANDOM 0xf0000102u
-#define DEVRANDOM  0xf0000103u
+#define DEVRANDOM 0xf0000102u
+#define DEVURANDOM 0xf0000103u
 #define SLOT(i) ((i)>>24)
 #define LOCAL(i) ((i)&0xffffff)
 #define HANDLE(s,i) (((u32)(s)<<24)|(i))
@@ -34,6 +33,35 @@ void fs_namespace_lock(void) { mutex_lock(&lock); }
 void fs_namespace_unlock(void) { mutex_unlock(&lock); }
 static bool ready;
 static bool isdev(u32 i) { return i>=DEVROOT; }
+static bool devchr(u32 i) { return i==DEVNULL || i==DEVZERO || i==DEVRANDOM || i==DEVURANDOM; }
+/* Поток для OpenSSL: /dev/urandom и /dev/random. Состояние крутит xoshiro128**
+ * и каждый вызов подмешивает rdtsc — отдельного аппаратного ГСЧ нет. */
+static u32 rng_s[4];
+static bool rng_ready;
+static u32 rotl32(u32 x, int k) { return (x<<k) | (x>>(32-k)); }
+static u32 rng_next(void) {
+    u32 lo, hi, r, t;
+    __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    if(!rng_ready) {
+        rng_s[0]=lo^0x9e3779b9u; rng_s[1]=hi^0x6a09e667u;
+        rng_s[2]=lo*0x85ebca6bu+1u; rng_s[3]=hi*0xc2b2ae35u+0x27d4eb2fu;
+        if(!(rng_s[0]|rng_s[1]|rng_s[2]|rng_s[3])) rng_s[0]=1;
+        rng_ready=true;
+    }
+    r=rotl32(rng_s[1]*5, 7)*9;
+    t=rng_s[1]<<9;
+    rng_s[2]^=rng_s[0]; rng_s[3]^=rng_s[1]; rng_s[1]^=rng_s[2]; rng_s[0]^=rng_s[3];
+    rng_s[2]^=t; rng_s[3]=rotl32(rng_s[3], 11);
+    rng_s[0]^=lo; rng_s[1]^=hi;
+    return r^lo;
+}
+static void fill_random(void *buf, u32 n) {
+    u8 *p=buf;
+    while(n) {
+        u32 v=rng_next(), k=n<4?n:4;
+        memcpy(p, &v, k); p+=k; n-=k;
+    }
+}
 static int select_inode(u32 i) {
     u32 s=SLOT(i); if(s>=4 || !mounts[s].used) return FS_ENODEV;
     myfs_select(s,mounts[s].device); return 0;
@@ -53,30 +81,13 @@ static u32 cross(u32 i) {
 }
 static int access_impl(u32 ino,u32 mask,bool real_ids);
 static void credentials(u32 *uid,u32 *gid,u32 *mask,bool real_ids);
-/* /dev/urandom и /dev/random: PRNG для OpenSSL/Git (не криптостойкий на хосте). */
-static void fill_random(void *buf, u32 n) {
-    static u32 state = 0x6d5a4c33u;
-    u8 *p = buf;
-#ifndef HOST_TEST
-    u32 lo, hi;
-    __asm__ volatile ("rdtsc" : "=a"(lo), "=d"(hi));
-    state ^= timer_ticks() * 2654435761u ^ lo ^ (hi << 16);
-#endif
-    for (u32 i = 0; i < n; i++) {
-        state = state * 1664525u + 1013904223u;
-        p[i] = (u8)(state >> 16);
-    }
-}
-static bool is_char_dev(u32 i) {
-    return i==DEVNULL || i==DEVZERO || i==DEVURANDOM || i==DEVRANDOM;
-}
 static int stat_impl(u32 i,struct fs_stat *st) {
     if(!isdev(i)) { int r=select_inode(i); return r ? r : myfs_stat(LOCAL(i),st); }
     memset(st,0,sizeof(*st));
     st->links=1;
-    st->mode=i==DEVROOT?0755:is_char_dev(i)?0666:0600;
+    st->mode=i==DEVROOT?0755:devchr(i)?0666:0600;
     if(i==DEVROOT) { st->type=FS_TYPE_DIR; return 0; }
-    if(is_char_dev(i)) { st->type=FS_TYPE_CHAR; return 0; }
+    if(devchr(i)) { st->type=FS_TYPE_CHAR; return 0; }
     const struct block_device *d=block_get((int)(i-DEVBASE)); if(!d) return FS_ENOENT;
     st->type=FS_TYPE_BLOCK; st->blocks=d->sectors;
     st->size=d->sectors>0x7fffff ? 0xffffffffu : d->sectors*512; return 0;
@@ -87,8 +98,8 @@ static int readdir_impl(u32 dir,u32 *pos,struct fs_dirent *out) {
         if(n<(u32)block_count()) { int id=block_at(n); out->ino=DEVBASE+id; strcpy(out->name,block_get(id)->name); return 1; }
         if(n==(u32)block_count()) { out->ino=DEVNULL; strcpy(out->name,"null"); return 1; }
         if(n==(u32)block_count()+1) { out->ino=DEVZERO; strcpy(out->name,"zero"); return 1; }
-        if(n==(u32)block_count()+2) { out->ino=DEVURANDOM; strcpy(out->name,"urandom"); return 1; }
-        if(n==(u32)block_count()+3) { out->ino=DEVRANDOM; strcpy(out->name,"random"); return 1; }
+        if(n==(u32)block_count()+2) { out->ino=DEVRANDOM; strcpy(out->name,"random"); return 1; }
+        if(n==(u32)block_count()+3) { out->ino=DEVURANDOM; strcpy(out->name,"urandom"); return 1; }
         return 0;
     }
     if(isdev(dir)) return FS_ENOTDIR;
@@ -494,15 +505,14 @@ int fs_set_size(u32 ino, u32 size) {
 }
 int fs_truncate(u32 ino) {
     mutex_lock(&lock); int r;
-    if(is_char_dev(ino)) r=0; else if(isdev(ino)) r=FS_EROFS;
+    if(devchr(ino)) r=0; else if(isdev(ino)) r=FS_EROFS;
     else { r=select_inode(ino); if(!r) r=myfs_truncate(LOCAL(ino)); }
     mutex_unlock(&lock); return r;
 }
 int fs_read(u32 ino,u32 off,void *buf,u32 n) {
     mutex_lock(&lock); int r=0;
-    if(ino==DEVNULL) r=0;
-    else if(ino==DEVZERO) { memset(buf,0,n); r=n; }
-    else if(ino==DEVURANDOM || ino==DEVRANDOM) { fill_random(buf, n); r=n; }
+    if(ino==DEVNULL) r=0; else if(ino==DEVZERO) { memset(buf,0,n); r=n; }
+    else if(ino==DEVRANDOM || ino==DEVURANDOM) { fill_random(buf,n); r=(int)n; }
     else if(ino==DEVROOT) r=FS_EISDIR;
     else if(isdev(ino)) {
         if(n>0xffffffffu-off) n=0xffffffffu-off;
@@ -524,8 +534,7 @@ int fs_read(u32 ino,u32 off,void *buf,u32 n) {
 }
 int fs_write(u32 ino,u32 off,const void *buf,u32 n) {
     mutex_lock(&lock); int r;
-    if(ino==DEVNULL || ino==DEVZERO || ino==DEVURANDOM || ino==DEVRANDOM) r=n;
-    else if(isdev(ino)) r=FS_EROFS;
+    if(devchr(ino)) r=n; else if(isdev(ino)) r=FS_EROFS;
     else { r=select_inode(ino); if(!r) r=myfs_write(LOCAL(ino),off,buf,n); }
     mutex_unlock(&lock); return r;
 }
