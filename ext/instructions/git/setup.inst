@@ -6,5 +6,7 @@ fetch https://www.kernel.org/pub/software/scm/git/git-2.47.0.tar.gz git-2.47.0.t
 tar xzf git-2.47.0.tar.gz
 workdir /tmp/ext/git/git-2.47.0
 copy config.mak config.mak
-make
-make install
+# Каждый cc держит заголовки OpenSSL (около 110 МБ). Четыре таких процесса
+# не влезают в 512 МБ, которые QEMU даёт по умолчанию.
+make -j2
+make -j2 install
