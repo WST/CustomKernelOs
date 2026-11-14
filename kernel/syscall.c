@@ -100,6 +100,7 @@ static int proc_errno(int e) {
     case PROC_EISDIR:  return -EISDIR;
     case PROC_EBUSY:   return -EBUSY;
     case PROC_EACCES: return -EACCES;
+    case PROC_ELOOP:   return -ELOOP;
     default:           return e;
     }
 }

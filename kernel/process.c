@@ -11,6 +11,10 @@
  *   0xBFF00000  стек программы, 1 МиБ, растёт вниз
  *   0xBFFFFFFF  на вершине: строки аргументов, argv[], argc
  *               у программы с PT_INTERP ещё envp и auxv
+ *
+ * Файл, который начинается с #!, — скрипт. Запускается его интерпретатор,
+ * в argv попадают путь интерпретатора, необязательный аргумент из первой
+ * строки и путь самого скрипта. Цепочка скриптов ограничена четырьмя шагами.
  */
 #include "process.h"
 #include "ipc.h"
@@ -53,6 +57,8 @@ struct elf_phdr {
 #define STACK_BOTTOM USER_STACK_BOTTOM
 #define EXEC_MAX      (8u * 1024 * 1024)   /* больше в кучу ядра не читаем */
 #define EXEC_MAX_PHDR 64
+#define SHEBANG_LINE  256                  /* первая строка #! не длиннее этого */
+#define SHEBANG_DEPTH 4                    /* сколько скриптов можно вложить */
 
 static volatile u32 foreground;
 
@@ -63,6 +69,7 @@ const char *proc_strerror(int err) {
     case PROC_ENOMEM:  return "out of memory";
     case PROC_EAGAIN:  return "too many tasks";
     case PROC_EISDIR:  return "is a directory";
+    case PROC_ELOOP:   return "too many shebang interpreters";
     default:           return "error";
     }
 }
@@ -299,10 +306,54 @@ static int build_user_stack(u32 dir, int argc, char **argv, int envc, char **env
     return rc;
 }
 
+static char *kdup(const char *s) {
+    u32 n = strlen(s) + 1;
+    char *p = kmalloc(n);
+    if (p) memcpy(p, s, n);
+    return p;
+}
+
+/* 0 — это не скрипт. 1 — разобрали интерпретатор. Иначе PROC_*.
+ * Необязательный аргумент — весь хвост строки одним словом, как в Linux. */
+static int parse_shebang(u32 ino, u32 size, char *interp, char *arg, bool *has_arg) {
+    char buf[SHEBANG_LINE];
+    *has_arg = false;
+    interp[0] = arg[0] = 0;
+    if (size < 2) return 0;
+    u32 n = size < SHEBANG_LINE ? size : SHEBANG_LINE;
+    if (read_exact(ino, 0, buf, n)) return PROC_ENOEXEC;
+    if (buf[0] != '#' || buf[1] != '!') return 0;
+    u32 end = 2;
+    while (end < n && buf[end] != '\n') end++;
+    if (end == n && size > n) return PROC_ENOEXEC;
+    while (end > 2 && (buf[end - 1] == ' ' || buf[end - 1] == '\t' || buf[end - 1] == '\r')) end--;
+    u32 i = 2;
+    while (i < end && (buf[i] == ' ' || buf[i] == '\t')) i++;
+    if (i >= end) return PROC_ENOEXEC;
+    u32 start = i;
+    while (i < end && buf[i] != ' ' && buf[i] != '\t') i++;
+    u32 ilen = i - start;
+    if (!ilen || ilen >= SHEBANG_LINE) return PROC_ENOEXEC;
+    memcpy(interp, buf + start, ilen);
+    interp[ilen] = 0;
+    while (i < end && (buf[i] == ' ' || buf[i] == '\t')) i++;
+    if (i < end) {
+        u32 alen = end - i;
+        if (alen >= SHEBANG_LINE) return PROC_ENOEXEC;
+        memcpy(arg, buf + i, alen);
+        arg[alen] = 0;
+        *has_arg = true;
+    }
+    return 1;
+}
+
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
  * argv — строки в памяти ядра. Файл читается кусками по 512 байт: в куче
- * ядра остаются только заголовки программы, не весь образ. */
-static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, char **env, struct image *im) {
+ * ядра остаются только заголовки программы, не весь образ.
+ * script и user_argv — то, что передал exec: при вложенном #! имя скрипта
+ * и исходные аргументы не подменяются промежуточным интерпретатором. */
+static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, char **env, struct image *im,
+                           const char *script, int user_argc, char **user_argv, int depth) {
     u32 ino;
     struct fs_stat st;
     int resolved=fs_resolve(cwd,path,&ino);
@@ -310,6 +361,33 @@ static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, cha
     if(fs_stat(ino,&st))return PROC_ENOENT;
     if (st.type == FS_TYPE_DIR) return PROC_EISDIR;
     if(fs_access(ino,1,false))return PROC_EACCES;
+
+    char bang_interp[SHEBANG_LINE], bang_arg[SHEBANG_LINE];
+    bool bang_arg_set = false;
+    int bang = parse_shebang(ino, st.size, bang_interp, bang_arg, &bang_arg_set);
+    if (bang < 0) return bang;
+    if (bang > 0) {
+        if (depth >= SHEBANG_DEPTH) return PROC_ELOOP;
+        int tail = user_argc > 1 ? user_argc - 1 : 0;
+        int nargc = 2 + (bang_arg_set ? 1 : 0) + tail;
+        if (nargc > PROC_MAX_ARGS) return PROC_ENOMEM;
+        char **nav = kmalloc((u32)(nargc + 1) * sizeof(char *));
+        char *ip = kdup(bang_interp);
+        char *ap = bang_arg_set ? kdup(bang_arg) : NULL;
+        if (!nav || !ip || (bang_arg_set && !ap)) {
+            kfree(nav); kfree(ip); kfree(ap);
+            return PROC_ENOMEM;
+        }
+        int k = 0;
+        nav[k++] = ip;
+        if (bang_arg_set) nav[k++] = ap;
+        nav[k++] = (char *)script;
+        for (int i = 1; i < user_argc; i++) nav[k++] = user_argv[i];
+        nav[k] = NULL;
+        int err = load_image_impl(bang_interp, cwd, k, nav, env, im, script, user_argc, user_argv, depth + 1);
+        kfree(nav); kfree(ip); kfree(ap);
+        return err;
+    }
 
     struct elf_header eh;
     struct elf_phdr *ph = NULL, *lph = NULL;
@@ -400,7 +478,10 @@ fail:
 /* Pin the namespace while ELF headers, segments and interpreter are read.
  * Otherwise unlink/reuse between reads could substitute another owner's inode. */
 static int load_image(const char *path,u32 cwd,int argc,char **argv,char **env,struct image *im) {
-    fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,env,im);fs_namespace_unlock();return ret;
+    fs_namespace_lock();
+    int ret=load_image_impl(path,cwd,argc,argv,env,im,path,argc,argv,0);
+    fs_namespace_unlock();
+    return ret;
 }
 
 static int spawn(const char *path, u32 cwd, int argc, char **argv, char **env, bool fg, struct file *log, struct file *input, struct task *parent, bool service_root) {

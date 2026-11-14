@@ -15,6 +15,7 @@ enum {
     PROC_EISDIR  = -5,
     PROC_EBUSY   = -6,
     PROC_EACCES  = -7,
+    PROC_ELOOP   = -8,
 };
 
 /* Загрузить ELF-файл и запустить его как процесс. -> pid или PROC_E* */

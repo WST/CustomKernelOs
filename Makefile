@@ -318,7 +318,8 @@ $(BUILD)/user/libssl.so: $(OSSL_BLD)/.built $(BUILD)/user/libcrypto.so $(BUILD)/
 
 # curl 8.23.0: только HTTP и HTTPS, zlib и OpenSSL. Собирает gcc хоста
 # по зафиксированному curl_config.h, без configure. Объекты с R_386_GOT32X,
-# поэтому cc их не линкует. .so собираем сами.
+# поэтому cc их не линкует. .so собираем сами. curl-config — скрипт этого
+# пресета: exec запускает его по #!/bin/sh.
 CURL_SRC := user/lib/curl
 CURL_BLD := $(BUILD)/curl
 CURL_PRESET := user/lib/curl-preset
@@ -622,6 +623,8 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcrypto.so /lib/libcrypto.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libssl.so /lib/libssl.so >/dev/null || exit 1
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/libcurl.so /lib/libcurl.so >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put user/lib/curl-preset/curl-config /bin/curl-config >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) chmod 0755 /bin/curl-config || exit 1
 	@$(BUILD)/myfs $(DISK) mkdir /include/openssl >/dev/null 2>&1 || true
 	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; $(BUILD)/myfs $(DISK) put $$f /include/openssl/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/curl >/dev/null 2>&1 || true
