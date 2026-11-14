@@ -1,0 +1,10 @@
+# Git 2.47.0. Штатный Makefile, OpenSSL и cURL. Исходники не патчатся.
+name git
+descr Git 2.47.0
+workdir /tmp/ext/git
+fetch https://www.kernel.org/pub/software/scm/git/git-2.47.0.tar.gz git-2.47.0.tar.gz
+tar xzf git-2.47.0.tar.gz
+workdir /tmp/ext/git/git-2.47.0
+copy config.mak config.mak
+make
+make install

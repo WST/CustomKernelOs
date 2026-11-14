@@ -44,6 +44,8 @@ struct task {
     u32   brk_start, brk;           /* куча программы (sbrk) */
     u32   user_pages;               /* сколько страниц RAM занимает программа */
     u32   cwd;                      /* текущий каталог (inode) */
+    char *env_buf;                  /* упакованные строки KEY=VAL, принадлежат процессу */
+    u32   env_len;
     struct file *syscall_fds[MAX_FDS]; /* transient refs while a syscall blocks */
     struct file *fds[MAX_FDS];      /* открытые файлы (общие объекты, см. file.h) */
     u32 uid;

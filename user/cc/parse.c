@@ -754,7 +754,14 @@ static void array_initializer2(Token **rest, Token *tok, Initializer *init) {
     *rest = tok;
 }
 
+/* volatile struct X копируется, пока X ещё не дописана. Поля остаются у origin. */
+static Type *completed(Type *ty) {
+    if (ty && !ty->members && ty->origin && ty->origin->members) return ty->origin;
+    return ty;
+}
+
 static Member *find_member_by_name(Type *ty, Token *tok) {
+    ty = completed(ty);
     for (Member *m = ty->members; m; m = m->next)
         if (m->name && m->name->len == tok->len && !strncmp(m->name->loc, tok->loc, tok->len)) return m;
     error_tok(tok, "no such member");
@@ -767,9 +774,26 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
     while (!consume_end(rest, tok)) {
         if (!first) tok = skip(tok, ",");
         first = false;
-        if (equal(tok, ".")) {                               /* .x = 1 */
+        if (equal(tok, ".")) {                               /* .x = 1, .x[0] = 1, .a.b = 1 */
+            Initializer *child;
             mem = find_member_by_name(init->ty, tok->next);
-            tok = skip(tok->next->next, "=");
+            tok = tok->next->next;
+            child = init->children[mem->idx];
+            while (equal(tok, ".") || equal(tok, "[")) {
+                if (equal(tok, ".")) {
+                    Member *sub = find_member_by_name(child->ty, tok->next);
+                    tok = tok->next->next;
+                    child = child->children[sub->idx];
+                } else {
+                    int i = const_expr(&tok, tok->next);
+                    tok = skip(tok, "]");
+                    if (i < 0 || i >= child->ty->array_len) error_tok(tok, "array designator out of range");
+                    child = child->children[i];
+                }
+            }
+            if (equal(tok, "=")) tok = tok->next;
+            initializer2(&tok, tok, child);
+            continue;
         }
         if (mem) { initializer2(&tok, tok, init->children[mem->idx]); mem = mem->next; }
         else tok = skip_excess_element(tok);
@@ -801,6 +825,13 @@ static void union_initializer(Token **rest, Token *tok, Initializer *init) {
 
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
     if (init->ty->kind == TY_ARRAY && tok->kind == TK_STR) { string_initializer(rest, tok, init); return; }
+    if (init->ty->kind == TY_ARRAY && equal(tok, "[")) {
+        int i = const_expr(&tok, tok->next);
+        tok = skip(skip(tok, "]"), "=");
+        if (i >= 0 && i < init->ty->array_len) initializer2(&tok, tok, init->children[i]);
+        *rest = tok;
+        return;
+    }
     if (init->ty->kind == TY_ARRAY) {
         if (equal(tok, "{")) array_initializer1(rest, tok, init);
         else array_initializer2(rest, tok, init);
@@ -1556,6 +1587,7 @@ static Node *unary(Token **rest, Token *tok) {
 }
 
 static Member *get_struct_member(Type *ty, Token *tok) {
+    ty = completed(ty);
     for (Member *mem = ty->members; mem; mem = mem->next) {
         if ((mem->ty->kind == TY_STRUCT || mem->ty->kind == TY_UNION) && !mem->name) {
             if (get_struct_member(mem->ty, tok)) return mem;          /* безымянная вложенная */
@@ -1569,7 +1601,7 @@ static Member *get_struct_member(Type *ty, Token *tok) {
 static Node *struct_ref(Node *node, Token *tok) {
     add_type(node);
     if (node->ty->kind != TY_STRUCT && node->ty->kind != TY_UNION) error_tok(node->tok, "not a struct nor a union");
-    Type *ty = node->ty;
+    Type *ty = completed(node->ty);
     for (;;) {
         Member *mem = get_struct_member(ty, tok);
         if (!mem) error_tok(tok, "no such member");
@@ -1688,6 +1720,15 @@ static Node *primary(Token **rest, Token *tok) {
         node->val = n;
         *rest = skip(tok, ")");
         return node;
+    }
+    if (tok->kind == TK_IDENT && (equal(tok, "__func__") || equal(tok, "__FUNCTION__"))) {
+        if (!current_fn) error_tok(tok, "__func__ outside of a function");
+        char *name = get_ident(current_fn->tok);
+        int len = (int)strlen(name) + 1;
+        Obj *var = new_string_literal(name, len, array_of(ty_char, len));
+        add_ref(var->name);
+        *rest = tok->next;
+        return new_var_node(var, tok);
     }
     if (tok->kind == TK_IDENT) {
         VarScope *sc = find_var(tok);

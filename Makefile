@@ -442,16 +442,18 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h
+CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h $(wildcard $(OSSL_SRC)/include/openssl/*.h) $(wildcard $(OSSL_BLD)/include/openssl/*.h) $(wildcard $(CURL_SRC)/include/curl/*.h)
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
-	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/lib
+	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/include/openssl $(CCROOT)/include/curl $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
 	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
+	@for f in $(OSSL_SRC)/include/openssl/*.h $(OSSL_BLD)/include/openssl/*.h; do test -f $$f || continue; cp $$f $(CCROOT)/include/openssl/; done
+	@for f in $(CURL_SRC)/include/curl/*.h; do test -f $$f || continue; cp $$f $(CCROOT)/include/curl/; done
 	@cp $(CC_LIBSRC) $(CCROOT)/lib/
 	@touch $@
 

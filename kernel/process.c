@@ -192,24 +192,98 @@ static int map_elf(u32 ino, u32 size, const struct elf_header *eh, const struct 
     return 0;
 }
 
-/* Стек для динамического загрузчика: argc, argv, пустой envp, auxv. esp кратен 16. */
-static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 interp, u32 *sp_out) {
-    u32 sp = USER_TOP, uargv[PROC_MAX_ARGS + 1];
-    for (int i = argc - 1; i >= 0; i--) {
-        u32 len = strlen(argv[i]) + 1;
-        if (len > 256) len = 256;
-        sp -= len;
-        if (sp < STACK_BOTTOM + 1024) return PROC_ENOMEM;
-        copy_to_dir(dir, sp, argv[i], len - 1);
-        copy_to_dir(dir, sp + len - 1, "", 1);
-        uargv[i] = sp;
+static const char *default_env[] = { "PATH=/bin:/ext/bin", "HOME=/", "TERM=myos", 0 };
+
+/* Упаковать KEY=VAL в один блок ядра. vec == NULL оставляет пустое окружение. */
+static int pack_env(const char **vec, char **buf_out, u32 *len_out) {
+    u32 n = 0;
+    int count = 0;
+    if (vec) for (; vec[count]; count++) n += strlen(vec[count]) + 1;
+    char *buf = NULL;
+    if (n) {
+        buf = kmalloc(n);
+        if (!buf) return PROC_ENOMEM;
+        char *p = buf;
+        for (int i = 0; i < count; i++) {
+            u32 L = strlen(vec[i]) + 1;
+            memcpy(p, vec[i], L);
+            p += L;
+        }
     }
-    uargv[argc] = 0;
-    u32 vec[PROC_MAX_ARGS + 24];
+    *buf_out = buf;
+    *len_out = n;
+    return 0;
+}
+
+static int unpack_env(const char *buf, u32 len, char ***out, int *n_out) {
+    int count = 0;
+    for (u32 i = 0; i < len; i++) if (buf[i] == 0) count++;
+    char **vec = kmalloc((count + 1) * sizeof(char *));
+    if (!vec) return PROC_ENOMEM;
+    int k = 0;
+    u32 start = 0;
+    for (u32 i = 0; i < len; i++) if (buf[i] == 0) {
+        vec[k++] = (char *)(buf + start);
+        start = i + 1;
+    }
+    vec[k] = 0;
+    *out = vec;
+    *n_out = k;
+    return 0;
+}
+
+static void env_replace(struct task *t, char *buf, u32 len) {
+    t = task_process(t);
+    kfree(t->env_buf);
+    t->env_buf = buf;
+    t->env_len = len;
+}
+
+static int place_strings(u32 dir, u32 *sp, char **v, int n, u32 *ptrs) {
+    ptrs[n] = 0;
+    for (int i = n - 1; i >= 0; i--) {
+        u32 len = strlen(v[i]) + 1;
+        if (*sp < STACK_BOTTOM + len + 4096) return PROC_ENOMEM;
+        *sp -= len;
+        if (!copy_to_dir(dir, *sp, v[i], len)) return PROC_ENOMEM;
+        ptrs[i] = *sp;
+    }
+    return 0;
+}
+
+/* Динамическая программа: стек Linux (argc, argv, envp, auxv).
+ * Статическая: _start(argc, argv, envp), esp+4 кратен 16. */
+static int build_user_stack(u32 dir, int argc, char **argv, int envc, char **env,
+                            struct elfmap *prog, u32 interp, int with_aux, u32 *sp_out) {
+    u32 sp = USER_TOP;
+    u32 *ap = kmalloc(((u32)argc + 1) * 4);
+    u32 *ep = kmalloc(((u32)envc + 1) * 4);
+    if (!ap || !ep) { kfree(ap); kfree(ep); return PROC_ENOMEM; }
+    int err = place_strings(dir, &sp, argv, argc, ap);
+    if (!err) err = place_strings(dir, &sp, env, envc, ep);
+    if (err) { kfree(ap); kfree(ep); return err; }
+    if (!with_aux) {
+        u32 argv_addr = (sp - 4 * ((u32)argc + 1)) & ~15u;
+        u32 env_addr = (argv_addr - 4 * ((u32)envc + 1)) & ~15u;
+        if (env_addr < STACK_BOTTOM + 64 ||
+            !copy_to_dir(dir, argv_addr, ap, 4 * ((u32)argc + 1)) ||
+            !copy_to_dir(dir, env_addr, ep, 4 * ((u32)envc + 1))) {
+            kfree(ap); kfree(ep); return PROC_ENOMEM;
+        }
+        u32 frame[4] = { 0, (u32)argc, argv_addr, env_addr };
+        u32 dest = env_addr - 20;               /* dest+4 кратен 16, кадр не задевает envp */
+        if (!copy_to_dir(dir, dest, frame, sizeof(frame))) { kfree(ap); kfree(ep); return PROC_ENOMEM; }
+        *sp_out = dest;
+        kfree(ap); kfree(ep);
+        return 0;
+    }
+    int nvec = 1 + argc + 1 + envc + 1 + 14;
+    u32 *vec = kmalloc((u32)nvec * 4);
+    if (!vec) { kfree(ap); kfree(ep); return PROC_ENOMEM; }
     int n = 0;
     vec[n++] = (u32)argc;
-    for (int i = 0; i <= argc; i++) vec[n++] = uargv[i];
-    vec[n++] = 0;                                            /* envp */
+    for (int i = 0; i <= argc; i++) vec[n++] = ap[i];
+    for (int i = 0; i <= envc; i++) vec[n++] = ep[i];
     vec[n++] = AT_PHDR;   vec[n++] = prog->phdr;
     vec[n++] = AT_PHENT;  vec[n++] = sizeof(struct elf_phdr);
     vec[n++] = AT_PHNUM;  vec[n++] = prog->phnum;
@@ -219,16 +293,16 @@ static int aux_stack(u32 dir, int argc, char **argv, struct elfmap *prog, u32 in
     vec[n++] = AT_NULL;   vec[n++] = 0;
     u32 bytes = (u32)n * 4;
     u32 dest = (sp - bytes) & ~15u;
-    if (dest < STACK_BOTTOM) return PROC_ENOMEM;
-    if (!copy_to_dir(dir, dest, vec, bytes)) return PROC_ENOMEM;
-    *sp_out = dest;
-    return 0;
+    int rc = PROC_ENOMEM;
+    if (dest >= STACK_BOTTOM && copy_to_dir(dir, dest, vec, bytes)) { *sp_out = dest; rc = 0; }
+    kfree(vec); kfree(ap); kfree(ep);
+    return rc;
 }
 
 /* Загрузить ELF в НОВОЕ адресное пространство и положить на стек argc/argv.
  * argv — строки в памяти ядра. Файл читается кусками по 512 байт: в куче
  * ядра остаются только заголовки программы, не весь образ. */
-static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, struct image *im) {
+static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, char **env, struct image *im) {
     u32 ino;
     struct fs_stat st;
     int resolved=fs_resolve(cwd,path,&ino);
@@ -279,6 +353,8 @@ static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, str
         goto fail;
     }
     if (argc > PROC_MAX_ARGS) argc = PROC_MAX_ARGS;
+    int envc = 0;
+    if (env) while (env[envc]) envc++;
 
     if (interp[0]) {
         u32 lino;
@@ -298,26 +374,11 @@ static int load_image_impl(const char *path, u32 cwd, int argc, char **argv, str
         entry = lm.entry;
         u32 phys;
         if (!vmm_lookup(dir, prog.phdr, &phys, NULL)) { err = PROC_ENOEXEC; goto fail; }
-        err = aux_stack(dir, argc, argv, &prog, lm.base, &sp);
+        err = build_user_stack(dir, argc, argv, envc, env, &prog, lm.base, 1, &sp);
         if (err) goto fail;
     } else {
-        /* _start(argc, argv): адрес возврата, argc, argv. esp+4 кратен 16. */
-        u32 uargv[PROC_MAX_ARGS + 1];
-        sp = USER_TOP;
-        for (int i = argc - 1; i >= 0; i--) {
-            u32 len = strlen(argv[i]) + 1;
-            if (len > 256) len = 256;
-            sp -= len;
-            copy_to_dir(dir, sp, argv[i], len - 1);
-            copy_to_dir(dir, sp + len - 1, "", 1);
-            uargv[i] = sp;
-        }
-        uargv[argc] = 0;
-        u32 argv_addr = (sp - 4 * (argc + 1)) & ~15u;
-        copy_to_dir(dir, argv_addr, uargv, 4 * (argc + 1));
-        sp = argv_addr - 20;
-        u32 frame[3] = { 0, (u32)argc, argv_addr };
-        copy_to_dir(dir, sp, frame, sizeof(frame));
+        err = build_user_stack(dir, argc, argv, envc, env, &prog, 0, 0, &sp);
+        if (err) goto fail;
     }
 
     im->dir = dir;
@@ -338,20 +399,38 @@ fail:
 
 /* Pin the namespace while ELF headers, segments and interpreter are read.
  * Otherwise unlink/reuse between reads could substitute another owner's inode. */
-static int load_image(const char *path,u32 cwd,int argc,char **argv,struct image *im) {
-    fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,im);fs_namespace_unlock();return ret;
+static int load_image(const char *path,u32 cwd,int argc,char **argv,char **env,struct image *im) {
+    fs_namespace_lock();int ret=load_image_impl(path,cwd,argc,argv,env,im);fs_namespace_unlock();return ret;
 }
 
-static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, struct file *log, struct file *input, struct task *parent, bool service_root) {
+static int spawn(const char *path, u32 cwd, int argc, char **argv, char **env, bool fg, struct file *log, struct file *input, struct task *parent, bool service_root) {
+    char **use = env;
+    char **owned = NULL;
+    int envc = 0;
+    if (!use && parent && task_process(parent)->env_buf) {
+        if (unpack_env(task_process(parent)->env_buf, task_process(parent)->env_len, &owned, &envc)) return PROC_ENOMEM;
+        use = owned;
+    }
+    if (!use) use = (char **)default_env;
     struct image im;
-    int err = load_image(path, cwd, argc, argv, &im);
-    if (err) return err;
+    memset(&im, 0, sizeof(im));
+    int err = load_image(path, cwd, argc, argv, use, &im);
+    char *packed = NULL;
+    u32 plen = 0;
+    if (!err) err = pack_env((const char **)use, &packed, &plen);
+    kfree(owned);
+    if (err) {
+        if (im.dir) vmm_destroy_dir(im.dir);
+        kfree(packed);
+        return err;
+    }
     struct task *t = task_alloc_user(basename(path), im.dir, im.entry, im.sp);
-    if (!t) { vmm_destroy_dir(im.dir); return PROC_ENOMEM; }
+    if (!t) { kfree(packed); vmm_destroy_dir(im.dir); return PROC_ENOMEM; }
     task_process(t)->brk_start = task_process(t)->brk = im.brk;
     task_process(t)->user_pages = im.pages;
     task_process(t)->cwd = cwd;
     task_process(t)->creation_mask=022;
+    env_replace(t, packed, plen);
     if (parent) {
         task_process(t)->uid = task_process(parent)->uid;
     task_process(t)->real_uid = task_process(parent)->real_uid;
@@ -388,15 +467,15 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, bool fg, stru
 }
 
 int proc_spawn(const char *path, u32 cwd, int argc, char **argv, bool fg) {
-    return spawn(path, cwd, argc, argv, fg, NULL, NULL, NULL, false);
+    return spawn(path, cwd, argc, argv, NULL, fg, NULL, NULL, NULL, false);
 }
 int proc_spawn_service(const char *path, int argc, char **argv, struct file *log, struct file *input, bool root) {
-    return spawn(path, FS_ROOT, argc, argv, true, log, input, NULL, root);
+    return spawn(path, FS_ROOT, argc, argv, NULL, true, log, input, NULL, root);
 }
 
-int proc_spawn_child(const char *path, int argc, char **argv, struct file *input) {
+int proc_spawn_child(const char *path, int argc, char **argv, char **env, struct file *input) {
     struct task *parent = task_process(task_current());
-    return spawn(path, task_process(parent)->cwd, argc, argv, true, NULL, input, parent, false);
+    return spawn(path, task_process(parent)->cwd, argc, argv, env, true, NULL, input, parent, false);
 }
 
 /* ---------------------------------------------------------------- fork
@@ -431,6 +510,10 @@ int proc_fork(struct regs *r) {
     task_process(t)->creation_mask = task_process(parent)->user?task_process(parent)->creation_mask:022;
     task_process(t)->authenticated = task_process(parent)->authenticated;
     task_process(t)->cwd        = task_process(parent)->cwd;
+    if (parent->env_len) {
+        char *copy = kmalloc(parent->env_len);
+        if (copy) { memcpy(copy, parent->env_buf, parent->env_len); env_replace(t, copy, parent->env_len); }
+    }
     t->parent     = parent->id;
     t->pgid       = parent->pgid;
     t->tcb        = parent->tcb;
@@ -447,12 +530,30 @@ int proc_fork(struct regs *r) {
  * Заменить программу в ТЕКУЩЕМ процессе. Номер, родитель, открытые файлы и
  * текущий каталог остаются, а память — новая. Если новую программу загрузить
  * не удалось, процесс продолжает жить со старой и получает ошибку. */
-int proc_exec(struct regs *r, const char *path, int argc, char **argv) {
+int proc_exec(struct regs *r, const char *path, int argc, char **argv, char **env) {
     struct task *t = task_current();
     if (t->leader || task_has_threads(t)) return PROC_EBUSY;
+    char **use = env;
+    char **owned = NULL;
+    int envc = 0;
+    if (!use && t->env_buf) {
+        if (unpack_env(t->env_buf, t->env_len, &owned, &envc)) return PROC_ENOMEM;
+        use = owned;
+    }
+    if (!use) use = (char **)default_env;
     struct image im;
-    int err = load_image(path, task_process(t)->cwd, argc, argv, &im);
-    if (err) return err;
+    memset(&im, 0, sizeof(im));
+    int err = load_image(path, task_process(t)->cwd, argc, argv, use, &im);
+    char *packed = NULL;
+    u32 plen = 0;
+    if (!err) err = pack_env((const char **)use, &packed, &plen);
+    kfree(owned);
+    if (err) {
+        if (im.dir) vmm_destroy_dir(im.dir);
+        kfree(packed);
+        return err;
+    }
+    env_replace(t, packed, plen);
 
     for(int fd=0;fd<MAX_FDS;fd++) if(t->cloexec&(1u<<fd)) {file_close(t->fds[fd]);t->fds[fd]=NULL;}
     t->cloexec=0;

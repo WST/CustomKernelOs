@@ -1,0 +1,15 @@
+CC = cc
+AR = ar
+SHELL_PATH = /bin/sh
+NO_PERL = YesPlease
+NO_GETTEXT = YesPlease
+NO_TCLTK = YesPlease
+NO_ICONV = YesPlease
+NO_GITWEB = YesPlease
+NO_INSTALL_HARDLINKS = YesPlease
+COMPUTE_HEADER_DEPENDENCIES = no
+CURL_LDFLAGS = -lcurl
+CURL_LIBCURL = -lcurl
+prefix = /ext
+gitexecdir = bin
+template_dir = share/git-core/templates

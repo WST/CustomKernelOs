@@ -29,6 +29,7 @@
  * Отметка снимается только после успешного uninstall.inst.
  */
 #include "myos.h"
+#include "sys/wait.h"
 #include "stdio.h"
 #include "dirent.h"
 #include "build_jobs.h"
@@ -109,7 +110,7 @@ static int run_prog(const char *path, char **argv) {
         exit(127);
     }
     if (waitpid(pid, &st, 0) < 0) return 1;
-    return st;
+    return WIFSIGNALED(st) ? 128 + WTERMSIG(st) : WEXITSTATUS(st);
 }
 
 static int cmd_fetch(int argc, char **argv) {

@@ -471,7 +471,9 @@ static CondIncl *push_cond_incl(Token *tok, bool included) {
 static Token *preprocess2(Token *tok) {
     Token head = {0}, *cur = &head;
     while (tok->kind != TK_EOF) {
-        if (expand_macro(&tok, tok)) continue;
+        /* st->open( — open это макрос с аргументами, но член структуры. */
+        if (!(cur != &head && (equal(cur, ".") || equal(cur, "->")) && equal(tok->next, "("))
+            && expand_macro(&tok, tok)) continue;
         if (!is_hash(tok)) {
             cur = cur->next = tok;
             tok = tok->next;
@@ -482,12 +484,22 @@ static Token *preprocess2(Token *tok) {
 
         if (equal(tok, "include")) {
             bool quoted;
-            char *name = read_include_filename(&tok, tok->next, &quoted);
+            Token *arg = tok->next;
+            char *name;
+            if (arg->kind == TK_IDENT) {
+                Macro *m = find_macro(arg);
+                Token *b = m ? m->body : NULL;
+                if (!m || m->builtin || !m->is_objlike || !b || b->kind != TK_STR)
+                    error_tok(arg, "expected a filename");
+                quoted = true;
+                name = strndup2(b->loc + 1, b->len - 2);
+                tok = skip_line(arg->next);
+            } else name = read_include_filename(&tok, arg, &quoted);
             char *path = search_include(name, start, quoted);
             if (!path) error_tok(start, "%s: file not found", name);
-            /* Счётчик — число директив #include в одном файле, а не глубина стека:
-             * заголовки вставляются в общий поток токенов. У Lua их больше 70. */
-            if (++include_depth > 256) error_tok(start, "#include nested too deeply");
+            /* Счётчик — число директив #include на весь файл: заголовки
+             * вставляются в общий поток. OpenSSL с curl легко переваливает за тысячу. */
+            if (++include_depth > 8192) error_tok(start, "#include nested too deeply");
             tok = include_file(tok, path, start->next->next);
             continue;
         }
@@ -545,7 +557,7 @@ static Token *preprocess2(Token *tok) {
     return head.next;
 }
 
-#define MAX_USER_DEFS 32
+#define MAX_USER_DEFS 128
 static char *user_defs[MAX_USER_DEFS];
 static int n_user_defs;
 
@@ -566,7 +578,16 @@ static void init_macros(void) {
     define_macro("__MYOS_CC__", "1");
     define_macro("__MYOS__", "1");
     define_macro("__STDC__", "1");
+    define_macro("__STDC_VERSION__", "199901L");
+    define_macro("__STDC_HOSTED__", "1");
     define_macro("__i386__", "1");
+    define_macro("__LITTLE_ENDIAN__", "1");
+    define_macro("__BYTE_ORDER__", "1234");
+    define_macro("__ORDER_LITTLE_ENDIAN__", "1234");
+    define_macro("__ORDER_BIG_ENDIAN__", "4321");
+    define_macro("__BYTE_ORDER", "__BYTE_ORDER__");
+    define_macro("__LITTLE_ENDIAN", "1234");
+    define_macro("__BIG_ENDIAN", "4321");
     define_macro("__SIZEOF_INT__", "4");
     define_macro("__SIZEOF_POINTER__", "4");
     if (opt_linux) define_macro("__LINUX_TEST__", "1");
