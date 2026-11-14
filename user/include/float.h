@@ -2,6 +2,7 @@
 #define FLOAT_H
 /* IEEE-754. long double в этом компиляторе — то же, что double. */
 #define FLT_RADIX 2
+#define FLT_ROUNDS 1
 #define FLT_MANT_DIG 24
 #define DBL_MANT_DIG 53
 #define LDBL_MANT_DIG 53

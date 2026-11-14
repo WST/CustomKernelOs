@@ -119,7 +119,7 @@ static int alloc_fd(struct file *f) {
     struct task *t = task_current();
     u32 flags=irq_save();
     int fd=-EMFILE;
-    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; task_process(t)->cloexec&=~(1u<<i); fd=i; break; }
+    for (int i=0; i<MAX_FDS; i++) if (!task_process(t)->fds[i]) { task_process(t)->fds[i]=f; cloexec_set(task_process(t), i, 0); fd=i; break; }
     irq_restore(flags); return fd;
 }
 
@@ -225,7 +225,7 @@ static int sys_close(u32 fd) {
     if (fd>=MAX_FDS) return -EBADF;
     u32 flags=irq_save();
     struct task *p=task_process(task_current());
-    struct file *f=p->fds[fd]; p->fds[fd]=NULL; p->cloexec&=~(1u<<fd);
+    struct file *f=p->fds[fd]; p->fds[fd]=NULL; cloexec_set(p, (int)fd, 0);
     irq_restore(flags);
     if (!f) return -EBADF;
     int flush_error=block_flush();
@@ -333,7 +333,7 @@ static int sys_dup2(u32 oldfd, u32 newfd) {
     if (oldfd == newfd) { irq_restore(flags); return newfd; }
     struct file *old=task_process(t)->fds[newfd];
     task_process(t)->fds[newfd] = file_dup(f);
-    task_process(t)->cloexec &= ~(1u<<newfd);
+    cloexec_set(task_process(t), (int)newfd, 0);
     irq_restore(flags);
     file_close(old); return newfd;
 }
@@ -1040,7 +1040,7 @@ static int sys_service(u32 op, u32 uname) {
 
 /* cond: слово seq и адрес объекта как канал ожидания. Сигнал увеличивает seq,
  * поэтому пробуждение между чтением seq и засыпанием не теряется. */
-static int sys_cond_wait(struct task *t, u32 cond, u32 mutex) {
+static int sys_cond_wait(struct task *t, u32 cond, u32 mutex, u32 timeout_ms) {
     if ((cond & 3) || (mutex & 3) || !user_buf_ok(cond, 4, true) || !user_buf_ok(mutex, 4, true))
         return -EINVAL;
     u32 flags = irq_save();
@@ -1048,23 +1048,24 @@ static int sys_cond_wait(struct task *t, u32 cond, u32 mutex) {
     volatile u32 *lock = (u32 *)mutex;
     int ret = 0;
     u32 seen;
+    u32 ticks = 0xFFFFFFFFu;
+    if (timeout_ms != 0xFFFFFFFFu) ticks = timeout_ms ? (timeout_ms + 9) / 10 : 0;
     if (*lock != t->id) { irq_restore(flags); return -EPERM; }
     seen = *seq;
     *lock = 0;
     task_wakeup((void *)mutex);
     while (*seq == seen) {
-        if (t->kill_pending) { ret = -EINTR; break; }
+        if (task_intr(t)) { ret = -EINTR; break; }
+        if (!ticks) { ret = -ETIMEDOUT; break; }
         if (!user_buf_ok(cond, 4, true)) { ret = -EFAULT; break; }
-        task_wait((void *)cond);
+        if (ticks == 0xFFFFFFFFu) task_wait((void *)cond);
+        else if (!task_wait_timeout((void *)cond, ticks)) { ret = -ETIMEDOUT; break; }
     }
-    if (!ret) {
-        while (*lock) {
-            if (*lock == t->id) { ret = -EBUSY; break; }
-            if (t->kill_pending) { ret = -EINTR; break; }
-            if (!user_buf_ok(mutex, 4, true)) { ret = -EFAULT; break; }
-            task_wait((void *)mutex);
-        }
-        if (!ret) *lock = t->id;
+    for (;;) {
+        if (!*lock) { *lock = t->id; break; }
+        if (*lock == t->id) { if (!ret) ret = -EBUSY; break; }
+        if (!user_buf_ok(mutex, 4, true)) { if (!ret) ret = -EFAULT; break; }
+        task_wait((void *)mutex);
     }
     irq_restore(flags);
     return ret;
@@ -1098,12 +1099,13 @@ void syscall_dispatch(struct regs *r) {
 
     u32 a = r->ebx, b = r->ecx, c = r->edx, d = r->esi, e = r->edi;
     int ret = -ENOSYS;
+    bool keep_eax = false;
     switch (r->eax) {
     case SYS_EXIT:    t->in_syscall = false; task_exit_group((int)a);
     case SYS_GETTID: ret=t->id; break;
     case SYS_THREAD_EXIT: t->in_syscall=false; task_exit_code((int)a);
     case SYS_THREAD_CREATE: {
-        if(e<THREAD_STACK_MIN || e>1024*1024 || d+e<d || d+e>USER_STACK_GUARD){ret=-EINVAL;break;}
+        if(e<THREAD_STACK_MIN || e>4u*1024*1024 || d+e<d || d+e>USER_STACK_GUARD){ret=-EINVAL;break;}
         if(!user_buf_ok(d,e,true) || !user_buf_ok(a,1,false) || !user_buf_ok(b,1,false)){ret=-EFAULT;break;}
         u32 sp=((d+e)&~15u)-20; /* i386 ABI: esp+4 aligned to 16 */
         ret=task_thread_create(a,b,c,sp,d,e); break;
@@ -1125,7 +1127,7 @@ void syscall_dispatch(struct regs *r) {
             ret=0;
             while (*lock) {
                 if (*lock==t->id) {ret=-EBUSY;break;}
-                if (t->kill_pending) {ret=-EINTR;break;}
+                if (task_intr(t)) {ret=-EINTR;break;}
                 task_wait((void *)a);
                 if (!user_buf_ok(a,4,true)) {ret=-EFAULT;break;}
             }
@@ -1135,9 +1137,11 @@ void syscall_dispatch(struct regs *r) {
     }
     case SYS_WRITE:
         ret = sys_write(a, b, c);
-        if (ret == -EPIPE) {                /* как SIGPIPE: читателей нет — писатель умирает */
-            t->kill_pending = true;
-            t->pending_code = 141;          /* 128 + 13 */
+        if (ret == -EPIPE) {
+            struct task *p = task_process(t);
+            u32 h = p->sig_handler[13];
+            if (h > 1 && p->sig_tramp) { if (!t->pending_sig) t->pending_sig = 13; }
+            else if (h != 1) { t->kill_pending = true; t->pending_code = 141; }
         }
         break;
     case SYS_READ:    ret = sys_read(a, b, c); break;
@@ -1264,6 +1268,16 @@ void syscall_dispatch(struct regs *r) {
     case SYS_KILL:    ret = sys_kill(a); break;
     case SYS_SETPGID: ret = sys_setpgid(a, b); break;
     case SYS_GETPGID: ret = sys_getpgid(a); break;
+    case SYS_SIGNAL: {
+        struct task *p = task_process(t);
+        if (!a || a >= 32 || a == 9) { ret = -EINVAL; break; }
+        if (b > 1 && b < USER_BASE) { ret = -EINVAL; break; }
+        ret = (int)p->sig_handler[a];
+        p->sig_handler[a] = b;
+        if (c) p->sig_tramp = c;
+        break;
+    }
+    case SYS_SIGRETURN: signal_sigreturn(t, r); keep_eax = true; break;
     case SYS_SETFG: {
         struct tty *tt = tty_of(t);
         if (tt) tt->fg = a; else proc_set_foreground(a);
@@ -1343,12 +1357,13 @@ void syscall_dispatch(struct regs *r) {
         } else if (a == TC_GET_TCB) ret = (int)t->tcb;
         else if (a == TC_SET_STACK) ret = task_thread_set_stack(b, c, d);
         else if (a == TC_DETACH) ret = task_thread_detach(b);
-        else if (a == TC_COND_WAIT) ret = sys_cond_wait(t, b, c);
+        else if (a == TC_COND_WAIT) ret = sys_cond_wait(t, b, c, d);
         else if (a == TC_COND_WAKE) ret = sys_cond_wake(b, c);
         else ret = -EINVAL;
         break;
     }
-    r->eax = (u32)ret;
+    if (!keep_eax) r->eax = (u32)ret;
+    signal_deliver(t, r);
 
     __asm__ volatile ("cli");
     for (int i=0; i<MAX_FDS; i++) {

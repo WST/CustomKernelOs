@@ -1,7 +1,7 @@
 #ifndef SIGNAL_H
 #define SIGNAL_H
-/* Ядро не доставляет сигналы: Ctrl+C убивает группу переднего плана.
- * signal() только запоминает обработчик, чтобы интерпретатор Lua собрался. */
+/* SIGINT и SIGPIPE доходят до обработчика. SIG_IGN для SIGPIPE оставляет EPIPE.
+ * SIGKILL по-прежнему убивает процесс. */
 typedef int sig_atomic_t;
 #define SIGHUP  1
 #define SIGINT  2
@@ -35,6 +35,8 @@ void (*signal(int sig, void (*handler)(int)))(int);
 int raise(int sig);
 #define SA_NOCLDSTOP 1
 #define SA_RESTART 0x10000000
+#define SA_ONSTACK 0
+#define SA_NODEFER 0
 struct sigaction {
     void (*sa_handler)(int);
     sigset_t sa_mask;

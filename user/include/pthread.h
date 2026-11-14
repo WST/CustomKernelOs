@@ -4,6 +4,7 @@
  * errno и ключи лежат в thread_tcb, мьютекс — уже в ядре. */
 #include "myos.h"
 #include "signal.h"
+#include "time.h"
 
 typedef unsigned pthread_t;
 typedef int pthread_once_t;
@@ -12,6 +13,7 @@ typedef void *(*pthread_start_t)(void *);
 
 typedef struct { unsigned owner; unsigned depth; int type; } pthread_mutex_t;
 typedef int pthread_mutexattr_t;
+typedef int pthread_condattr_t;
 typedef struct { unsigned seq; } pthread_cond_t;
 typedef struct { int detachstate; unsigned stacksize; } pthread_attr_t;
 
@@ -27,12 +29,18 @@ typedef struct { int detachstate; unsigned stacksize; } pthread_attr_t;
 #define PTHREAD_COND_INITIALIZER { 0 }
 #define PTHREAD_ONCE_INIT 0
 #define PTHREAD_STACK_MIN 4096u
+#define PTHREAD_SCOPE_SYSTEM 0
+#define PTHREAD_SCOPE_PROCESS 1
 #define PTHREAD_KEYS_MAX THREAD_KEYS
 
 int pthread_attr_init(pthread_attr_t *attr);
 int pthread_attr_destroy(pthread_attr_t *attr);
 int pthread_attr_setdetachstate(pthread_attr_t *attr, int state);
 int pthread_attr_setstacksize(pthread_attr_t *attr, unsigned size);
+int pthread_attr_setscope(pthread_attr_t *attr, int scope);
+int pthread_condattr_init(pthread_condattr_t *attr);
+int pthread_condattr_destroy(pthread_condattr_t *attr);
+int pthread_condattr_setclock(pthread_condattr_t *attr, int clock);
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, pthread_start_t start, void *arg);
 int pthread_join(pthread_t thread, void **retval);
@@ -55,6 +63,7 @@ int pthread_mutex_trylock(pthread_mutex_t *m);
 int pthread_cond_init(pthread_cond_t *c, const void *attr);
 int pthread_cond_destroy(pthread_cond_t *c);
 int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m);
+int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m, const struct timespec *abstime);
 int pthread_cond_signal(pthread_cond_t *c);
 int pthread_cond_broadcast(pthread_cond_t *c);
 

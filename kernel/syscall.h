@@ -96,6 +96,8 @@ enum {
     SYS_PWRITE,         /* pwrite(fd, buf, len, off) */
     SYS_FSYNC,          /* fsync(fd): сбросить кэш блоков на диск */
     SYS_GETPGID,        /* getpgid(pid): 0 — группа текущего процесса */
+    SYS_SIGNAL,         /* signal(sig, handler, tramp) -> старый handler */
+    SYS_SIGRETURN,      /* восстановить регистры после обработчика */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */
@@ -112,6 +114,7 @@ _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_HWINFO + 1 == SYS_PREAD, "SYS_PREAD follows SYS_HWINFO in user/lib/myos.h");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
+_Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
 
 /* коды ошибок (как в Linux) */
 #define EPERM        1

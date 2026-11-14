@@ -24,6 +24,7 @@
  *   copy <файл> <куда>      файл из каталога пакета в дерево сборки
  *   patch [-p N] <файл>     unified diff из каталога пакета, по умолчанию -p1
  *   rm <путь>               удалить файл
+ *   rm -r <путь>            удалить файл или каталог целиком
  * # до конца строки — комментарий.
  * fetch вызывает /bin/download. Без -r повторов два.
  * Поставленный пакет отмечается в /ext/installed/<имя>. Пакет с отметкой
@@ -33,6 +34,7 @@
 #include "myos.h"
 #include "sys/wait.h"
 #include "stdio.h"
+#include "unistd.h"
 #include "dirent.h"
 #include "build_jobs.h"
 
@@ -771,11 +773,58 @@ static int cmd_git(const char *root, int argc, char **argv) {
     return cmd_tool(bin, argc, argv);
 }
 
-static int cmd_rm(int argc, char **argv) {
+static void rm_errno(int r) {
+    if (r < -1) errno = -r;
+    else if (!errno) errno = EIO;
+}
+
+static int rm_tree(const char *path) {
+    DIR *d = opendir(path);
+    struct dirent *e;
     int r;
-    if (argc != 2) { dprintf(STDERR, "ext: rm needs one path\n"); return 1; }
-    r = unlink(argv[1]);
-    if (r < 0) { dprintf(STDERR, "ext: rm: %s: %s\n", argv[1], strerror(-r)); return 1; }
+    if (!d) {
+        r = unlink(path);
+        if (r == 0) return 0;
+        rm_errno(r);
+        r = rmdir(path);
+        if (r < 0) rm_errno(r);
+        return r;
+    }
+    while ((e = readdir(d))) {
+        char child[512];
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
+        if (snprintf(child, sizeof child, "%s/%s", path, e->d_name) >= (int)sizeof child) {
+            closedir(d);
+            errno = ENAMETOOLONG;
+            return -1;
+        }
+        if (e->d_type == DT_DIR) {
+            if (rm_tree(child) < 0) { closedir(d); return -1; }
+        } else if ((r = unlink(child)) < 0) {
+            rm_errno(r);
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+    r = rmdir(path);
+    if (r < 0) rm_errno(r);
+    return r;
+}
+
+static int cmd_rm(int argc, char **argv) {
+    int r, rec = 0;
+    const char *path;
+    if (argc == 3 && !strcmp(argv[1], "-r")) { rec = 1; path = argv[2]; }
+    else if (argc == 2) path = argv[1];
+    else { dprintf(STDERR, "ext: rm needs one path\n"); return 1; }
+    errno = 0;
+    r = rec ? rm_tree(path) : unlink(path);
+    if (r < 0) {
+        rm_errno(r);
+        dprintf(STDERR, "ext: rm: %s: %s\n", path, strerror(errno));
+        return 1;
+    }
     return 0;
 }
 

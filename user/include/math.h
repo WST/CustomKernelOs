@@ -8,6 +8,7 @@ double __myos_nan(void);
 
 int isnan(double x);
 int isinf(double x);
+#define isnormal(x) ((x) != 0.0 && !isnan(x) && !isinf(x))
 double fabs(double x);
 double copysign(double x, double y);
 double floor(double x);

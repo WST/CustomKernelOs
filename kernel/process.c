@@ -55,7 +55,7 @@ struct elf_phdr {
 #define AT_ENTRY  9
 
 #define STACK_BOTTOM USER_STACK_BOTTOM
-#define EXEC_MAX      (8u * 1024 * 1024)   /* больше в кучу ядра не читаем */
+#define EXEC_MAX      (32u * 1024 * 1024)  /* статический CPython с OpenSSL больше 8 МиБ */
 #define EXEC_MAX_PHDR 64
 #define SHEBANG_LINE  256                  /* первая строка #! не длиннее этого */
 #define SHEBANG_DEPTH 4                    /* сколько скриптов можно вложить */
@@ -516,7 +516,7 @@ static int spawn(const char *path, u32 cwd, int argc, char **argv, char **env, b
         task_process(t)->uid = task_process(parent)->uid;
     task_process(t)->real_uid = task_process(parent)->real_uid;
     task_process(t)->saved_uid = task_process(parent)->saved_uid;
-    task_process(t)->cloexec = task_process(parent)->cloexec;
+    memcpy(task_process(t)->cloexec_bits, task_process(parent)->cloexec_bits, sizeof task_process(t)->cloexec_bits);
     task_process(t)->fs_root = task_process(parent)->fs_root;
     task_process(t)->gid = task_process(parent)->gid;
     task_process(t)->real_gid = task_process(parent)->real_gid;
@@ -586,7 +586,9 @@ int proc_fork(struct regs *r) {
     task_process(t)->uid = task_process(parent)->uid;
     task_process(t)->real_uid = task_process(parent)->real_uid;
     task_process(t)->saved_uid = task_process(parent)->saved_uid;
-    task_process(t)->cloexec = task_process(parent)->cloexec;
+    memcpy(task_process(t)->cloexec_bits, task_process(parent)->cloexec_bits, sizeof task_process(t)->cloexec_bits);
+    memcpy(task_process(t)->sig_handler, task_process(parent)->sig_handler, sizeof task_process(t)->sig_handler);
+    task_process(t)->sig_tramp = task_process(parent)->sig_tramp;
     task_process(t)->fs_root = task_process(parent)->fs_root;
     task_process(t)->gid = task_process(parent)->gid;
     task_process(t)->real_gid = task_process(parent)->real_gid;
@@ -639,8 +641,11 @@ int proc_exec(struct regs *r, const char *path, int argc, char **argv, char **en
     }
     env_replace(t, packed, plen);
 
-    for(int fd=0;fd<MAX_FDS;fd++) if(t->cloexec&(1u<<fd)) {file_close(t->fds[fd]);t->fds[fd]=NULL;}
-    t->cloexec=0;
+    for(int fd=0;fd<MAX_FDS;fd++) if(cloexec_get(t, fd)) {file_close(t->fds[fd]);t->fds[fd]=NULL;}
+    memset(t->cloexec_bits, 0, sizeof t->cloexec_bits);
+    for (int i = 0; i < 32; i++) if (t->sig_handler[i] > 1) t->sig_handler[i] = 0;
+    t->pending_sig = 0;
+    t->handling_sig = false;
     u32 old = t->page_dir;
     t->page_dir = im.dir;
     vmm_switch(im.dir);                                  /* уходим со старого каталога... */
@@ -676,7 +681,7 @@ u32  proc_foreground(void) { return foreground; }
 /* Ctrl+C: убить всю группу переднего плана (например, весь конвейер) */
 bool proc_ctrl_c(void) {
     if (!foreground || !console_isig()) return false;   /* программа просила отдать ^C ей */
-    if (!task_kill_group(foreground)) return false;
+    if (!task_raise_group(foreground, 2)) return false;
     vga_puts("^C\n");
     return true;
 }

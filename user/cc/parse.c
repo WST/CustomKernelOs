@@ -83,10 +83,11 @@ static Node *compound_stmt(Token **rest, Token *tok);
 static Node *stmt(Token **rest, Token *tok);
 static Node *expr_stmt(Token **rest, Token *tok);
 static Node *expr(Token **rest, Token *tok);
-static int   eval(Node *node);
-static int   eval2(Node *node, char ***label);
+static long long eval(Node *node);
+static long long eval2(Node *node, char ***label);
 static double eval_double(Node *node);
 static Node *assign(Token **rest, Token *tok);
+static Obj *new_gvar(char *name, Type *ty);
 static Node *logor(Token **rest, Token *tok);
 static Node *conditional(Token **rest, Token *tok);
 static Node *logand(Token **rest, Token *tok);
@@ -316,6 +317,22 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
             continue;
         }
         if (equal(tok, "volatile")) { vol = true; tok = tok->next; continue; }
+        if (equal(tok, "_Atomic")) {
+            if (equal(tok->next, "(")) {
+                if (counter) error_tok(tok, "invalid type");
+                tok = tok->next->next;
+                ty = typename_(&tok, tok);
+                tok = skip(tok, ")");
+                ty = copy_type(ty);
+                ty->is_volatile = true;
+                counter += OTHER;
+                seen = true;
+                continue;
+            }
+            vol = true;
+            tok = tok->next;
+            continue;
+        }
         if (equal(tok, "__attribute__")) { tok = skip_attributes(tok); continue; }
 
         VarScope *vs = find_var(tok);
@@ -429,7 +446,7 @@ static Type *type_suffix(Token **rest, Token *tok, Type *ty) {
 static Type *pointers(Token **rest, Token *tok, Type *ty) {
     while (consume(&tok, tok, "*")) {
         ty = pointer_to(ty);
-        while (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "restrict") || equal(tok, "__restrict"))
+        while (equal(tok, "const") || equal(tok, "volatile") || equal(tok, "_Atomic") || equal(tok, "restrict") || equal(tok, "__restrict"))
             tok = tok->next;
     }
     *rest = tok;
@@ -709,8 +726,16 @@ static Token *skip_excess_element(Token *tok) {
 
 static void string_initializer(Token **rest, Token *tok, Initializer *init) {
     if (init->is_flexible) *init = *new_initializer(array_of(init->ty->base, tok->ty->array_len), false);
-    int len = init->ty->array_len < tok->ty->array_len ? init->ty->array_len : tok->ty->array_len;
-    for (int i = 0; i < len; i++) init->children[i]->expr = new_num((signed char)tok->str[i], tok);
+    int es = tok->ty->base && tok->ty->base->size ? tok->ty->base->size : 1;
+    int nchars = tok->str_len / es;
+    int len = init->ty->array_len < nchars ? init->ty->array_len : nchars;
+    for (int i = 0; i < len; i++) {
+        unsigned long long v = 0;
+        memcpy(&v, tok->str + i * es, (size_t)es);
+        Node *num = new_num((int)v, tok);
+        num->ival = v;
+        init->children[i]->expr = num;
+    }
     *rest = tok->next;
 }
 
@@ -765,11 +790,54 @@ static Type *completed(Type *ty) {
     return ty;
 }
 
-static Member *find_member_by_name(Type *ty, Token *tok) {
+static Member *lookup_member(Type *ty, Token *tok) {
     ty = completed(ty);
     for (Member *m = ty->members; m; m = m->next)
         if (m->name && m->name->len == tok->len && !strncmp(m->name->loc, tok->loc, tok->len)) return m;
-    error_tok(tok, "no such member");
+    return NULL;
+}
+
+/* Безымянный struct/union, в котором лежит имя. Инициализатор .имя
+ * относится к вложенному полю, как в C11. */
+static Member *anon_holding(Type *ty, Token *tok) {
+    ty = completed(ty);
+    for (Member *m = ty->members; m; m = m->next) {
+        if (m->name || (m->ty->kind != TY_STRUCT && m->ty->kind != TY_UNION)) continue;
+        if (lookup_member(m->ty, tok) || anon_holding(m->ty, tok)) return m;
+    }
+    return NULL;
+}
+
+static Initializer *apply_designator(Initializer *init, Token **tokp) {
+    Token *tok = *tokp;
+    while (equal(tok, ".") || equal(tok, "[")) {
+        if (equal(tok, "[")) {
+            int i = const_expr(&tok, tok->next);
+            tok = skip(tok, "]");
+            if (i < 0 || i >= init->ty->array_len) error_tok(tok, "array designator out of range");
+            init = init->children[i];
+            continue;
+        }
+        Member *mem = lookup_member(init->ty, tok->next);
+        while (!mem) {
+            Member *anon = anon_holding(init->ty, tok->next);
+            if (!anon) error_tok(tok->next, "no such member");
+            init = init->children[anon->idx];
+            mem = lookup_member(init->ty, tok->next);
+        }
+        tok = tok->next->next;
+        init = init->children[mem->idx];
+    }
+    *tokp = tok;
+    return init;
+}
+
+/* Первый компонент обозначенного инициализатора в этой структуре.
+ * Следующее позиционное значение относится к полю после него. */
+static Member *designated_here(Type *ty, Token *tok) {
+    Member *mem = lookup_member(ty, tok->next);
+    if (mem) return mem;
+    return anon_holding(ty, tok->next);
 }
 
 static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
@@ -780,24 +848,13 @@ static void struct_initializer1(Token **rest, Token *tok, Initializer *init) {
         if (!first) tok = skip(tok, ",");
         first = false;
         if (equal(tok, ".")) {                               /* .x = 1, .x[0] = 1, .a.b = 1 */
-            Initializer *child;
-            mem = find_member_by_name(init->ty, tok->next);
-            tok = tok->next->next;
-            child = init->children[mem->idx];
-            while (equal(tok, ".") || equal(tok, "[")) {
-                if (equal(tok, ".")) {
-                    Member *sub = find_member_by_name(child->ty, tok->next);
-                    tok = tok->next->next;
-                    child = child->children[sub->idx];
-                } else {
-                    int i = const_expr(&tok, tok->next);
-                    tok = skip(tok, "]");
-                    if (i < 0 || i >= child->ty->array_len) error_tok(tok, "array designator out of range");
-                    child = child->children[i];
-                }
-            }
+            Member *designated = designated_here(init->ty, tok);
+            Initializer *child = apply_designator(init, &tok);
             if (equal(tok, "=")) tok = tok->next;
             initializer2(&tok, tok, child);
+            mem = init->ty->members;
+            while (mem && mem != designated) mem = mem->next;
+            if (mem) mem = mem->next;
             continue;
         }
         if (mem) { initializer2(&tok, tok, init->children[mem->idx]); mem = mem->next; }
@@ -816,20 +873,49 @@ static void struct_initializer2(Token **rest, Token *tok, Initializer *init) {
 }
 
 static void union_initializer(Token **rest, Token *tok, Initializer *init) {
-    if (equal(tok, "{")) {
-        Member *mem = init->ty->members;
-        tok = tok->next;
-        if (equal(tok, ".")) { mem = find_member_by_name(init->ty, tok->next); tok = skip(tok->next->next, "="); }
-        initializer2(&tok, tok, init->children[mem->idx]);
-        consume(&tok, tok, ",");
-        *rest = skip(tok, "}");
-    } else {
-        initializer2(rest, tok, init->children[0]);
+    if (!equal(tok, "{")) {
+        /* union u = другое_объединение копирует все значение.
+         * Скаляр без скобок заполняет первый член. */
+        Node *e = assign(rest, tok);
+        add_type(e);
+        if (e->ty->kind == TY_UNION) { init->expr = e; return; }
+        init->children[init->ty->members->idx]->expr = e;
+        return;
     }
+    tok = tok->next;
+    bool first = true;
+    while (!equal(tok, "}")) {
+        if (!first) tok = skip(tok, ",");
+        first = false;
+        if (equal(tok, "}")) break;
+        if (equal(tok, ".")) {
+            Initializer *child = apply_designator(init, &tok);
+            if (equal(tok, "=")) tok = tok->next;
+            initializer2(&tok, tok, child);
+        } else {
+            initializer2(&tok, tok, init->children[init->ty->members->idx]);
+        }
+    }
+    *rest = skip(tok, "}");
 }
 
 static void initializer2(Token **rest, Token *tok, Initializer *init) {
-    if (init->ty->kind == TY_ARRAY && tok->kind == TK_STR) { string_initializer(rest, tok, init); return; }
+    /* char a[] = ("hi"); — скобки вокруг строкового литерала, как в макросах CPython. */
+    if (init->ty->kind == TY_ARRAY) {
+        Token *s = tok;
+        int parens = 0;
+        while (equal(s, "(")) { s = s->next; parens++; }
+        if (s->kind == TK_STR) {
+            Token *after = s->next;
+            int close = 0;
+            while (close < parens && equal(after, ")")) { after = after->next; close++; }
+            if (close == parens) {
+                string_initializer(rest, s, init);
+                *rest = after;
+                return;
+            }
+        }
+    }
     if (init->ty->kind == TY_ARRAY && equal(tok, "[")) {
         int i = const_expr(&tok, tok->next);
         tok = skip(skip(tok, "]"), "=");
@@ -919,6 +1005,10 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
         return node;
     }
     if (ty->kind == TY_UNION) {
+        if (init->expr) {
+            Node *lhs = init_desg_expr(desg, tok);
+            return new_binary(ND_ASSIGN, lhs, init->expr, tok);
+        }
         InitDesg desg2 = { desg, 0, ty->members };
         return create_lvar_init(init->children[0], ty->members->ty, &desg2, tok);
     }
@@ -993,7 +1083,7 @@ static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf
     }
     if (init->expr->kind == ND_NUM) { write_buf(buf + offset, init->expr->ival, ty->size); return cur; }
     char **label = NULL;
-    int val = eval2(init->expr, &label);
+    int val = (int)eval2(init->expr, &label);
     if (!label) {
         unsigned long long wide = (unsigned long long)(long long)val;
         write_buf(buf + offset, wide, ty->size);
@@ -1021,7 +1111,7 @@ static void gvar_initializer(Token **rest, Token *tok, Obj *var) {
 static bool is_typename(Token *tok) {
     static const char *kw[] = {
         "void", "_Bool", "char", "short", "int", "long", "struct", "union", "typedef", "enum",
-        "static", "extern", "signed", "unsigned", "const", "volatile", "auto", "register",
+        "static", "extern", "signed", "unsigned", "const", "volatile", "_Atomic", "auto", "register",
         "restrict", "__restrict", "float", "double", "inline", "__inline", "_Noreturn", "__attribute__",
     };
     for (int i = 0; i < (int)(sizeof(kw) / sizeof(*kw)); i++)
@@ -1221,11 +1311,11 @@ static Node *expr(Token **rest, Token *tok) {
 }
 
 /* вычислить константное выражение (размер массива, case, #if) */
-static int eval(Node *node) { return eval2(node, NULL); }
+static long long eval(Node *node) { return eval2(node, NULL); }
 
-static int eval_rval(Node *node, char ***label);
+static long long eval_rval(Node *node, char ***label);
 
-static int eval2(Node *node, char ***label) {
+static long long eval2(Node *node, char ***label) {
     add_type(node);
     if (is_flonum(node->ty)) return (int)eval_double(node);
     switch (node->kind) {
@@ -1233,16 +1323,17 @@ static int eval2(Node *node, char ***label) {
     case ND_SUB: return eval2(node->lhs, label) - eval(node->rhs);
     case ND_MUL: return eval(node->lhs) * eval(node->rhs);
     case ND_DIV: {
-        int r = eval(node->rhs);
+        long long r = eval(node->rhs);
         if (!r) error_tok(node->tok, "division by zero");
-        if (node->ty->is_unsigned) return (unsigned)eval(node->lhs) / (unsigned)r;
+        if (node->ty && node->ty->is_unsigned) return (long long)((unsigned long long)eval(node->lhs) / (unsigned long long)r);
         return eval(node->lhs) / r;
     }
-    case ND_NEG: return -eval(node->lhs);
+    case ND_NEG:
+        return -eval(node->lhs);
     case ND_MOD: {
-        int r = eval(node->rhs);
+        long long r = eval(node->rhs);
         if (!r) error_tok(node->tok, "division by zero");
-        if (node->ty->is_unsigned) return (unsigned)eval(node->lhs) % (unsigned)r;
+        if (node->ty && node->ty->is_unsigned) return (long long)((unsigned long long)eval(node->lhs) % (unsigned long long)r);
         return eval(node->lhs) % r;
     }
     case ND_BITAND: return eval(node->lhs) & eval(node->rhs);
@@ -1258,7 +1349,8 @@ static int eval2(Node *node, char ***label) {
         if (node->lhs->ty->is_unsigned) return (unsigned)eval(node->lhs) < (unsigned)eval(node->rhs);
         return eval(node->lhs) < eval(node->rhs);
     case ND_LE:
-        if (node->lhs->ty->is_unsigned) return (unsigned)eval(node->lhs) <= (unsigned)eval(node->rhs);
+        if (node->lhs->ty->is_unsigned)
+            return (unsigned long long)eval(node->lhs) <= (unsigned long long)eval(node->rhs);
         return eval(node->lhs) <= eval(node->rhs);
     case ND_COND: return eval(node->cond) ? eval2(node->then, label) : eval2(node->els, label);
     case ND_COMMA: return eval2(node->rhs, label);
@@ -1273,13 +1365,23 @@ static int eval2(Node *node, char ***label) {
             if (node->ty->is_unsigned) return (int)(unsigned)d;
             return (int)d;
         }
-        int val = eval2(node->lhs, label);
+        long long val = eval2(node->lhs, label);
         if (is_integer(node->ty)) {
+            /* Ветки тернарного оператора приводятся к общему типу: (unsigned)?(int)
+             * даёт unsigned, и (int)-1 становится 4294967295. Поэтому if, не ?:. */
+            if (node->ty->kind == TY_BOOL) return val != 0;
+            if (node->ty->is_unsigned) {
+                switch (node->ty->size) {
+                case 1: return (unsigned char)val;
+                case 2: return (unsigned short)val;
+                case 4: return (unsigned)val;
+                }
+                return (long long)(unsigned long long)val;
+            }
             switch (node->ty->size) {
-            case 1:
-                if (node->ty->kind == TY_BOOL) return val != 0;
-                return node->ty->is_unsigned ? (unsigned char)val : (signed char)val;
-            case 2: return node->ty->is_unsigned ? (unsigned short)val : (short)val;
+            case 1: return (signed char)val;
+            case 2: return (short)val;
+            case 4: return (int)val;
             }
         }
         return val;
@@ -1295,13 +1397,15 @@ static int eval2(Node *node, char ***label) {
             error_tok(node->tok, "invalid initializer");
         *label = &node->var->name;
         return 0;
-    case ND_NUM: return node->val;
+    case ND_NUM:
+        if (node->ty && node->ty->size == 8) return (long long)node->ival;
+        return node->val;
     default: break;
     }
     error_tok(node->tok, "not a compile-time constant");
 }
 
-static int eval_rval(Node *node, char ***label) {
+static long long eval_rval(Node *node, char ***label) {
     switch (node->kind) {
     case ND_VAR:
         if (node->var->is_local) error_tok(node->tok, "not a compile-time constant");
@@ -1335,7 +1439,7 @@ static bool is_const_expr(Node *node) {
 
 int const_expr(Token **rest, Token *tok) {
     Node *node = conditional(rest, tok);
-    return eval(node);
+    return (int)eval(node);
 }
 
 static double eval_double(Node *node) {
@@ -1687,6 +1791,135 @@ static Node *funcall(Token **rest, Token *tok, Node *fn) {
     return node;
 }
 
+/* __atomic_* и __myos_xchg — не обычные функции: cc подставляет вызов libatomic
+ * или команду xchg. Порядок памяти игнорируется, блокировка и так seq_cst. */
+static Obj *extern_fn(char *name, Type *ret) {
+    for (Obj *fn = globals; fn; fn = fn->next)
+        if (fn->is_function && fn->name && !fn->is_static && !strcmp(fn->name, name)) return fn;
+    Type *ty = func_type(ret);
+    ty->is_prototyped = false;
+    Obj *fn = new_gvar(name, ty);
+    fn->is_function = true;
+    fn->is_definition = false;
+    fn->is_static = false;
+    return fn;
+}
+
+static Node *link_args(Node *a, Node *b, Node *c, Node *d) {
+    if (a) a->next = b;
+    if (b) b->next = c;
+    if (c) c->next = d;
+    if (d) d->next = NULL;
+    return a;
+}
+
+static Node *call_extern(Token *tok, char *name, Type *ret, Node *args) {
+    Obj *fn = extern_fn(name, ret);
+    add_ref(fn->name);
+    for (Node *a = args; a; a = a->next) add_type(a);
+    Node *node = new_unary(ND_FUNCALL, new_var_node(fn, tok), tok);
+    node->func_ty = fn->ty;
+    node->args = args;
+    node->ty = ret;
+    return node;
+}
+
+static Type *pointed(Node *p, Token *tok) {
+    add_type(p);
+    if (!p->ty || p->ty->kind != TY_PTR || !p->ty->base) error_tok(tok, "atomic operation needs a pointer");
+    return p->ty->base;
+}
+
+static int atomic_kind(Token *tok) {
+    if (equal(tok, "__myos_xchg")) return 100;
+    if (equal(tok, "__atomic_load_n")) return 1;
+    if (equal(tok, "__atomic_store_n")) return 2;
+    if (equal(tok, "__atomic_exchange_n")) return 3;
+    if (equal(tok, "__atomic_compare_exchange_n")) return 4;
+    if (equal(tok, "__atomic_fetch_add")) return 5;
+    if (equal(tok, "__atomic_fetch_sub")) return 6;
+    if (equal(tok, "__atomic_fetch_and")) return 7;
+    if (equal(tok, "__atomic_fetch_or")) return 8;
+    if (equal(tok, "__atomic_fetch_xor")) return 9;
+    if (equal(tok, "__atomic_load")) return 10;
+    if (equal(tok, "__atomic_store")) return 11;
+    if (equal(tok, "__atomic_thread_fence")) return 12;
+    return 0;
+}
+
+static void skip_atomic_order(Token **tok) {
+    if (equal(*tok, ")")) return;
+    *tok = skip(*tok, ",");
+    assign(tok, *tok);
+}
+
+static Node *atomic_builtin(Token **rest, Token *tok) {
+    Token *start = tok;
+    int kind = atomic_kind(tok);
+    tok = skip(tok->next, "(");
+    if (kind == 100) {
+        Node *ptr = assign(&tok, tok);
+        tok = skip(tok, ",");
+        Node *val = assign(&tok, tok);
+        Node *node = new_node(ND_XCHG, start);
+        node->lhs = ptr;
+        node->rhs = val;
+        *rest = skip(tok, ")");
+        return node;
+    }
+    if (kind == 12) {
+        if (!equal(tok, ")")) assign(&tok, tok);
+        *rest = skip(tok, ")");
+        return call_extern(start, "__myos_atomic_fence", ty_void, NULL);
+    }
+    Node *ptr = assign(&tok, tok);
+    Type *base = pointed(ptr, start);
+    int sz = base->size;
+    if (sz != 1 && sz != 2 && sz != 4 && sz != 8) error_tok(start, "unsupported atomic size");
+    if (kind == 1) {
+        skip_atomic_order(&tok);
+        *rest = skip(tok, ")");
+        if (base->kind == TY_FLOAT) return call_extern(start, "__myos_atomic_load_f32", ty_float, ptr);
+        if (base->kind == TY_DOUBLE) return call_extern(start, "__myos_atomic_load_f64", ty_double, ptr);
+        return new_cast(call_extern(start, "__myos_atomic_load", ty_ullong, link_args(ptr, new_num(sz, start), NULL, NULL)), base);
+    }
+    if (kind == 10 || kind == 11) {
+        tok = skip(tok, ",");
+        Node *other = assign(&tok, tok);
+        Type *ot = pointed(other, start);
+        skip_atomic_order(&tok);
+        *rest = skip(tok, ")");
+        if (kind == 10) return call_extern(start, "__myos_atomic_copy", ty_void, link_args(other, ptr, new_num(ot->size, start), NULL));
+        return call_extern(start, "__myos_atomic_copy", ty_void, link_args(ptr, other, new_num(ot->size, start), NULL));
+    }
+    tok = skip(tok, ",");
+    Node *val = assign(&tok, tok);
+    if (kind == 4) {
+        tok = skip(tok, ",");
+        Node *desired = assign(&tok, tok);
+        while (!equal(tok, ")")) skip_atomic_order(&tok);
+        *rest = skip(tok, ")");
+        if (!current_fn) error_tok(start, "atomic operation outside a function");
+        Obj *tmp = new_lvar(new_unique_name(), base);
+        Node *store = new_binary(ND_ASSIGN, new_var_node(tmp, start), new_cast(desired, base), start);
+        add_type(store);
+        Node *addr = new_unary(ND_ADDR, new_var_node(tmp, start), start);
+        Node *call = call_extern(start, "__myos_atomic_cas", ty_int, link_args(ptr, val, addr, new_num(sz, start)));
+        return new_binary(ND_COMMA, store, call, start);
+    }
+    skip_atomic_order(&tok);
+    *rest = skip(tok, ")");
+    if (kind == 2) {
+        if (base->kind == TY_FLOAT) return call_extern(start, "__myos_atomic_store_f32", ty_void, link_args(ptr, val, NULL, NULL));
+        if (base->kind == TY_DOUBLE) return call_extern(start, "__myos_atomic_store_f64", ty_void, link_args(ptr, val, NULL, NULL));
+        return call_extern(start, "__myos_atomic_store", ty_void, link_args(ptr, new_cast(val, ty_ullong), new_num(sz, start), NULL));
+    }
+    if (is_flonum(base)) error_tok(start, "atomic rmw of a float");
+    int op = kind == 3 ? 6 : kind == 5 ? 1 : kind == 6 ? 2 : kind == 7 ? 3 : kind == 8 ? 4 : 5;
+    return new_cast(call_extern(start, "__myos_atomic_rmw", ty_ullong,
+        link_args(ptr, new_cast(val, ty_ullong), new_num(sz, start), new_num(op, start))), base);
+}
+
 static Node *primary(Token **rest, Token *tok) {
     Token *start = tok;
     if (equal(tok, "(") && equal(tok->next, "{")) {           /* ({ ... }) — расширение GNU */
@@ -1741,6 +1974,8 @@ static Node *primary(Token **rest, Token *tok) {
         *rest = tok->next;
         return new_var_node(var, tok);
     }
+    if (tok->kind == TK_IDENT && equal(tok->next, "(") && atomic_kind(tok))
+        return atomic_builtin(rest, tok);
     if (tok->kind == TK_IDENT) {
         VarScope *sc = find_var(tok);
         *rest = tok->next;

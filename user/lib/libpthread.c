@@ -2,6 +2,7 @@
  * Join возвращает этот стек. Detach оставляет его ядру: поток снимет отображение при выходе.
  * Коды возврата — положительный errno, как в POSIX. */
 #include "pthread.h"
+#include "time.h"
 
 #define REC_MAX 128
 #define DEFAULT_STACK 65536u
@@ -72,9 +73,19 @@ int pthread_attr_setdetachstate(pthread_attr_t *attr, int state) {
     return 0;
 }
 int pthread_attr_setstacksize(pthread_attr_t *attr, unsigned size) {
-    if (!attr || size < PTHREAD_STACK_MIN || size > 1024u * 1024u) return EINVAL;
+    if (!attr || size < PTHREAD_STACK_MIN || size > 4u * 1024u * 1024u) return EINVAL;
     attr->stacksize = size;
     return 0;
+}
+int pthread_attr_setscope(pthread_attr_t *attr, int scope) {
+    (void)scope;
+    return attr ? 0 : EINVAL;
+}
+int pthread_condattr_init(pthread_condattr_t *attr) { return attr ? 0 : EINVAL; }
+int pthread_condattr_destroy(pthread_condattr_t *attr) { return attr ? 0 : EINVAL; }
+int pthread_condattr_setclock(pthread_condattr_t *attr, int clock) {
+    (void)clock;
+    return attr ? 0 : EINVAL;
 }
 
 int pthread_create(pthread_t *thread, const pthread_attr_t *attr, pthread_start_t start, void *arg) {
@@ -85,7 +96,7 @@ int pthread_create(pthread_t *thread, const pthread_attr_t *attr, pthread_start_
     if (!thread || !start) return EINVAL;
     size = attr && attr->stacksize ? attr->stacksize : DEFAULT_STACK;
     detach = attr ? attr->detachstate : PTHREAD_CREATE_JOINABLE;
-    if (size < PTHREAD_STACK_MIN || size > 1024u * 1024u) return EINVAL;
+    if (size < PTHREAD_STACK_MIN || size > 4u * 1024u * 1024u) return EINVAL;
     stack = mmap(0, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (stack == (void *)-1) return errno ? errno : ENOMEM;
     b = malloc(sizeof *b);
@@ -243,7 +254,22 @@ int pthread_cond_init(pthread_cond_t *c, const void *attr) {
 int pthread_cond_destroy(pthread_cond_t *c) { return c ? 0 : EINVAL; }
 int pthread_cond_wait(pthread_cond_t *c, pthread_mutex_t *m) {
     if (!c || !m) return EINVAL;
-    return perr(thread_ctl(TC_COND_WAIT, (int)c, (int)m, 0));
+    return perr(thread_ctl(TC_COND_WAIT, (int)c, (int)m, -1));
+}
+int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m, const struct timespec *abs) {
+    struct timespec now;
+    long long nowms, absms, ms;
+    unsigned timeout;
+    if (!c || !m || !abs) return EINVAL;
+    if (clock_gettime(CLOCK_REALTIME, &now) < 0) return errno ? errno : EINVAL;
+    nowms = (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000L;
+    absms = (long long)abs->tv_sec * 1000 + abs->tv_nsec / 1000000L;
+    if (absms <= nowms) timeout = 0;
+    else {
+        ms = absms - nowms;
+        timeout = ms > 0x7fffffffLL ? 0x7fffffffu : (unsigned)ms;
+    }
+    return perr(thread_ctl(TC_COND_WAIT, (int)c, (int)m, (int)timeout));
 }
 int pthread_cond_signal(pthread_cond_t *c) {
     if (!c) return EINVAL;

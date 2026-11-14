@@ -154,7 +154,7 @@ int sock_read(struct sock *s, void *buf, u32 len) {
             else task_wait_timeout(s, deadline - timer_ticks());
         }
         irq_restore(f);
-        if (task_current()->kill_pending) return -EINTR;
+        if (task_intr(task_current())) return -EINTR;
     }
 }
 
@@ -184,7 +184,7 @@ int sock_write(struct sock *s, const void *buf, u32 len) {
         if (s->tx_len == SOCK_TXBUF && (s->state == TCP_ESTABLISHED || s->state == TCP_CLOSE_WAIT))
             task_wait(s);
         irq_restore(f);
-        if (task_current()->kill_pending) return total ? (int)total : -EINTR;
+        if (task_intr(task_current())) return total ? (int)total : -EINTR;
     }
     return total;
 }
@@ -212,7 +212,7 @@ int sock_connect(struct sock *s, u32 ip, u16 port) {
             else if ((i32)(timer_ticks() - deadline) < 0) task_wait_timeout(s, deadline - timer_ticks());
         }
         irq_restore(f);
-        if (task_current()->kill_pending) return -EINTR;
+        if (task_intr(task_current())) return -EINTR;
         if (s->state != TCP_SYN_SENT) break;
         if (deadline && (i32)(timer_ticks() - deadline) >= 0) {   /* сдаёмся: сокет снова «закрыт» */
             mutex_lock(&net_lock);
@@ -261,7 +261,7 @@ struct sock *sock_accept(struct sock *s, int *err) {
         u32 f = irq_save();
         if (!s->aq_n && s->state == TCP_LISTEN) task_wait(s);
         irq_restore(f);
-        if (task_current()->kill_pending) { *err = -EINTR; return NULL; }
+        if (task_intr(task_current())) { *err = -EINTR; return NULL; }
     }
 }
 
@@ -301,6 +301,6 @@ int sock_recvfrom(struct sock *s, void *buf, u32 len, u32 *ip, u16 *port, u32 ti
             else task_wait(s);
         }
         irq_restore(f);
-        if (task_current()->kill_pending) return -EINTR;
+        if (task_intr(task_current())) return -EINTR;
     }
 }

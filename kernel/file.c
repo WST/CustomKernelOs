@@ -185,7 +185,7 @@ static int console_read_raw(u8 *buf, u32 len) {
         if (c < 0) {
             if (n || (tty_mode & TTY_NONBLOCK)) break;   /* что было — отдаём сразу */
             c = kb_getchar();                            /* ждём хотя бы одну клавишу */
-            if (task_current()->kill_pending) return -EINTR;
+            if (task_intr(task_current())) return -EINTR;
         }
         translate(c);
     }
@@ -199,7 +199,7 @@ static int console_read(char *buf, u32 len) {
     u32 n = 0;
     while (n < len) {
         int c = kb_getchar();
-        if (task_current()->kill_pending) return -EINTR;
+        if (task_intr(task_current())) return -EINTR;
         if (c == KEY_CTRL_D) { if (n == 0) return 0; break; }
         if (c == KEY_CTRL_C) {
             vga_puts("^C\n");
@@ -242,7 +242,7 @@ static int pipe_read(struct pipe *p, u8 *buf, u32 len) {
     while (p->count == 0) {
         if (p->writers == 0) { irq_restore(f); return 0; }        /* конец файла */
         task_wait(p);
-        if (task_current()->kill_pending) { irq_restore(f); return -EINTR; }
+        if (task_intr(task_current())) { irq_restore(f); return -EINTR; }
     }
     u32 n = len < p->count ? len : p->count;
     for (u32 i = 0; i < n; i++) {
@@ -262,7 +262,7 @@ static int pipe_write(struct pipe *p, const u8 *buf, u32 len) {
         if (p->readers == 0) { irq_restore(f); return done ? (int)done : -EPIPE; }
         if (p->count == PIPE_SIZE) {
             task_wait(p);
-            if (task_current()->kill_pending) { irq_restore(f); return -EINTR; }
+            if (task_intr(task_current())) { irq_restore(f); return -EINTR; }
             continue;
         }
         while (done < len && p->count < PIPE_SIZE) {

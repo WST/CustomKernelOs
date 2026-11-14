@@ -816,6 +816,16 @@ static void gen_expr(Node *node) {
     }
     case ND_FUNCALL: gen_funcall(node); return;
     case ND_SYSCALL: gen_syscall(node); return;
+    case ND_XCHG: {
+        /* xchg с памятью на x86 неявно атомарен. Старое значение остаётся в eax. */
+        gen_expr(node->rhs);
+        push_eax();
+        gen_expr(node->lhs);
+        E("89 C1");                                             /* mov ecx, eax */
+        E("58"); depth -= 4;                                    /* pop eax */
+        E("87 01");                                             /* xchg eax, [ecx] */
+        return;
+    }
     default: break;
     }
 

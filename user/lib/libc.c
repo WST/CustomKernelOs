@@ -5,6 +5,7 @@
 #include "unistd.h"
 #include "time.h"
 #include "sys/time.h"
+#include "sys/times.h"
 #include "sys/stat.h"
 #include "dirent.h"
 #include "libgen.h"
@@ -32,6 +33,7 @@
 #include "fnmatch.h"
 #include "glob.h"
 #include "spawn.h"
+#include "langinfo.h"
 #include "sys/utsname.h"
 
 /* Filesystem administration wrappers are defined below syscall3. */
@@ -221,9 +223,24 @@ void _exit(int code) {
 #undef errno
 int errno;
 static struct thread_tcb main_tcb;
+#if defined(__LINUX_TEST__)
+static struct thread_tcb *linux_tcb;
+#endif
 
 int thread_ctl(int op, int a, int b, int c) {
+#if defined(__LINUX_TEST__)
+    /* На хосте нет MyOS-потоков: один TCB и успешные мьютексы, чтобы
+     * pthread_key_create доходил до конца в _freeze_module. */
+    if (op == TC_SET_TCB) { linux_tcb = (struct thread_tcb *)a; return 0; }
+    if (op == TC_GET_TCB) {
+        if (!linux_tcb) linux_tcb = &main_tcb;
+        return (int)linux_tcb;
+    }
+    (void)b; (void)c;
+    return 0;
+#else
     return syscall5(SYS_THREAD_CTL, op, a, b, c, 0);
+#endif
 }
 int thread_set_tcb(struct thread_tcb *tcb) {
     return thread_ctl(TC_SET_TCB, (int)tcb, 0, 0);
@@ -368,9 +385,27 @@ int thread_create(void (*fn)(void *), void *arg, void *stack, unsigned size) {
 int thread_join(int tid,int *code) { return syscall3(SYS_THREAD_JOIN,tid,(int)code,0); }
 void thread_exit(int code) { syscall3(SYS_THREAD_EXIT,code,0,0); for (;;) {} }
 int gettid(void) { return syscall3(SYS_GETTID,0,0,0); }
-int thread_mutex_lock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,0,0); }
-int thread_mutex_unlock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,1,0); }
-int thread_mutex_trylock(thread_mutex_t *m) { return syscall3(SYS_THREAD_MUTEX,(int)m,2,0); }
+int thread_mutex_lock(thread_mutex_t *m) {
+#if defined(__LINUX_TEST__)
+    (void)m; return 0;
+#else
+    return syscall3(SYS_THREAD_MUTEX,(int)m,0,0);
+#endif
+}
+int thread_mutex_unlock(thread_mutex_t *m) {
+#if defined(__LINUX_TEST__)
+    (void)m; return 0;
+#else
+    return syscall3(SYS_THREAD_MUTEX,(int)m,1,0);
+#endif
+}
+int thread_mutex_trylock(thread_mutex_t *m) {
+#if defined(__LINUX_TEST__)
+    (void)m; return 0;
+#else
+    return syscall3(SYS_THREAD_MUTEX,(int)m,2,0);
+#endif
+}
 int   fork(void)                                 { return ioerr(syscall3(SYS_FORK, 0, 0, 0)); }
 int   execve(const char *path, char *const argv[], char *const envp[]) {
     return syscall3(SYS_EXEC, (int)path, (int)argv, (int)(envp ? envp : environ));
@@ -439,23 +474,118 @@ int execlp(const char *file, const char *arg0, ...) {
     va_end(ap);
     return execvp(file, argv);
 }
-int posix_spawnp(pid_t *pid, const char *file,
-                 const posix_spawn_file_actions_t *file_actions,
-                 const posix_spawnattr_t *attrp,
-                 char *const argv[], char *const envp[]) {
+struct spawn_act {
+    struct spawn_act *next;
+    int kind, fd, newfd, oflag, mode;
+    char path[256];
+};
+
+static int spawn_add(posix_spawn_file_actions_t *fa, int kind, int fd, int newfd,
+                     int oflag, int mode, const char *path) {
+    struct spawn_act *a;
+    if (!fa || fd < 0) return EINVAL;
+    a = malloc(sizeof *a);
+    if (!a) return ENOMEM;
+    memset(a, 0, sizeof *a);
+    a->kind = kind;
+    a->fd = fd;
+    a->newfd = newfd;
+    a->oflag = oflag;
+    a->mode = mode;
+    if (path) {
+        size_t n = strlen(path);
+        if (n >= sizeof a->path) { free(a); return ENAMETOOLONG; }
+        memcpy(a->path, path, n + 1);
+    }
+    if (fa->tail) ((struct spawn_act *)fa->tail)->next = a;
+    else fa->head = a;
+    fa->tail = a;
+    return 0;
+}
+
+static void spawn_apply(const posix_spawn_file_actions_t *fa) {
+    struct spawn_act *a;
+    if (!fa) return;
+    for (a = fa->head; a; a = a->next) {
+        int nfd;
+        if (a->kind == 1) { if (close(a->fd) < 0) _exit(127); }
+        else if (a->kind == 2) { if (dup2(a->fd, a->newfd) < 0) _exit(127); }
+        else {
+            nfd = open(a->path, a->oflag, a->mode);
+            if (nfd < 0) _exit(127);
+            if (nfd != a->fd) {
+                if (dup2(nfd, a->fd) < 0) _exit(127);
+                close(nfd);
+            }
+        }
+    }
+}
+
+int posix_spawn_file_actions_init(posix_spawn_file_actions_t *fa) {
+    if (!fa) return EINVAL;
+    fa->head = fa->tail = 0;
+    return 0;
+}
+int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *fa) {
+    struct spawn_act *a, *n;
+    if (!fa) return EINVAL;
+    for (a = fa->head; a; a = n) { n = a->next; free(a); }
+    fa->head = fa->tail = 0;
+    return 0;
+}
+int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *fa, int fd) {
+    return spawn_add(fa, 1, fd, 0, 0, 0, 0);
+}
+int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *fa, int fd, int newfd) {
+    if (newfd < 0) return EINVAL;
+    return spawn_add(fa, 2, fd, newfd, 0, 0, 0);
+}
+int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *fa, int fd,
+                                     const char *path, int oflag, int mode) {
+    if (!path) return EINVAL;
+    return spawn_add(fa, 3, fd, 0, oflag, mode, path);
+}
+int posix_spawnattr_init(posix_spawnattr_t *attr) {
+    if (!attr) return EINVAL;
+    attr->flags = 0;
+    return 0;
+}
+int posix_spawnattr_destroy(posix_spawnattr_t *attr) { return attr ? 0 : EINVAL; }
+int posix_spawnattr_setflags(posix_spawnattr_t *attr, short flags) {
+    if (!attr) return EINVAL;
+    attr->flags = flags;
+    return 0;
+}
+int posix_spawnattr_setpgroup(posix_spawnattr_t *attr, pid_t pgroup) {
+    (void)pgroup;
+    return attr ? 0 : EINVAL;
+}
+
+static int spawn_common(pid_t *pid, const char *file, const posix_spawn_file_actions_t *fa,
+                        char *const argv[], char *const envp[], int search) {
     int child;
-    (void)file_actions;
-    (void)attrp;
     if (!pid || !file || !argv) { errno = EINVAL; return EINVAL; }
     child = fork();
     if (child < 0) return errno;
     if (child == 0) {
         if (envp) environ = (char **)envp;
-        execvp(file, argv);
+        spawn_apply(fa);
+        if (search) execvp(file, argv);
+        else execve(file, argv, environ);
         _exit(127);
     }
     *pid = child;
     return 0;
+}
+int posix_spawn(pid_t *pid, const char *path, const posix_spawn_file_actions_t *file_actions,
+                const posix_spawnattr_t *attrp, char *const argv[], char *const envp[]) {
+    (void)attrp;
+    return spawn_common(pid, path, file_actions, argv, envp, 0);
+}
+int posix_spawnp(pid_t *pid, const char *file, const posix_spawn_file_actions_t *file_actions,
+                 const posix_spawnattr_t *attrp, char *const argv[], char *const envp[]) {
+    (void)attrp;
+    return spawn_common(pid, file, file_actions, argv, envp, 1);
 }
 int   waitpid(int pid, int *status, int options) { return syscall3(SYS_WAITPID, pid, (int)status, options); }
 int   getppid(void)                              { return syscall3(SYS_GETPPID, 0, 0, 0); }
@@ -946,6 +1076,19 @@ static void big_mul(Big *b, unsigned m) {
         c = hi;
     }
     if (c && b->n < BIG_N) b->v[b->n++] = c;
+}
+
+/* Частное от деления на d. Остаток меньше d и отбрасывается. */
+static void big_div_small(Big *b, unsigned d) {
+    unsigned rem = 0;
+    int i;
+    if (!d) return;
+    for (i = b->n - 1; i >= 0; i--) {
+        unsigned long long cur = ((unsigned long long)rem << 32) | b->v[i];
+        b->v[i] = (unsigned)(cur / d);
+        rem = (unsigned)(cur % d);
+    }
+    while (b->n > 1 && !b->v[b->n - 1]) b->n--;
 }
 
 static void big_shl(Big *b, int sh) {
@@ -1788,6 +1931,12 @@ const char *gai_strerror(int err) { (void)err; return "address lookup failed"; }
 
 int h_errno;
 
+in_addr_t inet_addr(const char *s) {
+    struct in_addr a;
+    if (!s || inet_pton(AF_INET, s, &a) != 1) return INADDR_NONE;
+    return a.s_addr;
+}
+
 char *inet_ntoa(struct in_addr in) {
     static char buf[16];
     ip_str(ntohl(in.s_addr), buf);
@@ -2593,6 +2742,12 @@ int mkfifo(const char *path, mode_t mode) {
 }
 int fchmod(int fd,mode_t mode){return ioerr(fs_call(5,fd,mode));}
 int chown(const char *path,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(6,(int)path,(int)ids));}
+int lchown(const char *path,uid_t uid,gid_t gid){
+    struct stat st;
+    if (lstat(path,&st)<0) return -1;
+    if (S_ISLNK(st.st_mode)){errno=EOPNOTSUPP;return -1;}
+    return chown(path,uid,gid);
+}
 int fchown(int fd,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(7,fd,(int)ids));}
 static void stat_times(struct stat *st) {
     if (!st) return;
@@ -2703,7 +2858,7 @@ int fcntl(int fd, int cmd, ...) {
         va_end(ap);
         if (min < 0) { errno = EINVAL; return -1; }
         if (fstat(fd, &st) < 0) return -1;
-        for (i = min; i < 16; i++) {
+        for (i = min; i < 256; i++) {
             if (fstat(i, &st) == 0) continue;
             if (errno != EBADF) return -1;
             return ioerr(syscall3(SYS_DUP2, fd, i, 0));
@@ -2918,6 +3073,11 @@ char *dirname(char *path) {
 
 void abort(void) { exit(134); }
 
+void __assert_fail(const char *file, int line, const char *expr) {
+    fprintf(stderr, "assert %s:%d: %s\n", file ? file : "?", line, expr ? expr : "?");
+    abort();
+}
+
 int getopt(int argc, char *const argv[], const char *optstring) {
     static int sp = 1;
     if (optind >= argc || !argv[optind] || argv[optind][0] != '-' || argv[optind][1] == 0) return -1;
@@ -3032,17 +3192,163 @@ int wcscmp(const wchar_t *a, const wchar_t *b) {
     while (*a && *a == *b) { a++; b++; }
     return *a < *b ? -1 : *a > *b;
 }
+size_t wcslen(const wchar_t *s) {
+    size_t n = 0;
+    if (!s) return 0;
+    while (s[n]) n++;
+    return n;
+}
+wchar_t *wcschr(const wchar_t *s, wchar_t c) {
+    if (!s) return 0;
+    for (; *s; s++) if (*s == c) return (wchar_t *)s;
+    return c ? 0 : (wchar_t *)s;
+}
+wchar_t *wcsrchr(const wchar_t *s, wchar_t c) {
+    const wchar_t *hit = 0;
+    if (!s) return 0;
+    for (; *s; s++) if (*s == c) hit = s;
+    if (!c) return (wchar_t *)s;
+    return (wchar_t *)hit;
+}
+wchar_t *wcscpy(wchar_t *dst, const wchar_t *src) {
+    wchar_t *d = dst;
+    if (!dst || !src) return dst;
+    while ((*d++ = *src++)) ;
+    return dst;
+}
+wchar_t *wcsncpy(wchar_t *dst, const wchar_t *src, size_t n) {
+    size_t i = 0;
+    if (!dst || !src) return dst;
+    for (; i < n && src[i]; i++) dst[i] = src[i];
+    for (; i < n; i++) dst[i] = 0;
+    return dst;
+}
+wchar_t *wmemchr(const wchar_t *s, wchar_t c, size_t n) {
+    size_t i;
+    if (!s) return 0;
+    for (i = 0; i < n; i++) if (s[i] == c) return (wchar_t *)(s + i);
+    return 0;
+}
+wchar_t *wcstok(wchar_t *s, const wchar_t *delim, wchar_t **save) {
+    wchar_t *p;
+    if (!save || !delim) return 0;
+    p = s ? s : *save;
+    if (!p) return 0;
+    while (*p && wcschr(delim, *p)) p++;
+    if (!*p) { *save = p; return 0; }
+    s = p;
+    while (*p && !wcschr(delim, *p)) p++;
+    if (*p) { *p = 0; p++; }
+    *save = p;
+    return s;
+}
+long wcstol(const wchar_t *s, wchar_t **end, int base) {
+    char buf[128];
+    char *e = 0;
+    long v;
+    size_t i = 0;
+    if (!s) { errno = EINVAL; return 0; }
+    while (*s == L' ' || *s == L'\t') s++;
+    while (s[i] && i + 1 < sizeof buf) {
+        if (s[i] > 127) break;
+        buf[i] = (char)s[i];
+        i++;
+    }
+    buf[i] = 0;
+    v = strtol(buf, &e, base);
+    if (end) *end = (wchar_t *)(s + (e ? (size_t)(e - buf) : 0));
+    return v;
+}
+wchar_t *wcsdup(const wchar_t *s) {
+    size_t n;
+    wchar_t *d;
+    if (!s) return 0;
+    n = wcslen(s);
+    d = malloc((n + 1) * sizeof(wchar_t));
+    if (!d) return 0;
+    wcscpy(d, s);
+    return d;
+}
 int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     if (!a || !b) return (a != NULL) - (b != NULL);
     while (n && *a && *a == *b) { a++; b++; n--; }
     if (!n) return 0;
     return *a < *b ? -1 : *a > *b;
 }
+static int utf8_decode(const char *s, size_t n, wchar_t *wc) {
+    unsigned char c;
+    int need, i;
+    unsigned cp;
+    if (!n) return -1;
+    c = (unsigned char)s[0];
+    if (c < 0x80) { if (wc) *wc = c; return c ? 1 : 0; }
+    need = c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+    if ((c & 0xC0) != 0xC0 || (size_t)need > n) return -1;
+    cp = c & (0x7Fu >> need);
+    for (i = 1; i < need; i++) {
+        unsigned char d = (unsigned char)s[i];
+        if ((d & 0xC0) != 0x80) return -1;
+        cp = (cp << 6) | (d & 0x3Fu);
+    }
+    if (wc) *wc = (wchar_t)cp;
+    return need;
+}
+
 int mbtowc(wchar_t *wc, const char *s, size_t n) {
     if (!s) return 0;
     if (!n || !*s) return 0;
-    if (wc) *wc = (unsigned char)*s;
-    return 1;
+    return utf8_decode(s, n, wc);
+}
+
+int wctomb(char *s, wchar_t wc) {
+    unsigned cp = (unsigned)wc;
+    if (!s) return 0;
+    if (cp < 0x80) { s[0] = (char)cp; return 1; }
+    if (cp < 0x800) { s[0] = (char)(0xC0 | (cp >> 6)); s[1] = (char)(0x80 | (cp & 0x3F)); return 2; }
+    if (cp < 0x10000) {
+        s[0] = (char)(0xE0 | (cp >> 12));
+        s[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        s[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    }
+    s[0] = (char)(0xF0 | (cp >> 18));
+    s[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    s[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    s[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+size_t mbstowcs(wchar_t *dest, const char *src, size_t n) {
+    size_t out = 0;
+    if (!src) return (size_t)-1;
+    while (*src && (!dest || out < n)) {
+        wchar_t wc;
+        int k = utf8_decode(src, 4, &wc);
+        if (k <= 0) return (size_t)-1;
+        if (dest) dest[out] = wc;
+        src += k;
+        out++;
+    }
+    if (dest && out < n) dest[out] = 0;
+    return out;
+}
+
+size_t wcstombs(char *dest, const wchar_t *src, size_t n) {
+    size_t used = 0;
+    if (!src) return (size_t)-1;
+    while (*src) {
+        char tmp[4];
+        int k = wctomb(tmp, *src);
+        if (k <= 0) return (size_t)-1;
+        if (dest) {
+            if (used + (size_t)k > n) break;
+            memcpy(dest + used, tmp, (size_t)k);
+        }
+        used += (size_t)k;
+        src++;
+    }
+    if (dest && used < n) dest[used] = 0;
+    return used;
 }
 int iswspace(wchar_t wc) { return isspace((unsigned char)wc); }
 int fmt_scaled(long long number, char *result) {
@@ -3207,13 +3513,21 @@ static double strtod_precise(const char *nptr, char **end) {
         big_add_small(&b, (unsigned)digs[i]);
     }
     if (sticky) big_add_small(&b, 1);
+    if (exp > 350) { errno = ERANGE; return libc_copysign(libc_inf(), sign < 0 ? -1.0 : 1.0); }
+    if (exp < -350) { errno = ERANGE; return libc_copysign(0.0, sign < 0 ? -1.0 : 1.0); }
+    /* digits * 10^exp = digits * 5^exp * 2^exp. Отрицательная степень — деление на 5^|exp|. */
     if (exp >= 0) {
         for (k = 0; k < exp; k++) big_mul(&b, 5);
         return big_to_double(&b, sign, exp);
     }
     k = -exp;
-    for (i = 0; i < k; i++) big_mul(&b, 5);
-    return big_to_double(&b, sign, -k);
+    /* Сдвиг оставляет запасные биты мантиссы после деления на 5^k (log2(5) < 3). */
+    {
+        int shift = k * 3 + 96;
+        big_shl(&b, shift);
+        for (i = 0; i < k; i++) big_div_small(&b, 5);
+        return big_to_double(&b, sign, -(k + shift));
+    }
 }
 
 double strtod(const char *nptr, char **end) {
@@ -3730,6 +4044,10 @@ int tcsetpgrp(int fd, pid_t pgrp) {
     return 0;
 }
 
+int pause(void) {
+    for (;;) sleep(3600);
+}
+
 unsigned sleep(unsigned seconds) {
 #if defined(__LINUX_TEST__)
     struct { long sec, nsec; } req, rem;
@@ -3870,10 +4188,27 @@ int gettimeofday(struct timeval *tv, void *tz) {
 
 int clock_gettime(int clock_id, struct timespec *ts) {
     struct timeval tv;
+    if (!ts) { errno = EINVAL; return -1; }
+#if !defined(__LINUX_TEST__)
+    if (clock_id == CLOCK_MONOTONIC) {
+        unsigned ms = ticks();
+        ts->tv_sec = (time_t)(ms / 1000u);
+        ts->tv_nsec = (long)(ms % 1000u) * 1000000L;
+        return 0;
+    }
+#else
     (void)clock_id;
-    if (!ts || gettimeofday(&tv, 0) < 0) return -1;
+#endif
+    if (gettimeofday(&tv, 0) < 0) return -1;
     ts->tv_sec = tv.tv_sec;
     ts->tv_nsec = (long)tv.tv_usec * 1000L;
+    return 0;
+}
+
+int clock_getres(int clock_id, struct timespec *ts) {
+    if (!ts) { errno = EINVAL; return -1; }
+    ts->tv_sec = 0;
+    ts->tv_nsec = clock_id == CLOCK_MONOTONIC ? 10000000L : 1000000000L;
     return 0;
 }
 
@@ -3912,6 +4247,7 @@ char *mktemp(char *template) {
 
 double difftime(time_t a, time_t b) { return (double)(a - b); }
 
+void tzset(void) {}
 clock_t clock(void) {
 #if defined(__LINUX_TEST__)
     struct { long sec, nsec; } ts;
@@ -3920,6 +4256,16 @@ clock_t clock(void) {
 #else
     return (clock_t)ticks();
 #endif
+}
+clock_t times(struct tms *buf) {
+    clock_t now = clock();
+    if (buf) {
+        buf->tms_utime = now;
+        buf->tms_stime = 0;
+        buf->tms_cutime = 0;
+        buf->tms_cstime = 0;
+    }
+    return now;
 }
 
 static long long days_from_civil(int y, unsigned m, unsigned d) {
@@ -4165,6 +4511,21 @@ size_t strftime(char *s, size_t max, const char *fmt, const struct tm *tm) {
 
 static void (*sig_handlers[32])(int);
 
+#if !defined(__LINUX_TEST__)
+static void sigtramp(void) {
+    syscall3(SYS_SIGRETURN, 0, 0, 0);
+    _exit(128);
+}
+static int sig_install(int sig, void (*handler)(int)) {
+    unsigned h = !handler || handler == SIG_DFL ? 0 : handler == SIG_IGN ? 1 : (unsigned)handler;
+    int r = syscall3(SYS_SIGNAL, sig, (int)h, (int)sigtramp);
+    if (r < 0) { errno = -r; return -1; }
+    return 0;
+}
+#else
+static int sig_install(int sig, void (*handler)(int)) { (void)sig; (void)handler; return 0; }
+#endif
+
 static sigset_t proc_sigmask;
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     if (oldset) *oldset = proc_sigmask;
@@ -4185,7 +4546,8 @@ int siginterrupt(int sig, int flag) { (void)sig; (void)flag; return 0; }
 
 void (*signal(int sig, void (*handler)(int)))(int) {
     void (*old)(int);
-    if (sig < 0 || sig >= 32) { errno = EINVAL; return SIG_ERR; }
+    if (sig <= 0 || sig >= 32 || sig == SIGKILL || sig == SIGSTOP) { errno = EINVAL; return SIG_ERR; }
+    if (sig_install(sig, handler) < 0) return SIG_ERR;
     old = sig_handlers[sig];
     sig_handlers[sig] = handler;
     return old;
@@ -4216,8 +4578,61 @@ int raise(int sig) {
 int sigaction(int sig, const struct sigaction *act, struct sigaction *old) {
     if (sig <= 0 || sig >= 32 || sig == SIGKILL || sig == SIGSTOP) { errno = EINVAL; return -1; }
     if (old) { memset(old, 0, sizeof *old); old->sa_handler = sig_handlers[sig]; }
-    if (act) sig_handlers[sig] = act->sa_handler;
+    if (act) {
+        if (sig_install(sig, act->sa_handler) < 0) return -1;
+        sig_handlers[sig] = act->sa_handler;
+    }
     return 0;
+}
+
+char *nl_langinfo(int item) {
+    switch (item) {
+    case CODESET: return "UTF-8";
+    case DAY_1: return "Sunday";
+    case DAY_2: return "Monday";
+    case DAY_3: return "Tuesday";
+    case DAY_4: return "Wednesday";
+    case DAY_5: return "Thursday";
+    case DAY_6: return "Friday";
+    case DAY_7: return "Saturday";
+    case ABDAY_1: return "Sun";
+    case ABDAY_2: return "Mon";
+    case ABDAY_3: return "Tue";
+    case ABDAY_4: return "Wed";
+    case ABDAY_5: return "Thu";
+    case ABDAY_6: return "Fri";
+    case ABDAY_7: return "Sat";
+    case MON_1: return "January";
+    case MON_2: return "February";
+    case MON_3: return "March";
+    case MON_4: return "April";
+    case MON_5: return "May";
+    case MON_6: return "June";
+    case MON_7: return "July";
+    case MON_8: return "August";
+    case MON_9: return "September";
+    case MON_10: return "October";
+    case MON_11: return "November";
+    case MON_12: return "December";
+    case ABMON_1: return "Jan";
+    case ABMON_2: return "Feb";
+    case ABMON_3: return "Mar";
+    case ABMON_4: return "Apr";
+    case ABMON_5: return "May";
+    case ABMON_6: return "Jun";
+    case ABMON_7: return "Jul";
+    case ABMON_8: return "Aug";
+    case ABMON_9: return "Sep";
+    case ABMON_10: return "Oct";
+    case ABMON_11: return "Nov";
+    case ABMON_12: return "Dec";
+    case D_T_FMT: return "%a %b %e %H:%M:%S %Y";
+    case D_FMT: return "%m/%d/%y";
+    case T_FMT: return "%H:%M:%S";
+    case AM_STR: return "AM";
+    case PM_STR: return "PM";
+    default: return "";
+    }
 }
 
 int uname(struct utsname *name) {
@@ -4256,7 +4671,7 @@ int getrlimit(int resource, struct rlimit *rlim) {
     return ioerr(__syscall(76, resource, (int)rlim));
 #else
     if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
-    rlim->rlim_cur = rlim->rlim_max = 16;
+    rlim->rlim_cur = rlim->rlim_max = 256;
     return 0;
 #endif
 }
@@ -4276,7 +4691,7 @@ int setrlimit(int resource, const struct rlimit *rlim) {
     return ioerr(__syscall(75, resource, (int)rlim));
 #else
     if (resource != RLIMIT_NOFILE) { errno = EINVAL; return -1; }
-    if (rlim->rlim_cur > 16 || rlim->rlim_max > 16) { errno = EPERM; return -1; }
+    if (rlim->rlim_cur > 256 || rlim->rlim_max > 256) { errno = EPERM; return -1; }
     return 0;
 #endif
 }
