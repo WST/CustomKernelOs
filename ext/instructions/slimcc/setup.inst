@@ -1,8 +1,0 @@
-# SlimCC. Если git ещё не стоит, команда git ставит его сама.
-name slimcc
-descr SlimCC
-workdir /tmp/ext/slimcc-src
-git clone --depth 1 https://github.com/fuhsnn/slimcc.git .
-copy Makefile Makefile
-make -j1
-make -j1 install

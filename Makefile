@@ -301,12 +301,17 @@ OSSL_FLAGS := linux-x86 no-asm no-threads no-thread-pool no-dgram no-dso no-modu
 	-DNO_SYSLOG -DMYOS_HOST_LIBC -D__STDC_NO_ATOMICS__ \
 	-I$(abspath user/include) -I$(abspath user/lib) \
 	--prefix=$(abspath $(OSSL_BLD))/prefix
-$(OSSL_BLD)/.built: $(OSSL_SRC)/Configure
+# Заголовки появляются уже после Configure. Отдельная отметка, чтобы ccroot
+# не ждал всю компиляцию OpenSSL и не подхватывал их только на следующем make.
+$(OSSL_BLD)/.configured: $(OSSL_SRC)/Configure
+	@if [ -f $(OSSL_BLD)/.built ] && [ ! -f $@ ]; then touch -r $(OSSL_BLD)/.built $@; exit 0; fi
 	rm -rf $(OSSL_BLD)
 	mkdir -p $(OSSL_BLD)
 	cd $(OSSL_BLD) && perl $(abspath $(OSSL_SRC))/Configure $(OSSL_FLAGS)
 	# Configure дописывает -O3 в конец CFLAGS, поэтому более ранний -Oz он затирает.
 	sed -i 's/ -O3 / $(SIZE_FLAGS) /' $(OSSL_BLD)/Makefile
+	touch $@
+$(OSSL_BLD)/.built: $(OSSL_BLD)/.configured
 	$(MAKE) -C $(OSSL_BLD) -j$(shell nproc)
 	touch $@
 $(BUILD)/user/libcrypto.so: $(OSSL_BLD)/.built $(BUILD)/user/libc.so
@@ -435,7 +440,7 @@ CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sy
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
-$(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC)
+$(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC) $(OSSL_BLD)/.configured
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/include/openssl $(CCROOT)/include/curl $(CCROOT)/lib
 	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
