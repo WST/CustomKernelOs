@@ -72,7 +72,8 @@ enum {
     SYS_REBOOT,
     SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO,
     SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
-    SYS_PREAD, SYS_PWRITE, SYS_GETPGID
+    SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
+    SYS_SIGNAL, SYS_SIGRETURN
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0
@@ -82,10 +83,13 @@ enum {
 #define TC_COND_WAIT 4
 #define TC_COND_WAKE 5
 #define THREAD_KEYS 128
+#define THREAD_TLS_SLOTS 8
 struct thread_key { void *val; unsigned gen; };
+struct thread_tls_slot { void *key; void *val; };
 struct thread_tcb {
     int errno;
     struct thread_key key[THREAD_KEYS];
+    struct thread_tls_slot tls[THREAD_TLS_SLOTS];
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_FSCK + 1 == SYS_PREAD, "SYS_PREAD follows SYS_FSCK in kernel/syscall.h");
@@ -95,6 +99,7 @@ _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
+_Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
 
 #define PROT_READ  1
 #define PROT_WRITE 2
@@ -169,6 +174,7 @@ int *__errno_location(void);
 #define ECONNABORTED 103
 #define ESHUTDOWN 108
 #define EINPROGRESS 115
+#define EALREADY 114
 #define EWOULDBLOCK EAGAIN
 #define ENOTSUP EOPNOTSUPP
 #define EWOULDBLOCK EAGAIN
@@ -202,6 +208,7 @@ struct proc_info {
 #define O_EXCL    0200
 #define O_TRUNC   01000
 #define O_APPEND  02000
+#define O_NOFOLLOW 0
 #define O_READ    O_RDONLY
 #define O_WRITE   (O_WRONLY | O_CREAT | O_TRUNC)
 

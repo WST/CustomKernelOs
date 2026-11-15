@@ -120,6 +120,63 @@ uLong adler32(uLong adler, const Bytef *buf, uInt len) {
     return adler32_z(adler, buf, len);
 }
 
+uLong adler32_combine(uLong adler1, uLong adler2, z_off_t len2) {
+    unsigned long sum1, sum2, rem;
+    if (len2 < 0) return 0xffffffffUL;
+    rem = (unsigned long)len2 % 65521UL;
+    sum1 = adler1 & 0xffffUL;
+    sum2 = rem * sum1 % 65521UL;
+    sum1 += (adler2 & 0xffffUL) + 65521UL - 1;
+    sum2 += ((adler1 >> 16) & 0xffffUL) + ((adler2 >> 16) & 0xffffUL) + 65521UL - rem;
+    if (sum1 >= 65521UL) sum1 -= 65521UL;
+    if (sum1 >= 65521UL) sum1 -= 65521UL;
+    if (sum2 >= (65521UL << 1)) sum2 -= (65521UL << 1);
+    if (sum2 >= 65521UL) sum2 -= 65521UL;
+    return sum1 | (sum2 << 16);
+}
+
+static unsigned long crc_gf2_times(unsigned long *mat, unsigned long vec) {
+    unsigned long sum = 0;
+    int i;
+    for (i = 0; vec; i++, vec >>= 1) if (vec & 1) sum ^= mat[i];
+    return sum;
+}
+
+static void crc_gf2_square(unsigned long *square, unsigned long *mat) {
+    int n;
+    for (n = 0; n < 32; n++) square[n] = crc_gf2_times(mat, mat[n]);
+}
+
+uLong crc32_combine(uLong crc1, uLong crc2, z_off_t len2) {
+    int n;
+    unsigned long row, even[32], odd[32];
+    if (len2 <= 0) return crc1;
+    odd[0] = 0xedb88320UL;
+    row = 1;
+    for (n = 1; n < 32; n++) { odd[n] = row; row <<= 1; }
+    crc_gf2_square(even, odd);
+    crc_gf2_square(odd, even);
+    do {
+        crc_gf2_square(even, odd);
+        if (len2 & 1) crc1 = crc_gf2_times(even, crc1);
+        len2 >>= 1;
+        if (!len2) break;
+        crc_gf2_square(odd, even);
+        if (len2 & 1) crc1 = crc_gf2_times(odd, crc1);
+        len2 >>= 1;
+    } while (len2);
+    return crc1 ^ crc2;
+}
+
+int deflateCopy(z_streamp dest, z_streamp source) {
+    (void)dest; (void)source;
+    return Z_STREAM_ERROR;
+}
+int inflateCopy(z_streamp dest, z_streamp source) {
+    (void)dest; (void)source;
+    return Z_STREAM_ERROR;
+}
+
 static int version_ok(const char *version, int stream_size) {
     if (!version || version[0] != ZLIB_VERSION[0]) return 0;
     return stream_size == (int)sizeof(z_stream);
@@ -1284,4 +1341,13 @@ int uncompress2(Bytef *dest, uLongf *destLen, const Bytef *source, uLong *source
 int uncompress(Bytef *dest, uLongf *destLen, const Bytef *source, uLong sourceLen) {
     uLong n = sourceLen;
     return uncompress2(dest, destLen, source, &n);
+}
+
+int deflateSetDictionary(z_streamp strm, const Bytef *dictionary, uInt dictLength) {
+    (void)dictionary; (void)dictLength;
+    return strm ? Z_STREAM_ERROR : Z_STREAM_ERROR;
+}
+int inflateSetDictionary(z_streamp strm, const Bytef *dictionary, uInt dictLength) {
+    (void)dictionary; (void)dictLength;
+    return strm ? Z_STREAM_ERROR : Z_STREAM_ERROR;
 }

@@ -94,8 +94,8 @@ static int sys_sshctl(u32 op,u32 arg,u32 ptr) {
         if(!user_buf_ok(ptr,8,false)) return -EFAULT;
         int *v=(void*)ptr;
         switch(v[0]) {
-        case 1:return (p->cloexec>>arg)&1;
-        case 2:if(v[1]&1) p->cloexec|=1u<<arg;else p->cloexec&=~(1u<<arg);return 0;
+        case 1:return arg < MAX_FDS && cloexec_get(p, arg);
+        case 2:if (arg >= MAX_FDS) return -EBADF; cloexec_set(p, arg, v[1] & 1); return 0;
         case 3:return f->status_flags;
         case 4:f->status_flags=v[1]&04000;return 0;
         }

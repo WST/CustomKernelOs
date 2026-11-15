@@ -11,7 +11,7 @@
 #define TASK_STACK  (16 * 1024)     /* стек ядра у каждой задачи */
 #define TASK_NAME   16
 #define TIME_SLICE  2               /* bootstrap/idle fallback; MLFQ quanta are in scheduler.c */
-#define MAX_FDS     32  /* cloexec is a u32; Git needs more than 16 descriptors */
+#define MAX_FDS     256 /* совпадает с OPEN_MAX в libc; cloexec — битовая карта */
 
 enum task_state { TASK_READY, TASK_RUNNING, TASK_SLEEPING, TASK_BLOCKED, TASK_ZOMBIE };
 
@@ -53,7 +53,8 @@ struct task {
     struct file *syscall_fds[MAX_FDS]; /* transient refs while a syscall blocks */
     struct file *fds[MAX_FDS];      /* открытые файлы (общие объекты, см. file.h) */
     u32 uid;
-    u32 real_uid, saved_uid, cloexec, fs_root;
+    u32 real_uid, saved_uid, fs_root;
+    u32 cloexec_bits[(MAX_FDS + 31) / 32];
     u32 gid, real_gid, saved_gid;
     u32 creation_mask, fs_account_scope, ipc_epoch;
     u32 user_stack_base,user_stack_size,guard_va,guard_flags;
@@ -67,6 +68,12 @@ struct task {
     bool  in_syscall;               /* сейчас выполняет системный вызов */
     bool  kill_pending;             /* убить при выходе из системного вызова */
     int   pending_code;             /* exit status, including zero; kill sets 137 */
+    /* 0 — SIG_DFL (убить), 1 — SIG_IGN, иначе адрес обработчика. */
+    u32   sig_handler[32];
+    u32   sig_tramp;
+    int   pending_sig;
+    bool  handling_sig;
+    u32   sig_eip, sig_esp, sig_eax, sig_ebx, sig_ecx, sig_edx, sig_esi, sig_edi, sig_ebp;
     u8    fpu[108];                 /* регистры FPU (fnsave), только у процессов */
     struct shm_mapping { int id; u32 addr; } shm[16];   /* общая память (ipc.c) */
     struct mbox *mbox;              /* почтовый ящик для сообщений (ipc.c) */
@@ -103,6 +110,21 @@ void  task_exit_code(int code) __attribute__((noreturn));
 void  task_exit(void) __attribute__((noreturn));
 int   task_kill(u32 id);            /* можно звать и из обработчика прерывания */
 int   task_kill_group(u32 pgid);    /* убить всех с этой группой -> сколько */
+int   task_raise_group(u32 pgid, int sig); /* SIGINT: обработчик или, иначе, kill */
+void  signal_deliver(struct task *t, struct regs *r);
+void  signal_sigreturn(struct task *t, struct regs *r);
+
+static inline void cloexec_set(struct task *t, int fd, int on) {
+    u32 bit = 1u << (fd & 31);
+    if (on) t->cloexec_bits[fd >> 5] |= bit;
+    else t->cloexec_bits[fd >> 5] &= ~bit;
+}
+static inline int cloexec_get(const struct task *t, int fd) {
+    return (t->cloexec_bits[fd >> 5] >> (fd & 31)) & 1;
+}
+static inline int task_intr(struct task *t) {
+    return t && (t->kill_pending || t->pending_sig);
+}
 int   task_wait_child(int pid, int *code, bool nohang);  /* waitpid для процессов */
 int   task_waitpid(u32 id, int *code);
 void  task_reap(void);             /* освободить память завершившихся задач */

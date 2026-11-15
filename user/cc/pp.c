@@ -333,7 +333,17 @@ static Token *subst(Token *tok, MacroArg *args) {
             if (tok->next->kind == TK_EOF) error_tok(tok, "'##' cannot appear at end of macro expansion");
             MacroArg *arg = find_arg(args, tok->next);
             if (arg) {
-                if (arg->tok->kind != TK_EOF) {
+                /* GNU ,##__VA_ARGS__: пустой список съедает запятую, непустой не склеивается с ней. */
+                if (arg->tok->kind == TK_EOF) {
+                    if (equal(cur, ",")) {
+                        Token *p = &head;
+                        while (p->next != cur) p = p->next;
+                        p->next = NULL;
+                        cur = p;
+                    }
+                } else if (equal(cur, ",")) {
+                    for (Token *t = arg->tok; t->kind != TK_EOF; t = t->next) cur = cur->next = copy_token(t);
+                } else {
                     *cur = *paste(cur, arg->tok);
                     for (Token *t = arg->tok->next; t->kind != TK_EOF; t = t->next) cur = cur->next = copy_token(t);
                 }
@@ -679,6 +689,12 @@ static void init_macros(void) {
     define_macro("__BIG_ENDIAN", "4321");
     define_macro("__SIZEOF_INT__", "4");
     define_macro("__SIZEOF_POINTER__", "4");
+    define_macro("__ATOMIC_RELAXED", "0");
+    define_macro("__ATOMIC_CONSUME", "1");
+    define_macro("__ATOMIC_ACQUIRE", "2");
+    define_macro("__ATOMIC_RELEASE", "3");
+    define_macro("__ATOMIC_ACQ_REL", "4");
+    define_macro("__ATOMIC_SEQ_CST", "5");
     if (opt_linux) define_macro("__LINUX_TEST__", "1");
     if (opt_pic) { define_macro("__PIC__", "2"); define_macro("__pic__", "2"); }
     for (int i = 0; i < n_user_defs; i++) {
@@ -701,15 +717,22 @@ static void init_macros(void) {
 static void join_strings(Token *tok) {
     for (Token *t = tok; t->kind != TK_EOF; t = t->next) {
         if (t->kind != TK_STR || t->next->kind != TK_STR) continue;
+        int es = t->ty && t->ty->base && t->ty->base->size ? t->ty->base->size : 1;
         Token *end = t->next;
-        int len = t->str_len - 1;
-        while (end->kind == TK_STR) { len += end->str_len - 1; end = end->next; }
-        char *buf = xcalloc(len + 1);
+        int len = t->str_len - es;
+        while (end->kind == TK_STR) {
+            int es2 = end->ty && end->ty->base && end->ty->base->size ? end->ty->base->size : 1;
+            if (es2 != es) error_tok(end, "cannot concatenate strings of different width");
+            len += end->str_len - es;
+            end = end->next;
+        }
+        char *buf = xcalloc(len + es);
         int pos = 0;
-        for (Token *u = t; u != end; u = u->next) { memcpy(buf + pos, u->str, u->str_len - 1); pos += u->str_len - 1; }
+        for (Token *u = t; u != end; u = u->next) { memcpy(buf + pos, u->str, u->str_len - es); pos += u->str_len - es; }
         t->str = buf;
-        t->str_len = len + 1;
-        t->ty = array_of(ty_char, len + 1);
+        t->str_len = len + es;
+        if (t->ty && t->ty->base) t->ty = array_of(t->ty->base, t->str_len / es);
+        else t->ty = array_of(ty_char, len + 1);
         t->next = end;
     }
 }

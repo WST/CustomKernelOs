@@ -463,11 +463,11 @@ $(BUILD)/libobj-myos/%.o: user/lib/%.c $(CCROOT)/.stamp $(BUILD)/cc-host
 
 $(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-myos/libc.o: user/lib/regex.c
 
-$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
+$(CCROOT)/lib/libc.a: $(BUILD)/libobj-linux/libc.o $(BUILD)/libobj-linux/libatomic.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
 	rm -f $@ && $(AR) rcs $@ $^
 $(CCROOT)/lib/libgfx.a: $(patsubst %,$(BUILD)/libobj-linux/%.o,$(GFX_PARTS))
 	rm -f $@ && $(AR) rcs $@ $^
-$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
+$(BUILD)/mlib/libc.a: $(BUILD)/libobj-myos/libc.o $(BUILD)/libobj-myos/libatomic.o $(BUILD)/user/setjmp.o $(BUILD)/user/alloca.o
 	@mkdir -p $(@D)
 	rm -f $@ && $(AR) rcs $@ $^
 $(BUILD)/mlib/libgfx.a: $(patsubst %,$(BUILD)/libobj-myos/%.o,$(GFX_PARTS))
@@ -1310,6 +1310,12 @@ nano-build: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/mlib/libc.a
 	python3 tests/nano_build.py
 nanotest: nano-build
 	python3 tests/nano_smoke.py
+
+.PHONY: python-build pythontest
+python-build: $(BUILD)/cc-host $(CCROOT_READY) $(BUILD)/mlib/libc.a $(BUILD)/user/libssl.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libz.so $(BUILD)/user/libpthread.so $(BUILD)/user/libm.so
+	python3 tests/python_build.py
+pythontest: python-build
+	python3 tests/python_smoke.py
 
 .PHONY: nano-sshtest
 nano-sshtest: nano-build openssh-tests-ready

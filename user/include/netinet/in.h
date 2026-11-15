@@ -24,6 +24,8 @@ struct sockaddr_in6 {
 #define IN6ADDR_LOOPBACK_INIT { { 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1 } }
 #define INADDR_ANY ((in_addr_t)0)
 #define INADDR_LOOPBACK ((in_addr_t)0x7f000001)
+#define INADDR_BROADCAST ((in_addr_t)0xffffffff)
+#define INADDR_NONE ((in_addr_t)0xffffffff)
 #define INET_ADDRSTRLEN 16
 #define INET6_ADDRSTRLEN 46
 #endif

@@ -157,7 +157,7 @@ int kb_poll(void) {
 int kb_getchar(void) {
     u32 f = irq_save();
     while (head == tail) {
-        if (tasking_ready() && task_current()->kill_pending) { irq_restore(f); return 0; }
+        if (tasking_ready() && task_intr(task_current())) { irq_restore(f); return 0; }
         if (tasking_ready()) task_wait((void *)buf);
         else __asm__ volatile ("sti; hlt; cli");
     }

@@ -94,9 +94,13 @@ enum {
     SYS_THREAD_CTL,     /* errno/ключи, detach, cond_wait/cond_wake; номера как в myos.h */
     SYS_HWINFO,         /* read-only PCI, USB root ports and SATA inventory */
     SYS_SCHEDINFO,      /* read-only per-CPU scheduler counters */
-    SYS_KERNELINFO,    /* versioned kernel concurrency counters */
+    SYS_KERNELINFO,     /* versioned kernel concurrency counters */
     SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
-    SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
+    SYS_PREAD,          /* pread(fd, buf, len, off): смещение дескриптора не меняется */
+    SYS_PWRITE,         /* pwrite(fd, buf, len, off) */
+    SYS_GETPGID,        /* getpgid(pid): 0 — группа текущего процесса */
+    SYS_SIGNAL,         /* signal(sig, handler, tramp) -> старый handler */
+    SYS_SIGRETURN,      /* восстановить регистры после обработчика */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */
@@ -116,6 +120,7 @@ _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_FSCK + 1 == SYS_PREAD, "SYS_PREAD follows SYS_FSCK in user/lib/myos.h");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
+_Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
 
 /* коды ошибок (как в Linux) */
 #define EPERM        1
