@@ -62,4 +62,10 @@ $C -c "$SRC/lib1.c" -o lib1nop.o || fail nopic-compile
 $C mainpic.o lib1nop.o lib2.o -o mixpic || fail mixpic-build
 run mixpic
 
+# extern в одном файле и inline-определение в нём должны остаться внешним символом.
+$C -c "$SRC/inline_def.c" -o inline_def.o || fail inline-def
+$C -c "$SRC/inline_use.c" -o inline_use.o || fail inline-use
+$C inline_use.o inline_def.o -o inline_link || fail inline-link
+./inline_link || fail inline-run
+
 echo "cc separate compilation: OK"
