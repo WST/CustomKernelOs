@@ -1387,7 +1387,7 @@ enum { NODE_NEW, NODE_PLANNED, NODE_RUNNING, NODE_DONE };
 struct build_node {
     char *name; struct rule **rs; int nrs;
     int *deps; int ndeps, depcap;
-    int state, pid, built, phony;
+    int state, pid, built, phony, created;
     unsigned stamp; /* время файла после рецепта; 0, если файла нет */
 };
 static struct build_node *nodes; static int nnodes, nodecap;
@@ -1543,7 +1543,7 @@ static int pre_newer(const char *target, const char *pre) {
         if (nodes[i].phony) return 1;
         /* Рецепт FORCE часто ничего не переписывает. Тогда файл остаётся
          * старше цели, и зависимые объекты не надо собирать заново. */
-        if (nodes[i].built) return nodes[i].stamp > tm;
+        if (nodes[i].built) return nodes[i].created || nodes[i].stamp > tm;
         break;
     }
     if (file_info(pre, &dm) && dm > tm) return 1;
@@ -1715,6 +1715,7 @@ static int execute_graph(void) {
                 progress = 1; continue;
             }
             any_ran = 1;
+            node->created = !file_info(node->name, NULL);
             if (dry_run) {
                 if (node_recipes(node) < 0) { failed = 1; break; }
                 node->built = 1; node->state = NODE_DONE; progress = 1; continue;
@@ -1775,7 +1776,26 @@ static void cli_assign(const char *s) {
 static void flags_from_env(void) {
     const char *m = getenv("MAKEFLAGS");
     if (!m) return;
-    for (; *m; m++) { if (*m == 'n') dry_run = 1; if (*m == 's') silent = 1; }
+    int first = 1;
+    while (*m) {
+        while (*m == ' ' || *m == '\t') m++;
+        const char *word = m;
+        while (*m && *m != ' ' && *m != '\t') m++;
+        int len = (int)(m - word), assignment = 0;
+        if (!len) break;
+        if (len == 2 && word[0] == '-' && word[1] == '-') break;
+        for (int i = 0; i < len; i++) if (word[i] == '=') assignment = 1;
+        if (!assignment && len > 2 && word[0] == '-' && word[1] == '-') {
+            if ((len == 8 && !memcmp(word,"--silent",8)) || (len == 7 && !memcmp(word,"--quiet",7))) silent = 1;
+            if ((len == 9 && !memcmp(word,"--dry-run",9)) || (len == 12 && !memcmp(word,"--just-print",12))) dry_run = 1;
+        } else if (!assignment && (first || word[0] == '-')) {
+            for (int i = word[0] == '-' ? 1 : 0; i < len; i++) {
+                if (word[i] == 'n') dry_run = 1;
+                if (word[i] == 's') silent = 1;
+            }
+        }
+        first = 0;
+    }
 }
 
 int main(int argc, char **argv) {

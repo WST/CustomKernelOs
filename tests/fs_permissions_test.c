@@ -20,6 +20,10 @@ int main(int argc,char **argv) {
  CHECK(!fs_create_mode(1,"/group",FS_TYPE_FILE,0640,&group));CHECK(!fs_chown(group,0,11));
  CHECK(!fs_create(1,"/shared",FS_TYPE_DIR,&world));CHECK(!fs_chmod(world,01777));
  CHECK(!fs_create_mode(world,"root",FS_TYPE_FILE,0600,&found));
+ u32 victim=found,owner_source;CHECK(!fs_chown(victim,12,12));
+ CHECK(!fs_create_mode(world,"owner-source",FS_TYPE_FILE,0600,&owner_source));CHECK(!fs_chown(owner_source,11,11));
+ uid=11;gid=11;CHECK(fs_rename(world,"owner-source","root")==FS_EPERM);
+ uid=0;gid=0;CHECK(!fs_chown(victim,0,0));CHECK(!fs_remove(world,"owner-source"));
  uid=11;gid=11;mask=027;
  CHECK(fs_resolve(1,"/private/secret",&found)==FS_EACCES);
  CHECK(fs_resolve(1,"/private/../group",&found)==FS_EACCES);

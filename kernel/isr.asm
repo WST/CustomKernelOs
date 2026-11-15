@@ -4,7 +4,7 @@
 [bits 32]
 section .text
 extern isr_handler
-extern smp_enter, smp_leave
+extern smp_enter, smp_leave, smp_syscall_fast
 global idt_load
 
 ; Исключения без кода ошибки — кладём фиктивный 0
@@ -114,6 +114,11 @@ isr_common:
     mov ax, 0x30            ; per-CPU kernel data segment
     mov gs, ax
     cld
+    push esp
+    call smp_syscall_fast
+    add esp, 4
+    test eax, eax
+    jnz .restore            ; fast syscall kept its original stack; no BKL held
     call smp_enter
     push esp                ; аргумент: указатель на struct regs
     call isr_handler
@@ -124,6 +129,7 @@ isr_common:
     call smp_leave
     pop eax
     mov esp, eax
+.restore:
     pop gs
     pop fs
     pop es

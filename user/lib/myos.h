@@ -4,6 +4,8 @@
 #define MYOS_H
 #include "sysinfo.h"
 #include "hwinfo.h"
+#include "scheduler.h"
+#include "kernelinfo.h"
 int sysinfo(struct system_info *out, unsigned size);
 /* Returns online CPU count, or negative errno; capacity is in records. */
 int cpuinfo(struct cpu_info *out, unsigned capacity);
@@ -68,8 +70,9 @@ enum {
     SYS_THREAD_CREATE, SYS_THREAD_JOIN, SYS_THREAD_EXIT, SYS_GETTID, SYS_THREAD_MUTEX, SYS_KLOG_READ,
     SYS_SSHCTL, SYS_FSCTL, SYS_IPCCTL,
     SYS_REBOOT,
-    SYS_THREAD_CTL, SYS_HWINFO,
-    SYS_PREAD, SYS_PWRITE, SYS_FSYNC, SYS_GETPGID,
+    SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO,
+    SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
+    SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
     SYS_SIGNAL, SYS_SIGRETURN
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
@@ -89,7 +92,8 @@ struct thread_tcb {
     struct thread_tls_slot tls[THREAD_TLS_SLOTS];
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
-_Static_assert(SYS_HWINFO + 1 == SYS_PREAD, "SYS_PREAD follows SYS_HWINFO in kernel/syscall.h");
+_Static_assert(SYS_FSCK + 1 == SYS_PREAD, "SYS_PREAD follows SYS_FSCK in kernel/syscall.h");
+_Static_assert(SYS_FSYNC == 94 && SYS_FSCK == 95 && SYS_PREAD == 96, "Keep persistence syscall ABI stable");
 _Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
 _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
@@ -228,6 +232,10 @@ int account(int op, const char *name, const char *password);
 /* Enumerate public account names (24-byte output), zero-based, -ENOENT at end. */
 int account_list(char *name, unsigned index);
 int mount(const char *device,const char *target);
+int umount(const char *target);
+int sync(void);
+int fsync(int fd);
+int fsck(const char *device);
 int mountinfo(unsigned index,char device[128],char target[128]);
 int blockinfo(unsigned index,struct block_info *info);
 int mkfs(const char *device);

@@ -170,7 +170,7 @@ void endpwent(void){}
 int chroot(const char *p){return ctl(10,0,(void*)p);}
 int ftruncate(int fd,off_t n){struct stat st;if(fstat(fd,&st)<0)return -1;if(st.st_size==(unsigned)n)return 0;errno=ENOSYS;return -1;}
 int truncate(const char *p,off_t n){int fd=open(p,O_WRONLY);if(fd<0)return -1;int ret=ftruncate(fd,n);close(fd);return ret;}
-int fsync(int fd){struct stat st;return fstat(fd,&st);}
+int fsync(int fd){return posix(raw(SYS_FSYNC,fd,0,0));}
 int fdatasync(int fd){return fsync(fd);}
 int utimes(const char *p,const struct timeval t[2]){(void)p;(void)t;errno=ENOSYS;return -1;}
 int futimes(int fd,const struct timeval t[2]){(void)fd;(void)t;errno=ENOSYS;return -1;}

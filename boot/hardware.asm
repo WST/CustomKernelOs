@@ -47,8 +47,10 @@ dap: db 16,0
     dw 32
     dw 0x9000,0
     dq 1
-times 446-($-$$) db 0
-; An active MyFS partition; no kernel writes to this partition in live mode.
+times 440-($-$$) db 0
+    dd ROOT_DISK_ID
+    dw 0
+; Boot MyFS partition; persistent writes are restricted to this range.
     db 0x80,0xfe,0xff,0xff,0x7f,0xfe,0xff,0xff
     dd ROOT_LBA,ROOT_SECTORS
 times 510-($-$$) db 0

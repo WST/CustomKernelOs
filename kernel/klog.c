@@ -1,17 +1,13 @@
 #include "klog.h"
 #include "syscall.h"
 #include "string.h"
+#include "spinlock.h"
 
 static char ring[KLOG_CAPACITY];
 static u64 end_sequence;
-static volatile u32 guard;
-
-static u32 lock(void) {
-    u32 flags=irq_save();
-    while(__sync_lock_test_and_set(&guard,1))__asm__ volatile("pause");
-    return flags;
-}
-static void unlock(u32 flags) { __sync_lock_release(&guard);irq_restore(flags); }
+static spinlock_t guard;
+static u32 lock(void) { return spin_lock_irqsave(&guard); }
+static void unlock(u32 flags) { spin_unlock_irqrestore(&guard,flags); }
 void klog_write(const char *text,u32 length) {
     u32 flags=lock();
     for(u32 i=0;i<length;i++)ring[end_sequence++%KLOG_CAPACITY]=text[i];

@@ -11,6 +11,7 @@ struct boot_info {
     u32 magic, version, root_phys, root_bytes, font_phys;
     u32 fb_phys, width, height, bpp, pitch;
     u32 bios_snapshot_magic; /* 0x49564256: page zero saved at 0x2000 */
+    u32 root_lba,root_disk_id; /* version 2 only; identifies the boot USB partition */
 };
 static inline bool boot_root_valid(const struct boot_info *b) {
     return b && b->root_phys==LIVE_ROOT_PHYS &&
@@ -21,7 +22,7 @@ static inline bool boot_root_valid(const struct boot_info *b) {
 static inline const struct boot_info *boot_info_get(void) {
 #ifdef MYOS_HARDWARE
     const struct boot_info *b=(const void *)0x6000;
-    return b->magic==BOOT_INFO_MAGIC && b->version==1 ? b : NULL;
+    return b->magic==BOOT_INFO_MAGIC && (b->version==1 || b->version==2) ? b : NULL;
 #else
     return NULL;
 #endif

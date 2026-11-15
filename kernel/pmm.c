@@ -9,6 +9,9 @@
 #include "string.h"
 #include "bootinfo.h"
 #include "idt.h"
+#include "spinlock.h"
+
+static spinlock_t pmm_lock;
 
 #define LOW_RESERVED  0x100000        /* первый 1 МБ не раздаём никогда */
 #define MAX_PHYS      0x40000000u     /* работаем с первым 1 ГБ (выше — память программ, см. paging.h) */
@@ -127,7 +130,7 @@ void pmm_init(void) {
     next_hint = LOW_RESERVED / PAGE_SIZE;
 }
 
-u32 pmm_alloc(void) {
+static u32 pmm_alloc_locked(void) {
     if (!refs) return 0;
     for (u32 pass = 0; pass < 2; pass++) {
         u32 from = pass ? LOW_RESERVED / PAGE_SIZE : next_hint;
@@ -146,7 +149,7 @@ u32 pmm_alloc(void) {
     return 0;  /* память закончилась */
 }
 
-void pmm_free(u32 addr) {
+static void pmm_free_locked(u32 addr) {
     if (!refs) return;
     u32 f = addr / PAGE_SIZE;
     if (addr % PAGE_SIZE || addr < LOW_RESERVED || f >= limit_frame || !is_used(f)) return;
@@ -162,7 +165,7 @@ void pmm_free(u32 addr) {
     if (f < next_hint) next_hint = f;
 }
 
-bool pmm_share(u32 addr) {
+static bool pmm_share_locked(u32 addr) {
     if (!refs) return false;
     u32 f = addr / PAGE_SIZE;
     if (addr % PAGE_SIZE || f >= limit_frame || !is_used(f) || refs[f] == 0 || refs[f] == 255) return false;
@@ -170,15 +173,48 @@ bool pmm_share(u32 addr) {
     return true;
 }
 
-u32 pmm_refs(u32 addr) {
+static u32 pmm_refs_locked(u32 addr) {
     if (!refs) return 0;
     u32 f = addr / PAGE_SIZE;
     if (addr % PAGE_SIZE || f >= limit_frame || !is_used(f)) return 0;
     return refs[f];
 }
 
-void pmm_stats(struct pmm_stats *st) {
+static void pmm_stats_locked(struct pmm_stats *st) {
     st->total_frames  = total_frames;
     st->used_frames   = used_frames;
     st->managed_limit = limit_frame * PAGE_SIZE;
+}
+
+u32 pmm_alloc(void) {
+    u32 flags=spin_lock_irqsave(&pmm_lock);
+    u32 result=pmm_alloc_locked();
+    spin_unlock_irqrestore(&pmm_lock,flags);
+    return result;
+}
+
+void pmm_free(u32 addr) {
+    u32 flags=spin_lock_irqsave(&pmm_lock);
+    pmm_free_locked(addr);
+    spin_unlock_irqrestore(&pmm_lock,flags);
+}
+
+bool pmm_share(u32 addr) {
+    u32 flags=spin_lock_irqsave(&pmm_lock);
+    bool result=pmm_share_locked(addr);
+    spin_unlock_irqrestore(&pmm_lock,flags);
+    return result;
+}
+
+u32 pmm_refs(u32 addr) {
+    u32 flags=spin_lock_irqsave(&pmm_lock);
+    u32 result=pmm_refs_locked(addr);
+    spin_unlock_irqrestore(&pmm_lock,flags);
+    return result;
+}
+
+void pmm_stats(struct pmm_stats *st) {
+    u32 flags=spin_lock_irqsave(&pmm_lock);
+    pmm_stats_locked(st);
+    spin_unlock_irqrestore(&pmm_lock,flags);
 }

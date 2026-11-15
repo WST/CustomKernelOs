@@ -1,6 +1,7 @@
 #ifndef SYSCALL_H
 #define SYSCALL_H
 #include "idt.h"
+#include "../user/lib/kernelinfo.h"
 
 /* Номера системных вызовов. ДОЛЖНЫ совпадать с user/lib/myos.h.
  * Вызов: int 0x80, eax = номер, ebx/ecx/edx = аргументы, результат в eax.
@@ -92,9 +93,11 @@ enum {
     SYS_REBOOT,         /* reboot(RB_POWEROFF | RB_REBOOT): не возвращается */
     SYS_THREAD_CTL,     /* errno/ключи, detach, cond_wait/cond_wake; номера как в myos.h */
     SYS_HWINFO,         /* read-only PCI, USB root ports and SATA inventory */
+    SYS_SCHEDINFO,      /* read-only per-CPU scheduler counters */
+    SYS_KERNELINFO,     /* versioned kernel concurrency counters */
+    SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
     SYS_PREAD,          /* pread(fd, buf, len, off): смещение дескриптора не меняется */
     SYS_PWRITE,         /* pwrite(fd, buf, len, off) */
-    SYS_FSYNC,          /* fsync(fd): сбросить кэш блоков на диск */
     SYS_GETPGID,        /* getpgid(pid): 0 — группа текущего процесса */
     SYS_SIGNAL,         /* signal(sig, handler, tramp) -> старый handler */
     SYS_SIGRETURN,      /* восстановить регистры после обработчика */
@@ -108,10 +111,13 @@ enum {
 #define TC_COND_WAIT 4
 #define TC_COND_WAKE 5
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
+_Static_assert(SYS_FSYNC == 94 && SYS_FSCK == 95 && SYS_PREAD == 96, "Keep persistence syscall ABI stable");
 _Static_assert(SYS_SSHCTL == 84, "Keep the published SYS_SSHCTL ABI stable");
 _Static_assert(SYS_FSCTL == 85, "Keep the published SYS_FSCTL ABI stable");
+_Static_assert(SYS_KERNELINFO == 91, "Keep the published SYS_KERNELINFO ABI stable");
+_Static_assert(sizeof(struct kernel_info)==36, "kernel_info v1 ABI");
 _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
-_Static_assert(SYS_HWINFO + 1 == SYS_PREAD, "SYS_PREAD follows SYS_HWINFO in user/lib/myos.h");
+_Static_assert(SYS_FSCK + 1 == SYS_PREAD, "SYS_PREAD follows SYS_FSCK in user/lib/myos.h");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 _Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
