@@ -2084,6 +2084,10 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
         char *name = get_ident(ty->name);
 
         fn = find_func(name);
+        /* Уже внешнее объявление (extern в заголовке) плюс inline в .c —
+         * одно внешнее определение. Иначе init_eltstate остаётся static
+         * и линковка bash не находит его. */
+        bool prior_external = fn && !fn->is_static;
         if (fn) {
             if (!fn->is_function) error_tok(tok, "redeclared as a different kind of symbol");
             if (fn->is_definition && equal(tok, "{")) error_tok(tok, "redefinition of %s", name);
@@ -2096,7 +2100,7 @@ static Token *function(Token *tok, Type *basety, VarAttr *attr) {
         /* new_gvar ставит is_static=true; для обычных функций сбрасываем.
          * static на определении перекрывает прежнее extern из заголовка
          * (иначе get_time из myos.h делал static get_time в date.c глобальным). */
-        if (attr->is_static || (attr->is_inline && !attr->is_extern)) {
+        if (attr->is_static || (attr->is_inline && !attr->is_extern && !prior_external)) {
             fn->is_static = true;
             if (!strchr(fn->name, '.')) fn->name = static_name(name);
         } else {
