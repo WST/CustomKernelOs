@@ -1,4 +1,6 @@
 build/
+.vscode/
+.idea/
 disk.img
 *.img
 *.img.bak
@@ -8,3 +10,6 @@ disk.img
 .env
 .env.*
 !.env.example
+
+# Личные пожелания агенту. Файл заводит разработчик у себя.
+AGENTS.local.md

@@ -1,7 +1,7 @@
 OpenSSH 10.6p2 for MyOS
 
 Install as root: ext install openssh
-The package builds upstream OpenSSH with /bin/cc and /bin/make, installs ssh,
+The port builds upstream OpenSSH with /bin/cc and /bin/make, installs ssh,
 sshd, sshd-session, sshd-auth, ssh-keygen, ssh-keyscan, scp, sftp and
 sftp-server in /ext/bin, then runs /ext/bin/openssh-setup.
 
@@ -15,7 +15,7 @@ Use systemctl status|start|stop|restart sshd and systemctl disable --now sshd.
 Logs: /var/log/sshd.service. ext uninstall openssh stops/disables the service
 and removes its unit and programs, keeping configuration and host keys.
 Repeated /ext/bin/openssh-setup preserves existing settings and does not
-start a duplicate daemon. Already-installed ext packages are skipped; run
+start a duplicate daemon. Already-installed ext ports are skipped; run
 openssh-setup as root after updating the installer to register the service.
 An updated kernel with User=root service support is required.
 Foreground debugging: systemctl stop sshd, then /ext/bin/sshd -D -e -ddd

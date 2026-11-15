@@ -87,7 +87,7 @@ UTF-8, BOM и CRLF. Неизвестный ключ или неверные ка
 
 Проверка: `make envtest netboottest`; в Windows — `py tests/env_config_test.py`.
 
-## Сборка пакетов в гостевой ОС
+## Сборка портов в гостевой ОС
 
 `EXT_BUILD_JOBS=auto` задаёт начальную настройку `/etc/ext/build-jobs`: auto либо
 1..16. Автоматический режим учитывает запущенные CPU и свободную RAM.
