@@ -48,6 +48,7 @@ ext uninstall lua
 | Порт | Что ставится |
 |---|---|
 | [lua](lua.md) | Lua 5.4.8 |
+| [python](python.md) | CPython 3.15.2, pip и virtualenv |
 | [openssh](openssh.md) | OpenSSH 10.6p2, клиент и `sshd` |
 | [nano](nano.md) | GNU nano 9.3 |
 | bash | Bash 5.3 |

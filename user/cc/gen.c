@@ -376,11 +376,27 @@ static void gen_expr(Node *node);
 static void gen_stmt(Node *node);
 static void reload_got(void);
 
+/* Символ _Thread_local — ключ. Значение лежит в TCB текущего потока. */
+static void gen_tls_addr(Obj *var) {
+    if (opt_pic && (var->is_static || var->is_rodata)) {
+        E("8D 83"); sym_ref(var->name, R_386_GOTOFF);
+    } else if (opt_pic) {
+        E("8B 83"); sym_ref(var->name, R_386_GOT32);
+    } else {
+        E("B8"); sym_ref(var->name, R_386_32);
+    }
+    E("51 50");                                                 /* ecx мог быть занят; ключ — аргумент */
+    E("E8");
+    sym_ref("__myos_tls_addr", opt_pic ? R_386_PLT32 : R_386_PC32);
+    E("83 C4 04 59");                                           /* снять ключ, вернуть ecx; адрес слота в eax */
+}
+
 /* -fPIC: ebx указывает на GOT. Своё (static, литерал) — lea от ebx,
  * чужое — адрес из ячейки GOT, чтобы потом его мог подставить загрузчик. */
 static void gen_addr(Node *node) {
     switch (node->kind) {
     case ND_VAR:
+        if (node->var->is_tls) { gen_tls_addr(node->var); return; }
         if (node->var->is_local) lea_eax_ebp(node->var->offset);
         else if (opt_pic && (node->var->is_static || node->var->is_rodata)) {
             E("8D 83"); sym_ref(node->var->name, R_386_GOTOFF);   /* lea eax, [ebx + имя@GOTOFF] */
@@ -816,6 +832,16 @@ static void gen_expr(Node *node) {
     }
     case ND_FUNCALL: gen_funcall(node); return;
     case ND_SYSCALL: gen_syscall(node); return;
+    case ND_XCHG: {
+        /* xchg с памятью на x86 неявно атомарен. Старое значение остаётся в eax. */
+        gen_expr(node->rhs);
+        push_eax();
+        gen_expr(node->lhs);
+        E("89 C1");                                             /* mov ecx, eax */
+        E("58"); depth -= 4;                                    /* pop eax */
+        E("87 01");                                             /* xchg eax, [ecx] */
+        return;
+    }
     default: break;
     }
 

@@ -1,7 +1,7 @@
 #ifndef SYS_SELECT_H
 #define SYS_SELECT_H
 #include "sys/time.h"
-#define FD_SETSIZE 64
+#define FD_SETSIZE 256
 typedef struct { unsigned bits[FD_SETSIZE / 32]; } fd_set;
 #define FD_ZERO(s) do { unsigned _i; for (_i = 0; _i < sizeof(fd_set) / sizeof(unsigned); _i++) (s)->bits[_i] = 0; } while (0)
 #define FD_SET(n, s) ((s)->bits[(n) / 32] |= 1u << ((n) % 32))

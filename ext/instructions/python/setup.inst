@@ -1,0 +1,18 @@
+# CPython 3.15.2. configure не запускаем: pyconfig.h и Makefile уже готовы.
+name python
+descr CPython 3.15.2, pip and virtualenv
+workdir /tmp/ext/python
+fetch https://www.python.org/ftp/python/3.15.2/Python-3.15.2.tgz Python-3.15.2.tgz
+fetch https://files.pythonhosted.org/packages/f3/40/b1c265d4b2b62b58576588510fc4d1fe60a86319c8de99fd8e9fec617d2c/virtualenv-20.31.2-py3-none-any.whl virtualenv-20.31.2-py3-none-any.whl
+fetch https://files.pythonhosted.org/packages/42/14/42b2651a2f46b022ccd948bca9f2d5af0fd8929c4eec235b8d6d844fbe67/filelock-3.19.1-py3-none-any.whl filelock-3.19.1-py3-none-any.whl
+fetch https://files.pythonhosted.org/packages/c1/2b/238f02a4927fa2e27aa995371d240a468b52e42eae44a678434aff736b38/distlib-0.4.4-py2.py3-none-any.whl distlib-0.4.4-py2.py3-none-any.whl
+fetch https://files.pythonhosted.org/packages/7c/ae/ecbbbfd0e4343a6a521d49b3c8656fb4643dee2a4f6eaf941cf3280391a8/platformdirs-4.14.5-py3-none-any.whl platformdirs-4.14.5-py3-none-any.whl
+tar xzf Python-3.15.2.tgz
+workdir /tmp/ext/python/Python-3.15.2
+copy pyconfig.h pyconfig.h
+copy Makefile Makefile
+copy config.c Modules/config.c
+copy pyinstall.c pyinstall.c
+copy _sysconfigdata__unknown_.py Lib/_sysconfigdata__unknown_.py
+copy pyexpat_stub.c Modules/pyexpat.c
+make -j1

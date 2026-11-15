@@ -17,4 +17,6 @@ wget https://self-signed.badssl.com/
 Второй адрес останавливается с ошибкой сертификата. С `-k` файл всё равно
 скачивается.
 
-Тот же PEM, `/etc/ssl/cert.pem`, читает Git из [ext](ext.md) при установке.
+Тот же PEM, `/etc/ssl/cert.pem`, читают порты, которым нужен TLS:
+[CPython](python.md) связывает `_ssl` с `/lib/libssl.so` и `/lib/libcrypto.so`,
+а Git из [ext](ext.md) берёт этот список корней при установке.

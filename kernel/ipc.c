@@ -86,7 +86,7 @@ int msg_recv(void *msg,int timeout_ms){struct task *p=task_process(task_current(
     for(;;){u32 flags=irq_save();if(m->count){memcpy(msg,m->msgs[m->head],MSG_SIZE);m->head=(m->head+1)%MBOX_LEN;m->count--;irq_restore(flags);return 0;}
         if(m->input_pending){m->input_pending=false;irq_restore(flags);return -EAGAIN;}if(!timeout_ms){irq_restore(flags);return -EAGAIN;}
         if(timeout_ms>0){i32 left=(i32)(deadline-timer_ticks());if(left<=0){irq_restore(flags);return -ETIMEDOUT;}task_wait_timeout(m,left);}else task_wait(m);
-        irq_restore(flags);if(task_current()->kill_pending)return -EINTR;
+        irq_restore(flags);if(task_intr(task_current()))return -EINTR;
     }
 }
 void msg_free(struct task *t){if(t->mbox)grants_free(&t->mbox->grants);kfree(t->mbox);t->mbox=NULL;}

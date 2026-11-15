@@ -293,8 +293,10 @@ struct regs *schedule(struct regs *r) {
 
 struct regs *sched_tick(struct regs *r) {
     if (!current) return r;
-    if ((r->cs & 3) && current->kill_pending && !current->in_syscall)
-        make_zombie(current, current->pending_code);
+    if ((r->cs & 3) && !current->in_syscall) {
+        signal_deliver(current, r);
+        if (current->kill_pending) make_zombie(current, current->pending_code);
+    }
     current->cpu_ticks++;
     cpu_states[smp_cpu()].total_ticks++;
     if (current->cpu_idle) cpu_states[smp_cpu()].idle_ticks++;
@@ -593,6 +595,95 @@ int task_kill_group(u32 pgid) {
     return n;
 }
 
+/* Пойманный сигнал будит задачу и доставляется на границе ядра.
+ * Без обработчика это прежний kill. SIG_IGN ничего не делает. */
+int task_raise_group(u32 pgid, int sig) {
+    if (!pgid || sig <= 0 || sig >= 32) return 0;
+    int n = 0;
+    for (int i = 0; i < MAX_TASKS; i++) {
+        struct task *t = tasks[i];
+        if (!t || t->pgid != pgid || t->state == TASK_ZOMBIE) continue;
+        struct task *p = task_process(t);
+        u32 h = p->sig_handler[sig];
+        if (h == 1) { n++; continue; }
+        if (h > 1 && p->sig_tramp) {
+            if (!t->pending_sig) t->pending_sig = sig;
+            if (t->state == TASK_SLEEPING || t->state == TASK_BLOCKED) {
+                t->state = TASK_READY;
+                smp_wake(t->cpu);
+            }
+            n++;
+            continue;
+        }
+        if (task_kill(t->id) == 0) n++;
+    }
+    return n;
+}
+
+static bool user_write_ok(struct task *t, u32 addr, u32 len) {
+    if (!len) return true;
+    if (addr < USER_BASE || len > USER_TOP - addr) return false;
+    for (u32 p = addr & ~(PAGE_SIZE - 1); p < addr + len; p += PAGE_SIZE) {
+        u32 flags;
+        if (!vmm_lookup(t->page_dir, p, NULL, &flags) || !(flags & PG_USER)) return false;
+        if (!(flags & (PG_WRITE | PG_COW))) return false;
+        if ((flags & PG_COW) && !vmm_cow_fault(p)) return false;
+    }
+    return true;
+}
+
+void signal_deliver(struct task *t, struct regs *r) {
+    struct task *p;
+    int sig;
+    u32 h, sp;
+    if (!t || !r || t->handling_sig || !t->pending_sig || !(r->cs & 3)) return;
+    p = task_process(t);
+    sig = t->pending_sig;
+    h = (sig > 0 && sig < 32) ? p->sig_handler[sig] : 0;
+    if (h <= 1 || !p->sig_tramp) {
+        t->pending_sig = 0;
+        if (h != 1) { t->kill_pending = true; t->pending_code = 128 + sig; }
+        return;
+    }
+    sp = r->useresp;
+    if (sp < USER_BASE + 8 || !user_write_ok(t, sp - 8, 8)) {
+        t->pending_sig = 0;
+        t->kill_pending = true;
+        t->pending_code = 128 + sig;
+        return;
+    }
+    sp -= 8;
+    ((u32 *)sp)[0] = p->sig_tramp;
+    ((u32 *)sp)[1] = (u32)sig;
+    t->sig_eip = r->eip;
+    t->sig_esp = r->useresp;
+    t->sig_eax = r->eax;
+    t->sig_ebx = r->ebx;
+    t->sig_ecx = r->ecx;
+    t->sig_edx = r->edx;
+    t->sig_esi = r->esi;
+    t->sig_edi = r->edi;
+    t->sig_ebp = r->ebp;
+    t->handling_sig = true;
+    t->pending_sig = 0;
+    r->useresp = sp;
+    r->eip = h;
+}
+
+void signal_sigreturn(struct task *t, struct regs *r) {
+    if (!t || !r || !t->handling_sig) return;
+    r->eip = t->sig_eip;
+    r->useresp = t->sig_esp;
+    r->eax = t->sig_eax;
+    r->ebx = t->sig_ebx;
+    r->ecx = t->sig_ecx;
+    r->edx = t->sig_edx;
+    r->esi = t->sig_esi;
+    r->edi = t->sig_edi;
+    r->ebp = t->sig_ebp;
+    t->handling_sig = false;
+}
+
 /* waitpid() для процессов: ждать своего ребёнка pid (или любого, если pid = -1).
  * -> id завершившегося, 0 (nohang и все ещё живы), -1 (детей нет), -2 (прервано) */
 int task_wait_child(int pid, int *code, bool nohang) {
@@ -615,7 +706,7 @@ int task_wait_child(int pid, int *code, bool nohang) {
         if (!have) { irq_restore(f); return -1; }
         if (nohang) { irq_restore(f); return 0; }
         task_wait(task_process(current));                  /* make_zombie ребёнка разбудит нас */
-        if (current->kill_pending) { irq_restore(f); return -2; }
+        if (task_intr(current)) { irq_restore(f); return -2; }
     }
 }
 
@@ -645,7 +736,7 @@ void task_sleep_ticks(u32 ticks) {
     }
     if (!ticks) { task_yield(); return; }
     u32 f = irq_save();
-    if (current->user && current->kill_pending) { irq_restore(f); return; }
+    if (current->user && task_intr(current)) { irq_restore(f); return; }
     current->wake_tick = timer_ticks() + ticks;
     scheduler_block(current);
     current->state = TASK_SLEEPING;

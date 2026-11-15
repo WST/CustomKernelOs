@@ -1170,7 +1170,7 @@ Makefile
 | Модули JavaScript | [docs/modules.md](docs/modules.md) |
 
 Порты чужих программ — отдельным списком, в [docs/ext.md](docs/ext.md):
-[Lua](docs/lua.md), [OpenSSH](docs/openssh.md),
+[Lua](docs/lua.md), [CPython](docs/python.md), [OpenSSH](docs/openssh.md),
 [GNU nano](docs/nano.md), Bash, Git и sbase grep. Автоустановка в живой образ —
 [docs/ext-autoinstall.md](docs/ext-autoinstall.md). libcurl и OpenSSL для
 `wget` и `download` — [docs/libcurl.md](docs/libcurl.md).

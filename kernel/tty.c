@@ -96,7 +96,7 @@ static void flush_line(struct tty *t) {
 
 static void master_byte(struct tty *t, u8 c) {
     if (c == 3 && !(t->mode & TTY_NOSIG)) {                     /* Ctrl+C */
-        if (t->fg && task_kill_group(t->fg)) {
+        if (t->fg && task_raise_group(t->fg, 2)) {
             t->line_len = 0;
             to_screen(t, "^C\n", 3);
             return;
@@ -158,7 +158,7 @@ static int master_read(struct tty *t, u8 *buf, u32 len) {
     while (t->out.count == 0) {
         if (t->slaves == 0) { irq_restore(f); return 0; }        /* все программы ушли */
         task_wait(&t->out);
-        if (task_current()->kill_pending) { irq_restore(f); return -EINTR; }
+        if (task_intr(task_current())) { irq_restore(f); return -EINTR; }
     }
     int n = ring_get(&t->out, buf, len);
     task_wakeup(&t->out);                                       /* место освободилось — пишущий в slave проснётся */
@@ -177,7 +177,7 @@ static int slave_read(struct tty *t, u8 *buf, u32 len) {
         if (t->eof) { t->eof = false; irq_restore(f); return 0; }
         if (t->masters == 0 || (t->mode & TTY_NONBLOCK)) { irq_restore(f); return 0; }
         task_wait(&t->in);
-        if (task_current()->kill_pending) { irq_restore(f); return -EINTR; }
+        if (task_intr(task_current())) { irq_restore(f); return -EINTR; }
     }
     int n;
     if (t->mode & TTY_RAW) n = ring_get(&t->in, buf, len);
@@ -209,7 +209,7 @@ static int slave_write(struct tty *t, const u8 *buf, u32 len) {
         task_wakeup(&t->out);
         if (done < len && (!k || t->out.count==TTY_BUF)) {
             task_wait(&t->out);                                 /* ждём, пока окно прочитает */
-            if (task_current()->kill_pending) { irq_restore(f); return done ? (int)done : -EINTR; }
+            if (task_intr(task_current())) { irq_restore(f); return done ? (int)done : -EINTR; }
         }
     }
     irq_restore(f);

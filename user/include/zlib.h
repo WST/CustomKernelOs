@@ -45,6 +45,7 @@ typedef struct z_stream_s {
 } z_stream;
 
 typedef z_stream *z_streamp;
+typedef long z_off_t;
 
 #define Z_NO_FLUSH      0
 #define Z_PARTIAL_FLUSH 1
@@ -88,6 +89,10 @@ uLong crc32(uLong crc, const Bytef *buf, uInt len);
 uLong adler32(uLong adler, const Bytef *buf, uInt len);
 uLong crc32_z(uLong crc, const Bytef *buf, uLong len);
 uLong adler32_z(uLong adler, const Bytef *buf, uLong len);
+uLong crc32_combine(uLong crc1, uLong crc2, z_off_t len2);
+uLong adler32_combine(uLong adler1, uLong adler2, z_off_t len2);
+int deflateCopy(z_streamp dest, z_streamp source);
+int inflateCopy(z_streamp dest, z_streamp source);
 
 int deflateInit_(z_streamp strm, int level, const char *version, int stream_size);
 int deflateInit2_(z_streamp strm, int level, int method, int windowBits,
@@ -111,6 +116,8 @@ typedef struct gz_header_s {
 } gz_header;
 typedef gz_header *gz_headerp;
 int deflateSetHeader(z_streamp strm, gz_headerp head);
+int deflateSetDictionary(z_streamp strm, const Bytef *dictionary, uInt dictLength);
+int inflateSetDictionary(z_streamp strm, const Bytef *dictionary, uInt dictLength);
 int deflateReset(z_streamp strm);
 uLong deflateBound(z_streamp strm, uLong sourceLen);
 

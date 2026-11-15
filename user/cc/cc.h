@@ -180,6 +180,7 @@ struct Obj {
     char *init_data;
     struct Reloc *rel;
     bool  is_rodata;            /* строковый литерал */
+    bool  is_tls;               /* _Thread_local: значение в TCB, символ — только ключ */
 
     /* функция */
     Obj  *params;
@@ -213,7 +214,7 @@ typedef enum {
     ND_NOT, ND_BITNOT, ND_LOGAND, ND_LOGOR,
     ND_RETURN, ND_IF, ND_FOR, ND_DO, ND_SWITCH, ND_CASE, ND_BLOCK,
     ND_GOTO, ND_LABEL, ND_FUNCALL, ND_EXPR_STMT, ND_STMT_EXPR,
-    ND_VAR, ND_NUM, ND_CAST, ND_MEMZERO, ND_SYSCALL
+    ND_VAR, ND_NUM, ND_CAST, ND_MEMZERO, ND_SYSCALL, ND_XCHG
 } NodeKind;
 
 struct Node {

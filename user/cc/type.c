@@ -203,6 +203,7 @@ void add_type(Node *node) {
         node->ty = ty_void;
         return;
     case ND_SYSCALL:
+    case ND_XCHG:
         node->ty = ty_int;
         return;
     default:

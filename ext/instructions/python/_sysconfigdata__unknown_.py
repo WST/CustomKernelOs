@@ -1,0 +1,22 @@
+# Минимальные переменные сборки: configure не запускался, Makefile в /ext не кладётся.
+build_time_vars = {
+    "prefix": "/ext",
+    "exec_prefix": "/ext",
+    "BINDIR": "/ext/bin",
+    "LIBDIR": "/ext/lib",
+    "INCLUDEPY": "/ext/include/python3.15",
+    "LIBDEST": "/ext/lib/python3.15",
+    "BINLIBDEST": "/ext/lib/python3.15",
+    "VERSION": "3.15",
+    "LDVERSION": "3.15",
+    "SOABI": "cpython-315",
+    "EXT_SUFFIX": ".so",
+    "SHLIB_SUFFIX": ".so",
+    "ABIFLAGS": "",
+    "Py_DEBUG": 0,
+    "Py_GIL_DISABLED": 0,
+    "SIZEOF_VOID_P": 4,
+    "platlibdir": "lib",
+    "CC": "cc",
+    "srcdir": "/ext/lib/python3.15",
+}
