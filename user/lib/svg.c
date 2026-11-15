@@ -2,6 +2,7 @@
 #include "gfx.h"
 #include "js.h"
 #include "svg.h"
+#include "../include/libxml/parser.h"
 
 #define SVG_PI 3.141592653589793
 struct svg_matrix { double a,b,c,d,e,f; };
@@ -23,27 +24,14 @@ static int svg_num(const char **p,double *out) {
     v*=sign;if(v>1000000 || v< -1000000 || js_isnan(v))return 0;
     *p=s;*out=v;return 1;
 }
-static int svg_attr(const char *tag,const char *end,const char *key,char *out,int cap) {
-    const char *p=tag;int n=strlen(key);out[0]=0;
-    while(p<end) {
-        while(p<end && !svg_space(*p))p++;
-        while(p<end && svg_space(*p))p++;
-        const char *name=p;while(p<end && !svg_space(*p) && *p!='=' && *p!='>')p++;
-        int length=p-name;while(p<end && svg_space(*p))p++;
-        if(p==end || *p!='=')continue;
-        p++;while(p<end && svg_space(*p))p++;
-        char quote=p<end && (*p=='\'' || *p=='"')?*p++:0;
-        const char *value=p;while(p<end && (quote?*p!=quote:!svg_space(*p) && *p!='>'))p++;
-        if(length==n && !strncmp(name,key,n)) {
-            int size=p-value;if(size>=cap)size=cap-1;memcpy(out,value,size);out[size]=0;return 1;
-        }
-        if(quote && p<end)p++;
-    }
-    return 0;
+static int svg_attr(xmlNode *node,const char *key,char *out,int cap) {
+    xmlChar *v=xmlGetProp(node,(const xmlChar *)key);out[0]=0;
+    if(!v)return 0;
+    int n=(int)strlen((char *)v);if(n>=cap)n=cap-1;memcpy(out,v,n);out[n]=0;xmlFree(v);return 1;
 }
-static int svg_prop(const char *tag,const char *end,const char *key,char *out,int cap) {
-    char style[1024];int found=svg_attr(tag,end,key,out,cap);
-    if(svg_attr(tag,end,"style",style,sizeof(style))) {
+static int svg_prop(xmlNode *node,const char *key,char *out,int cap) {
+    char style[1024];int found=svg_attr(node,key,out,cap);
+    if(svg_attr(node,"style",style,sizeof(style))) {
         char *p=style;int n=strlen(key);
         while(*p) {
             while(*p && (svg_space(*p)||*p==';'))p++;
@@ -57,8 +45,8 @@ static int svg_prop(const char *tag,const char *end,const char *key,char *out,in
     }
     return found;
 }
-static double svg_value(const char *tag,const char *end,const char *key,double fallback) {
-    char b[80];double v;if(svg_attr(tag,end,key,b,sizeof(b))) {const char *p=b;if(svg_num(&p,&v))return v;}return fallback;
+static double svg_value(xmlNode *node,const char *key,double fallback) {
+    char b[80];double v;if(svg_attr(node,key,b,sizeof(b))) {const char *p=b;if(svg_num(&p,&v))return v;}return fallback;
 }
 static int svg_hex(int c) { return c>='0'&&c<='9'?c-'0':c>='a'&&c<='f'?c-'a'+10:c>='A'&&c<='F'?c-'A'+10:-1; }
 static int svg_color(const char *s,int current) {
@@ -183,77 +171,75 @@ static void svg_paint(gfx_path *p,struct svg_style st) {
     if(st.fill>=0)path_fill(p,st.fill,(int)(255*st.opacity*st.fill_alpha));
     if(svg_stroke_outline)path_fill(svg_stroke_outline,st.stroke,(int)(255*st.opacity*st.stroke_alpha));
 }
-static void svg_render(char *xml,struct svg_style initial) {
-    struct svg_style stack[64];int sp=0,skip=0;stack[0]=initial;const char *p=xml;
-    for(int shapes=0;*p && shapes<8192;shapes++) {
-        p=strchr(p,'<');if(!p)break;const char *tag=++p;char quote=0;
-        while(*p && (quote || *p!='>')) {if(quote) {if(*p==quote)quote=0;}else if(*p=='\''||*p=='"')quote=*p;p++;}
-        if(!*p)break;
-        const char *end=p++;
-        if(*tag=='!'||*tag=='?')continue;
-        if(*tag=='/') {if(sp>0)sp--;if(skip>0)skip--;continue;}
-        char name[24];int n=0;while(tag+n<end && !svg_space(tag[n]) && tag[n]!='/' && n<23){name[n]=tag[n];n++;}name[n]=0;
-        int self=end>tag && end[-1]=='/';struct svg_style st=stack[sp];char b[4096];
-        if(skip || !strcmp(name,"defs") || !strcmp(name,"clipPath") || !strcmp(name,"mask") || !strcmp(name,"symbol")) {
-            if(!self) {skip++;if(sp==63)return;stack[++sp]=st;}
-            continue;
-        }
-        if(svg_prop(tag,end,"color",b,sizeof(b)))st.color=svg_color(b,st.color);
-        if(svg_prop(tag,end,"fill",b,sizeof(b)))st.fill=svg_color(b,st.color);
-        if(svg_prop(tag,end,"stroke",b,sizeof(b)))st.stroke=svg_color(b,st.color);
-        if(svg_prop(tag,end,"opacity",b,sizeof(b))) {const char *q=b;double v;if(svg_num(&q,&v))st.opacity*=v<0?0:v>1?1:v;}
-        if(svg_prop(tag,end,"fill-opacity",b,sizeof(b))) {const char *q=b;double v;if(svg_num(&q,&v))st.fill_alpha=v<0?0:v>1?1:v;}
-        if(svg_prop(tag,end,"stroke-opacity",b,sizeof(b))) {const char *q=b;double v;if(svg_num(&q,&v))st.stroke_alpha=v<0?0:v>1?1:v;}
-        if(svg_prop(tag,end,"stroke-width",b,sizeof(b))) {const char *q=b;svg_num(&q,&st.stroke_width);}
-        if(svg_attr(tag,end,"transform",b,sizeof(b)))svg_transform(&st.m,b);
-        if(!skip) {
-            gfx_path path,outline;path_begin(&path,0,0,1,1);path_begin(&outline,0,0,1,1);
-            svg_stroke_thickness=st.stroke_width*js_sqrt(st.m.a*st.m.a+st.m.b*st.m.b);
+static void svg_style_of(xmlNode *node,struct svg_style *st) {
+    char b[4096];
+    if(svg_prop(node,"color",b,sizeof(b)))st->color=svg_color(b,st->color);
+    if(svg_prop(node,"fill",b,sizeof(b)))st->fill=svg_color(b,st->color);
+    if(svg_prop(node,"stroke",b,sizeof(b)))st->stroke=svg_color(b,st->color);
+    if(svg_prop(node,"opacity",b,sizeof(b))) {const char *q=b;double v;if(svg_num(&q,&v))st->opacity*=v<0?0:v>1?1:v;}
+    if(svg_prop(node,"fill-opacity",b,sizeof(b))) {const char *q=b;double v;if(svg_num(&q,&v))st->fill_alpha=v<0?0:v>1?1:v;}
+    if(svg_prop(node,"stroke-opacity",b,sizeof(b))) {const char *q=b;double v;if(svg_num(&q,&v))st->stroke_alpha=v<0?0:v>1?1:v;}
+    if(svg_prop(node,"stroke-width",b,sizeof(b))) {const char *q=b;svg_num(&q,&st->stroke_width);}
+    if(svg_attr(node,"transform",b,sizeof(b)))svg_transform(&st->m,b);
+}
+static void svg_walk(xmlNode *node,struct svg_style st,int skip,int depth,int *shapes) {
+    if(depth>64)return;
+    for(;node && *shapes<8192;node=node->next) {
+        struct svg_style next;const char *name;int child_skip;
+        if(node->type!=XML_ELEMENT_NODE || !node->name)continue;
+        (*shapes)++;
+        name=node->name;next=st;child_skip=skip;
+        if(!strcmp(name,"defs") || !strcmp(name,"clipPath") || !strcmp(name,"mask") || !strcmp(name,"symbol")) child_skip=1;
+        svg_style_of(node,&next);
+        if(!child_skip && strcmp(name,"g") && strcmp(name,"svg") && strcmp(name,"a")) {
+            char b[4096];gfx_path path,outline;path_begin(&path,0,0,1,1);path_begin(&outline,0,0,1,1);
+            svg_stroke_thickness=next.stroke_width*js_sqrt(next.m.a*next.m.a+next.m.b*next.m.b);
             if(svg_stroke_thickness>256)svg_stroke_thickness=256;
-            svg_stroke_outline=st.stroke>=0 && st.stroke_width>0?&outline:NULL;
+            svg_stroke_outline=next.stroke>=0 && next.stroke_width>0?&outline:NULL;
             if(!strcmp(name,"path")) {
-                /* Path data can be much longer than an ordinary attribute. */
-                int cap=end-tag+1;char *d=malloc(cap);
-                if(d) {if(svg_attr(tag,end,"d",d,cap))svg_path(&path,st.m,d);free(d);}
+                xmlChar *d=xmlGetProp(node,(const xmlChar *)"d");
+                if(d) {svg_path(&path,next.m,(char *)d);xmlFree(d);}
             } else if(!strcmp(name,"rect")) {
-                double x=svg_value(tag,end,"x",0),y=svg_value(tag,end,"y",0),w=svg_value(tag,end,"width",0),h=svg_value(tag,end,"height",0);
-                if(w>0 && h>0) {svg_move(&path,st.m,x,y);svg_line(&path,st.m,x+w,y);svg_line(&path,st.m,x+w,y+h);svg_line(&path,st.m,x,y+h);svg_close(&path);}
+                double x=svg_value(node,"x",0),y=svg_value(node,"y",0),w=svg_value(node,"width",0),h=svg_value(node,"height",0);
+                if(w>0 && h>0) {svg_move(&path,next.m,x,y);svg_line(&path,next.m,x+w,y);svg_line(&path,next.m,x+w,y+h);svg_line(&path,next.m,x,y+h);svg_close(&path);}
             } else if(!strcmp(name,"circle") || !strcmp(name,"ellipse")) {
-                double x=svg_value(tag,end,"cx",0),y=svg_value(tag,end,"cy",0),rx=svg_value(tag,end,"rx",svg_value(tag,end,"r",0)),ry=svg_value(tag,end,"ry",rx);
-                if(rx>0 && ry>0) {for(int i=0;i<=64;i++){double a=i*SVG_PI/32;if(!i)svg_move(&path,st.m,x+rx,y);else svg_line(&path,st.m,x+rx*js_cos(a),y+ry*js_sin(a));}svg_close(&path);}
+                double x=svg_value(node,"cx",0),y=svg_value(node,"cy",0),rx=svg_value(node,"rx",svg_value(node,"r",0)),ry=svg_value(node,"ry",rx);
+                if(rx>0 && ry>0) {for(int i=0;i<=64;i++){double a=i*SVG_PI/32;if(!i)svg_move(&path,next.m,x+rx,y);else svg_line(&path,next.m,x+rx*js_cos(a),y+ry*js_sin(a));}svg_close(&path);}
             } else if(!strcmp(name,"line")) {
-                svg_move(&path,st.m,svg_value(tag,end,"x1",0),svg_value(tag,end,"y1",0));svg_line(&path,st.m,svg_value(tag,end,"x2",0),svg_value(tag,end,"y2",0));st.fill=-1;
+                svg_move(&path,next.m,svg_value(node,"x1",0),svg_value(node,"y1",0));svg_line(&path,next.m,svg_value(node,"x2",0),svg_value(node,"y2",0));next.fill=-1;
             } else if(!strcmp(name,"polyline") || !strcmp(name,"polygon")) {
-                if(svg_attr(tag,end,"points",b,sizeof(b))) {const char *q=b;double x,y;int first=1;while(svg_num(&q,&x)&&svg_num(&q,&y)){if(first)svg_move(&path,st.m,x,y);else svg_line(&path,st.m,x,y);first=0;}if(!strcmp(name,"polygon"))svg_close(&path);}
+                if(svg_attr(node,"points",b,sizeof(b))) {const char *q=b;double x,y;int first=1;while(svg_num(&q,&x)&&svg_num(&q,&y)){if(first)svg_move(&path,next.m,x,y);else svg_line(&path,next.m,x,y);first=0;}if(!strcmp(name,"polygon"))svg_close(&path);}
             }
-            svg_paint(&path,st);svg_stroke_outline=NULL;path_free(&path);path_free(&outline);
+            svg_paint(&path,next);svg_stroke_outline=NULL;path_free(&path);path_free(&outline);
         }
-        if(!self) {if(sp==63)return;stack[++sp]=st;}
+        if(node->children)svg_walk(node->children,next,child_skip,depth+1,shapes);
     }
 }
 int svg_decode(const unsigned char *data,int len,img *out,int max_side) {
+    xmlDocPtr doc;xmlNodePtr root;int shapes=0;
     if(len<5 || len>2*1024*1024)return -1;
-    char *xml=malloc(len+1);if(!xml)return -2;memcpy(xml,data,len);xml[len]=0;
-    char *tag=strstr(xml,"<svg");if(!tag || tag-xml>1024) {free(xml);return -1;}
-    char *end=strchr(tag,'>');if(!end) {free(xml);return -1;}
+    doc=xmlReadMemory((const char *)data,len,NULL,NULL,0);
+    root=xmlDocGetRootElement(doc);
+    if(!root || !root->name || strcmp(root->name,"svg")) {xmlFreeDoc(doc);return -1;}
     double vb[4]={0,0,300,150};char b[160];
-    int has_viewbox=svg_attr(tag+1,end,"viewBox",b,sizeof(b)) || svg_attr(tag+1,end,"viewbox",b,sizeof(b));
-    if(has_viewbox) {const char *p=b;for(int i=0;i<4;i++)if(!svg_num(&p,&vb[i])){free(xml);return -1;}}
-    double w=svg_value(tag+1,end,"width",vb[2]),h=svg_value(tag+1,end,"height",vb[3]);
+    int has_viewbox=svg_attr(root,"viewBox",b,sizeof(b)) || svg_attr(root,"viewbox",b,sizeof(b));
+    if(has_viewbox) {const char *p=b;for(int i=0;i<4;i++)if(!svg_num(&p,&vb[i])){xmlFreeDoc(doc);return -1;}}
+    double w=svg_value(root,"width",vb[2]),h=svg_value(root,"height",vb[3]);
     if(!has_viewbox){vb[2]=w;vb[3]=h;}
-    if(w<=0 || h<=0 || vb[2]<=0 || vb[3]<=0) {free(xml);return -1;}
+    if(w<=0 || h<=0 || vb[2]<=0 || vb[3]<=0) {xmlFreeDoc(doc);return -1;}
     if(max_side<1 || max_side>2048)max_side=2048;
     double limit=w>h?w:h;if(limit>max_side) {w=w*max_side/limit;h=h*max_side/limit;}
     int iw=(int)(w+.5),ih=(int)(h+.5);if(iw<1)iw=1;if(ih<1)ih=1;
     double scale=w/vb[2];if(h/vb[3]<scale)scale=h/vb[3];
     struct svg_style st={{scale,0,0,scale,(w-vb[2]*scale)/2-vb[0]*scale,(h-vb[3]*scale)/2-vb[1]*scale},0,-1,0,1,1,1,1};
+    svg_style_of(root,&st);
     struct gfx_canvas cv;memset(&cv,0,sizeof(cv));
     cv.black=calloc(iw*ih,4);cv.white=malloc(iw*ih*4);
-    if(!cv.black || !cv.white) {free(cv.black);free(cv.white);free(xml);return -2;}
+    if(!cv.black || !cv.white) {free(cv.black);free(cv.white);xmlFreeDoc(doc);return -2;}
     cv.w=iw;cv.h=ih;cv.save_buf=gfx_buf;cv.save_w=gfx_w;cv.save_h=gfx_h;
     cv.saved_clip=gfx_clip_get(&cv.cx,&cv.cy,&cv.cw,&cv.ch);gfx_no_clip();
     for(int i=0;i<iw*ih;i++)cv.white[i]=0xffffff;
-    for(int pass=0;pass<2;pass++) {gfx_buf=pass?cv.white:cv.black;gfx_w=iw;gfx_h=ih;svg_render(xml,st);}
-    unsigned *px=gfx_canvas_end(&cv);free(xml);if(!px)return -2;
+    for(int pass=0;pass<2;pass++) {shapes=0;gfx_buf=pass?cv.white:cv.black;gfx_w=iw;gfx_h=ih;svg_walk(root->children,st,0,0,&shapes);}
+    unsigned *px=gfx_canvas_end(&cv);xmlFreeDoc(doc);if(!px)return -2;
     out->w=iw;out->h=ih;out->px=px;out->has_alpha=1;return 0;
 }

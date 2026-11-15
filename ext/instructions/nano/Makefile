@@ -2,8 +2,8 @@ CC = cc -DHAVE_CONFIG_H -I. -Imyos-include -Isrc
 
 all: /ext/bin/nano
 
-/ext/bin/nano: browser.o chars.o color.o cut.o files.o global.o help.o history.o move.o nano.o prompt.o rcfile.o search.o text.o utils.o winio.o myos-posix.o myos-curses.o
-	$(CC) browser.o chars.o color.o cut.o files.o global.o help.o history.o move.o nano.o prompt.o rcfile.o search.o text.o utils.o winio.o myos-posix.o myos-curses.o -o /ext/bin/nano
+/ext/bin/nano: browser.o chars.o color.o cut.o files.o global.o help.o history.o move.o nano.o prompt.o rcfile.o search.o text.o utils.o winio.o myos-posix.o
+	$(CC) browser.o chars.o color.o cut.o files.o global.o help.o history.o move.o nano.o prompt.o rcfile.o search.o text.o utils.o winio.o myos-posix.o -lncurses -o /ext/bin/nano
 	cp COPYING /ext/share/nano/COPYING
 
 browser.o: src/browser.c config.h myos-posix.h
@@ -56,6 +56,3 @@ winio.o: src/winio.c config.h myos-posix.h
 
 myos-posix.o: myos-posix.c config.h myos-posix.h
 	$(CC) -c myos-posix.c -o myos-posix.o
-
-myos-curses.o: myos-curses.c config.h myos-posix.h
-	$(CC) -c myos-curses.c -o myos-curses.o

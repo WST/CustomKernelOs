@@ -339,7 +339,7 @@ sh ──pipe()──> [fd 3: чтение | fd 4: запись]  (канал: �
 `top`, `htop`, `kill`, `mkdir`, `rm`, `sleep`, `yes`, `tar`, `gzip`, `ar`,
 `clear`, `edit`, `snake`, а также `hello`, `guess`, `count`, `primes`, `note`,
 `crash`. `htop` — свой монитор под статистику ядра, клавиши —
-в [docs/htop.md](docs/htop.md). `tar` распаковывает `.tar` и `.tar.gz`.
+в [docs/htop.md](docs/htop.md). `tar` распаковывает `.tar`, `.tar.gz`, `.tar.bz2` и `.tar.xz`.
 
 ## Оболочка
 
@@ -1069,7 +1069,7 @@ make browsertest  # браузер на Linux под AddressSanitizer
 make imgtest      # PNG, GIF, JPEG и BMP
 make x509test     # цепочки сертификатов
 make gfxtest      # пробная картинка контуров и шрифтов
-make tartest      # tar и tar.gz
+make tartest      # tar, tar.gz, tar.bz2 и tar.xz
 make cleandisk    # удалить disk.img; следующий запуск создаст том заново
 ```
 

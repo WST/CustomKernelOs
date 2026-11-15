@@ -21,13 +21,14 @@ def main():
     target=BUILD/'sysroot';(target/'lib').mkdir(parents=True,exist_ok=True)
     shutil.copytree(ROOT/'build/ccroot/include',target/'include',dirs_exist_ok=True)
     shutil.copyfile(ROOT/'build/mlib/libc.a',target/'lib/libc.a')
+    shutil.copyfile(ROOT/'build/mlib/libncurses.a',target/'lib/libncurses.a')
     cc=[str(ROOT/'build/cc-host'),'-B',str(target),'-DHAVE_CONFIG_H','-I.','-Imyos-include','-Isrc']
     objects=[]
-    for name in 'browser chars color cut files global help history move nano prompt rcfile search text utils winio myos-posix myos-curses'.split():
+    for name in 'browser chars color cut files global help history move nano prompt rcfile search text utils winio myos-posix'.split():
         src=name+'.c' if name.startswith('myos-') else 'src/'+name+'.c';out=name+'.o';objects.append(out)
         result=subprocess.run(cc+['-c',src,'-o',out],cwd=source,capture_output=True,text=True)
         if result.returncode:raise SystemExit(name+':\n'+result.stdout+result.stderr)
-    result=subprocess.run(cc+objects+['-o',str(BUILD/'nano')],cwd=source,capture_output=True,text=True)
+    result=subprocess.run(cc+objects+['-lncurses','-o',str(BUILD/'nano')],cwd=source,capture_output=True,text=True)
     if result.returncode:raise SystemExit(result.stdout+result.stderr)
-    print('PASS: GNU nano 9.3 compiled and linked by MyOS cc (18 translation units)')
+    print('PASS: GNU nano 9.3 compiled and linked by MyOS cc against libncurses')
 if __name__=='__main__':main()

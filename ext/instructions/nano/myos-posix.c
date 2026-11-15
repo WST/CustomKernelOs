@@ -22,7 +22,9 @@ static int raw(int number,int a,int b,int c){
 static int result(int n){if(n<0){errno=-n;return -1;}return n;}
 static int ctl(int op,int fd,int *values){return result(raw(SYS_SSHCTL,op,fd,(int)values));}
 static struct sigaction handlers[NSIG];
-int nano_sigaction(int sig,const struct sigaction *in,struct sigaction *old){if(sig<=0||sig>=NSIG){errno=EINVAL;return -1;}if(old)*old=handlers[sig];if(in)handlers[sig]=*in;return 0;}
+void nano_signal_resize(void);
+void ncurses_set_resize_hook(void (*fn)(void));
+int nano_sigaction(int sig,const struct sigaction *in,struct sigaction *old){if(sig<=0||sig>=NSIG){errno=EINVAL;return -1;}if(old)*old=handlers[sig];if(in){handlers[sig]=*in;if(sig==SIGWINCH)ncurses_set_resize_hook(nano_signal_resize);}return 0;}
 int sigemptyset(sigset_t *s){*s=0;return 0;}
 int sigfillset(sigset_t *s){*s=-1;return 0;}
 int sigaddset(sigset_t *s,int n){if(n>0&&n<32)*s|=1u<<n;return 0;}
