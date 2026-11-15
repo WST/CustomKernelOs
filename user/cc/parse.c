@@ -32,7 +32,7 @@ typedef struct Scope {
 } Scope;
 
 typedef struct {
-    bool is_typedef, is_static, is_extern, is_inline;
+    bool is_typedef, is_static, is_extern, is_inline, is_tls;
     int  align;
 } VarAttr;
 
@@ -302,11 +302,13 @@ static Type *declspec(Token **rest, Token *tok, VarAttr *attr) {
 
     while (is_typename(tok)) {
         if (equal(tok, "typedef") || equal(tok, "static") || equal(tok, "extern") ||
-            equal(tok, "inline") || equal(tok, "__inline") || equal(tok, "_Noreturn")) {
+            equal(tok, "inline") || equal(tok, "__inline") || equal(tok, "_Noreturn") ||
+            equal(tok, "_Thread_local")) {
             if (!attr) error_tok(tok, "storage class specifier is not allowed in this context");
             if (equal(tok, "typedef")) attr->is_typedef = true;
             else if (equal(tok, "static")) attr->is_static = true;
             else if (equal(tok, "extern")) attr->is_extern = true;
+            else if (equal(tok, "_Thread_local")) attr->is_tls = true;
             else if (!equal(tok, "_Noreturn")) attr->is_inline = true;
             tok = tok->next;
             continue;
@@ -1108,16 +1110,17 @@ static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf
     }
     if (init->expr->kind == ND_NUM) { write_buf(buf + offset, init->expr->ival, ty->size); return cur; }
     char **label = NULL;
-    int val = (int)eval2(init->expr, &label);
+    long long val = eval2(init->expr, &label);
     if (!label) {
-        unsigned long long wide = (unsigned long long)(long long)val;
-        write_buf(buf + offset, wide, ty->size);
+        /* Выражение вроде LLONG_MAX / 1000 не умещается в int. */
+        write_buf(buf + offset, (unsigned long long)val, ty->size);
         return cur;
     }
+    int addend = (int)val;
     Reloc *rel = xcalloc(sizeof(Reloc));
     rel->offset = offset;
     rel->label = *label;
-    rel->addend = val;
+    rel->addend = addend;
     cur->next = rel;
     return cur->next;
 }
@@ -1138,6 +1141,7 @@ static bool is_typename(Token *tok) {
         "void", "_Bool", "char", "short", "int", "long", "struct", "union", "typedef", "enum",
         "static", "extern", "signed", "unsigned", "const", "volatile", "_Atomic", "auto", "register",
         "restrict", "__restrict", "float", "double", "inline", "__inline", "_Noreturn", "__attribute__",
+        "_Thread_local",
     };
     for (int i = 0; i < (int)(sizeof(kw) / sizeof(*kw)); i++)
         if (equal(tok, kw[i])) return true;
@@ -2142,6 +2146,7 @@ static Token *global_variable(Token *tok, Type *basety, VarAttr *attr) {
             var->is_static = attr->is_static;
             if (var->is_static) var->name = static_name(name);
         }
+        if (attr->is_tls) var->is_tls = true;
         if (equal(tok, "=")) gvar_initializer(&tok, tok->next, var);
         else if (!attr->is_extern) var->is_tentative = true;
     }

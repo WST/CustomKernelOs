@@ -255,6 +255,25 @@ int *__errno_location(void) {
     if (!tcb) return &errno;
     return &tcb->errno;
 }
+
+/* _Thread_local. key — адрес символа, общий для всех потоков.
+ * У каждого потока свой слот в TCB; до установки TCB — запасной массив. */
+void *__myos_tls_addr(void *key) {
+    struct thread_tcb *tcb = thread_get_tcb();
+    static struct thread_tls_slot fallback[THREAD_TLS_SLOTS];
+    struct thread_tls_slot *slots = tcb ? tcb->tls : fallback;
+    int i;
+    for (i = 0; i < THREAD_TLS_SLOTS; i++) {
+        if (slots[i].key == key) return &slots[i].val;
+        if (!slots[i].key) {
+            slots[i].key = key;
+            slots[i].val = *(void **)key;           /* начальное значение из символа */
+            return &slots[i].val;
+        }
+    }
+    abort();
+    return key;
+}
 #define errno (*__errno_location())
 
 /* POSIX: -1 и errno. Остальные вызовы по-прежнему возвращают -код. */

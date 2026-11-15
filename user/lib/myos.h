@@ -80,10 +80,13 @@ enum {
 #define TC_COND_WAIT 4
 #define TC_COND_WAKE 5
 #define THREAD_KEYS 128
+#define THREAD_TLS_SLOTS 8
 struct thread_key { void *val; unsigned gen; };
+struct thread_tls_slot { void *key; void *val; };
 struct thread_tcb {
     int errno;
     struct thread_key key[THREAD_KEYS];
+    struct thread_tls_slot tls[THREAD_TLS_SLOTS];
 };
 /* user/ldso.c не включает этот заголовок и держит номера явно. */
 _Static_assert(SYS_HWINFO + 1 == SYS_PREAD, "SYS_PREAD follows SYS_HWINFO in kernel/syscall.h");

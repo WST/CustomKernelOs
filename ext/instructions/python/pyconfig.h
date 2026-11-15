@@ -3,7 +3,7 @@
 #define Py_BUILD_CORE 1
 #define _Py_USE_GCC_BUILTIN_ATOMICS 1
 #define _Py_ALIGNED_DEF(N, T) T
-#define thread_local
+#define thread_local _Thread_local
 #define SIZEOF_SHORT 2
 #define SIZEOF_INT 4
 #define SIZEOF_LONG 4

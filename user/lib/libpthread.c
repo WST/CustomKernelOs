@@ -5,7 +5,9 @@
 #include "time.h"
 
 #define REC_MAX 128
-#define DEFAULT_STACK 65536u
+/* Кадр интерпретатора CPython около 13 КБ. Стек 64 КБ вместе со сторожевой
+ * страницей кончается на обычном вложенном вызове Python. */
+#define DEFAULT_STACK (1u << 20)
 
 struct boot { pthread_start_t fn; void *arg; };
 struct rec { unsigned tid; void *stack; unsigned len; int live; };

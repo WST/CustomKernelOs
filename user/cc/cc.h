@@ -180,6 +180,7 @@ struct Obj {
     char *init_data;
     struct Reloc *rel;
     bool  is_rodata;            /* строковый литерал */
+    bool  is_tls;               /* _Thread_local: значение в TCB, символ — только ключ */
 
     /* функция */
     Obj  *params;

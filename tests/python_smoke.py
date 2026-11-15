@@ -63,7 +63,7 @@ def main():
         check.write_text("print(1+1)\n")
         fs("put", check, "/tmp/check.py")
         q = subprocess.Popen(
-            ["qemu-system-i386", "-m", "1024M", "-display", "none", "-no-reboot", "-nic", "none",
+            ["qemu-system-i386", "-enable-kvm", "-m", "1024M", "-display", "none", "-no-reboot", "-nic", "none",
              "-drive", "cache=unsafe,format=raw,file=" + str(B / "os.img") + ",index=0",
              "-drive", "cache=unsafe,format=raw,file=" + str(disk) + ",index=1",
              "-serial", "file:" + str(log), "-monitor", "stdio"],
@@ -84,10 +84,21 @@ def main():
             q.stdin.flush()
             time.sleep(0.06)
         def send(s, marker, timeout=180):
-            start = len(text())
+            before = len(text())
             for c in s + "\n":
                 key({"\n": "ret", " ": "spc", "/": "slash", ".": "dot", "-": "minus",
-                     "'": "apostrophe", "(": "shift-9", ")": "shift-0", "+": "shift-equal"}.get(c, c))
+                     ";": "semicolon", "'": "apostrophe", "(": "shift-9",
+                     ")": "shift-0", "+": "shift-equal"}.get(c, c))
+            start = before
+            # Приглашение root:/ и текст команды попадают в журнал раньше,
+            # чем команда заканчивается. Пароль не отображается: у него нет пробела.
+            if marker and " " in s and (marker == "root:/" or marker in s):
+                end = time.monotonic() + 30
+                while time.monotonic() < end and s not in text()[before:]:
+                    time.sleep(0.05)
+                if s not in text()[before:]:
+                    raise AssertionError("command was not echoed:\n" + text()[-800:])
+                start = len(text())
             if marker:
                 wait(marker, start, timeout)
         try:
@@ -99,8 +110,8 @@ def main():
             send("ext install python", "installed python", 7200)
             send("python3 /tmp/check.py", "2", 120)
             send("python3 -m pip --version", "pip", 120)
-            send("python3 -m venv /tmp/v", "root:/", 180)
-            send("virtualenv /tmp/e", "root:/", 180)
+            send("python3 -m venv /tmp/v", "root:/", 1200)
+            send("virtualenv /tmp/e", "root:/", 1200)
             send("ls /tmp/v/bin", "python", 60)
             send("ls /tmp/e/bin", "python", 60)
         finally:
