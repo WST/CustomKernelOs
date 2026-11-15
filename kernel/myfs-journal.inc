@@ -18,7 +18,9 @@ static u32 crc_bytes(u32 crc,const void *data,u32 size) {
     return crc;
 }
 static int disk_read(u32 b,void *p) { return block_read(states[selected].device,b,p)?FS_EIO:0; }
-static int disk_write(u32 b,const void *p) { return block_write_through(states[selected].device,b,p)?FS_EIO:0; }
+/* Секторы журнала остаются грязными до disk_barrier: сброс пишет их пачкой.
+ * Барьер по-прежнему обязателен перед commit и перед повторным использованием журнала. */
+static int disk_write(u32 b,const void *p) { return block_write(states[selected].device,b,p)?FS_EIO:0; }
 static int disk_barrier(void) { return block_flush_device(states[selected].device)?FS_EIO:0; }
 static int journal_clear(void) {
     struct journal_header h; memset(&h,0,sizeof(h));

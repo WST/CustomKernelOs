@@ -7,7 +7,9 @@
  * переменные конкретной цели и $@ $< $^ $* $+ $?. $(shell) запускает
  * $(SHELL) -c. Цель устарела, если файла нет, он старше зависимости,
  * зависимость пересобралась в этом запуске, или цель .PHONY.
- * -jN по-прежнему собирает независимые цели параллельно.
+ * -jN собирает независимые цели параллельно. Потомок сразу делает exec
+ * оболочки и не остаётся второй копией make на время рецепта: иначе COW
+ * при -j размножает кучу разбора Makefile.
  */
 #include "myos.h"
 #include "stdio.h"
@@ -17,6 +19,7 @@
 #include "dirent.h"
 #include "sys/stat.h"
 #include "sys/wait.h"
+#include "unistd.h"
 #include "build_jobs.h"
 
 #define MAX_JOBS BUILD_JOBS_MAX
@@ -1388,6 +1391,8 @@ struct build_node {
     char *name; struct rule **rs; int nrs;
     int *deps; int ndeps, depcap;
     int state, pid, built, phony, created;
+    int job_rule, job_line, job_ignore;
+    char *job_cmd, *job_shell;
     unsigned stamp; /* время файла после рецепта; 0, если файла нет */
 };
 static struct build_node *nodes; static int nnodes, nodecap;
@@ -1651,6 +1656,91 @@ static int run_rule(const char *name, struct rule *r) {
     free(up); free(ap); free(hat); free(plus); free(qm); free(bar); free(lt);
     return rc;
 }
+/* Раскрывает одну строку рецепта в родителе. 1 — есть команда, 0 — пустая
+ * строка, -1 — ошибка раскрытия. ignore ставится по префиксу '-'. */
+static int expand_recipe_line(const char *name, struct rule *r, const char *body, char **cmd, int *ignore) {
+    int nu = 0, na = 0;
+    char **up = rule_pres(r, &nu, 1);
+    char **ap = rule_pres(r, &na, 0);
+    char *hat, *plus, *qm, *lt, *bar;
+    struct buf hb, pb, qb, bb; buf_init(&hb); buf_init(&pb); buf_init(&qb); buf_init(&bb);
+    for (int i = 0; i < nu; i++) { if (i) buf_putc(&hb, ' '); buf_puts(&hb, up[i]); }
+    for (int i = 0; i < na; i++) { if (i) buf_putc(&pb, ' '); buf_puts(&pb, ap[i]); }
+    for (int i = 0; i < na; i++) if (pre_newer(name, ap[i])) {
+        if (qb.n) buf_putc(&qb, ' ');
+        buf_puts(&qb, ap[i]);
+    }
+    for (int c = 0; c < r->nch; c++) for (int i = 0; i < r->ch[c].nord; i++) {
+        if (bb.n) buf_putc(&bb, ' ');
+        buf_puts(&bb, r->ch[c].ord[i]);
+    }
+    hat = hb.s; plus = pb.s; qm = qb.s; bar = bb.s;
+    lt = nu ? xstrdup(up[0]) : xstrdup("");
+    struct actx ax = { name, lt, hat, plus, r->stem ? r->stem : "", qm, bar };
+    int nsave = 0; struct tsave *sv = apply_tspec(name, &nsave);
+    cur_auto = &ax;
+    char *exp = expand(body);
+    cur_auto = NULL;
+    restore_tspec(sv, nsave);
+    free(up); free(ap); free(hat); free(plus); free(qm); free(bar); free(lt);
+    *cmd = NULL; *ignore = 0;
+    if (!exp) return -1;
+    char *line = exp;
+    int quiet = 0;
+    while (*line == '@' || *line == '-' || *line == '+') {
+        if (*line == '@') quiet = 1;
+        else if (*line == '-') *ignore = 1;
+        line++;
+    }
+    while (*line == ' ' || *line == '\t') line++;
+    if (!*line) { free(exp); return 0; }
+    if (!silent && !quiet) { printf("%s\n", line); fflush(stdout); }
+    *cmd = xstrdup(line);
+    free(exp);
+    return *cmd ? 1 : -1;
+}
+/* 1 — запущен shell, 0 — строки кончились и цель собрана, -1 — ошибка. */
+static int launch_lines(struct build_node *node) {
+    for (;;) {
+        if (node->job_rule >= node->nrs) {
+            free(node->job_cmd); node->job_cmd = NULL;
+            free(node->job_shell); node->job_shell = NULL;
+            node->state = NODE_DONE;
+            node->built = 1;
+            node->pid = 0;
+            unsigned m = 0;
+            node->stamp = file_info(node->name, &m) ? m : 0;
+            return 0;
+        }
+        struct rule *r = node->rs[node->job_rule];
+        if (node->job_line == 0 && (!rule_stale(node->name, r, node->phony) || !r->nrec)) {
+            node->job_rule++;
+            continue;
+        }
+        if (node->job_line >= r->nrec) { node->job_rule++; node->job_line = 0; continue; }
+        const char *body = r->rec[node->job_line++];
+        char *cmd = NULL; int ignore = 0;
+        int kind = expand_recipe_line(node->name, r, body, &cmd, &ignore);
+        if (kind < 0) return -1;
+        if (!kind) continue;
+        sync_env();
+        char *sh = shell_path();
+        fflush(stdout); fflush(stderr);
+        int pid = fork();
+        if (pid < 0) { free(sh); free(cmd); fprintf(stderr, "make: fork failed (%d)\n", pid); return -1; }
+        if (!pid) {
+            char *av[4] = { "sh", "-c", cmd, NULL };
+            exec(sh, av);
+            _exit(127);
+        }
+        free(node->job_cmd); node->job_cmd = cmd;
+        free(node->job_shell); node->job_shell = sh;
+        node->job_ignore = ignore;
+        node->pid = pid;
+        node->state = NODE_RUNNING;
+        return 1;
+    }
+}
 static int node_recipes(struct build_node *node) {
     for (int i = 0; i < node->nrs; i++) {
         if (!rule_stale(node->name, node->rs[i], node->phony)) continue;
@@ -1665,14 +1755,23 @@ static int reap(int block, int *active, int *failed) {
     if (pid < 0) { fprintf(stderr, "make: waitpid failed (%d)\n", pid); return -1; }
     if (!pid) return 0;
     for (int i = 0; i < nnodes; i++) if (nodes[i].state == NODE_RUNNING && nodes[i].pid == pid) {
-        nodes[i].state = NODE_DONE;
-        nodes[i].built = status == 0;
-        if (nodes[i].built) {
-            unsigned m = 0;
-            nodes[i].stamp = file_info(nodes[i].name, &m) ? m : 0;
-        }
+        struct build_node *node = &nodes[i];
+        int code = WIFSIGNALED(status) ? 128 + WTERMSIG(status) : WEXITSTATUS(status);
         (*active)--;
-        if (status) *failed = 1;
+        if (code && !node->job_ignore) {
+            fprintf(stderr, "make: *** [%s] Error %d\n", node->name, code);
+            if (delete_on_error) unlink(node->name);
+            free(node->job_cmd); node->job_cmd = NULL;
+            free(node->job_shell); node->job_shell = NULL;
+            node->state = NODE_DONE;
+            node->built = 0;
+            node->pid = 0;
+            *failed = 1;
+            return 1;
+        }
+        int next = launch_lines(node);
+        if (next < 0) { *failed = 1; return -1; }
+        if (next > 0) (*active)++;
         return 1;
     }
     fprintf(stderr, "make: unexpected child %d\n", pid);
@@ -1720,11 +1819,9 @@ static int execute_graph(void) {
                 if (node_recipes(node) < 0) { failed = 1; break; }
                 node->built = 1; node->state = NODE_DONE; progress = 1; continue;
             }
-            fflush(stdout); fflush(stderr);
-            int pid = fork();
-            if (pid < 0) { fprintf(stderr, "make: fork failed (%d)\n", pid); failed = 1; break; }
-            if (!pid) exit(node_recipes(node) < 0 ? 1 : 0);
-            node->pid = pid; node->state = NODE_RUNNING; active++; progress = 1;
+            if (launch_lines(node) < 0) { failed = 1; break; }
+            if (node->state == NODE_RUNNING) active++;
+            progress = 1;
         }
         if (failed || !remaining) break;
         if (!progress) {

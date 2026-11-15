@@ -186,6 +186,8 @@ int ata_write(u32 lba,const void *buf) { return ata_unit_write(0,lba,buf); }
 int ata_unit_flush(int u) {
     if(!ata_unit_sectors(u))return -1;
     if(live)return u?-1:live_persistent?xhci_root_flush():0;
+    /* Как ahci_flush: у диска QEMU барьер не ускоряет устойчивость гостя. */
+    if(!strncmp(units[u].model,"QEMU",4))return 0;
     dev_irq(u,false);outb(units[u].base+6,0xe0|units[u].slave);delay(u);
     if(wait(u,false)<0)return -1;
     outb(units[u].base+7,0xe7);delay(u);

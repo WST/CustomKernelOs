@@ -28,9 +28,9 @@ void *malloc(unsigned long); void free(void *);
 #define MAX_FILE_BLKS (NDIRECT + NINDIRECT + NDINDIRECT) /* предел версии 1 */
 #define INODES_PER_BLK (BS / sizeof(struct inode))
 #define BITS_PER_BLK  (BS * 8)
-#define MAX_BLOCKS    FS_MAX_BLOCKS             /* 8 GiB; one inode per 64 KiB up to MAX_INODES */
+#define MAX_BLOCKS    FS_MAX_BLOCKS             /* 64 GiB; one inode per 16 KiB up to MAX_INODES */
 #define MIN_INODES    256u
-#define MAX_INODES    131072u                   /* an 8 GiB volume at the ratio above */
+#define MAX_INODES    2097152u                  /* 2M: a Qt-sized tree is many small files */
 
 struct superblock {
     u32 magic;
@@ -1061,7 +1061,8 @@ static int myfs_format_impl(u32 version) {
     sb.bitmap_start  = 1;
     sb.bitmap_blocks = (total + BITS_PER_BLK - 1) / BITS_PER_BLK;
     sb.inode_start   = sb.bitmap_start + sb.bitmap_blocks;
-    sb.inode_count   = total / 128;
+    /* 16 КиБ на inode, а не 64: исходники исчерпывают inode раньше места на диске. */
+    sb.inode_count   = total / 32;
     if(sb.inode_count < MIN_INODES) sb.inode_count=MIN_INODES;
     if(sb.inode_count > MAX_INODES) sb.inode_count=MAX_INODES;
     sb.inode_count = (sb.inode_count + INODES_PER_BLK - 1) / INODES_PER_BLK * INODES_PER_BLK;

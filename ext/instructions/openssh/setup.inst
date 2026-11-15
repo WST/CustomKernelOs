@@ -2,7 +2,7 @@ name openssh
 descr OpenSSH 10.6p2 client and server (MyOS port)
 workdir /tmp/ext/openssh
 fetch https://cdn.openbsd.org/pub/OpenBSD/OpenSSH/portable/openssh-10.6p2.tar.gz openssh-10.6p2.tar.gz
-tar xzf openssh-10.6p2.tar.gz
+tar xzvf openssh-10.6p2.tar.gz
 workdir /tmp/ext/openssh/openssh-10.6p2
 mkdir /ext/bin
 mkdir /etc/ssh

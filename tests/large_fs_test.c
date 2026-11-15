@@ -19,7 +19,7 @@ int main(int argc,char **argv) {
     CHECK(argc==2 && host_open_image(argv[1])==0 && ata_sectors()==2097152u);
     bool formatted; CHECK(fs_init(&formatted)==0 && formatted);
     struct fs_info before,after; fs_info(&before);
-    CHECK(before.total_blocks>2000000 && before.total_inodes==16383);
+    CHECK(before.total_blocks>2000000 && before.total_inodes==65535);
     for(unsigned i=0;i<sizeof(data);i++) data[i]=(u8)(i*7+i/512);
     char name[28]; u32 ino=0;
     for(int i=0;i<40;i++) {

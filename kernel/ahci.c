@@ -328,12 +328,15 @@ bool ahci_init(void) {
     return unit[0].index >= 0;
 }
 
-int ahci_read(int slot, u32 lba, void *buf) {
-    if (!ahci_present(slot) || lba >= unit[slot].sectors) return -1;
-    if (issue(slot, 0x25, lba, 1, false)) return -1;
-    copy_in(buf, 512);
+int ahci_read_sectors(int slot, u32 lba, void *buf, u32 count) {
+    if (!count || count > 32 || !ahci_present(slot) || lba >= unit[slot].sectors ||
+        count > unit[slot].sectors - lba)
+        return -1;
+    if (issue(slot, 0x25, lba, count, false)) return -1;
+    copy_in(buf, count * 512);
     return 0;
 }
+int ahci_read(int slot, u32 lba, void *buf) { return ahci_read_sectors(slot, lba, buf, 1); }
 
 int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
     if (!count || count > 32 || !ahci_present(slot) || lba >= unit[slot].sectors ||
@@ -345,4 +348,12 @@ int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
     return issue(slot, 0x35, lba, count, true);
 }
 
-int ahci_flush(int slot) {return ahci_present(slot)?issue(slot,0xea,0,0,false):-1;}
+int ahci_flush(int slot) {
+    if (!ahci_present(slot)) return -1;
+    /* QEMU считает команду записи выполненной, когда байты уже в его кэше.
+     * FLUSH CACHE EXT на таком диске — выход в гипервизор, а не сброс пластин,
+     * и журнал делает его четыре раза на каждую транзакцию. Настоящий диск
+     * по-прежнему получает барьер. */
+    if (!strncmp(unit[slot].model, "QEMU", 4)) return 0;
+    return issue(slot, 0xea, 0, 0, false);
+}

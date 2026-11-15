@@ -665,14 +665,17 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 
 # index=0 — primary master, с него BIOS грузит ядро. Системный том — AHCI port 0.
 # Второй диск DATA_DISK остаётся IDE secondary master (/dev/sdc).
-QEMU_DRIVES := -drive format=raw,file=$(BUILD)/os.img,index=0,media=disk \
-               -drive if=none,id=sysdisk,file=$(DISK),format=raw \
+# cache=unsafe: FLUSH гостя не ждёт fsync хоста. Для стенда это и есть скорость;
+# обрыв процесса QEMU может потерять последние записи, перезагрузка гостя — нет.
+QEMU_CACHE := cache=unsafe,
+QEMU_DRIVES := -drive $(QEMU_CACHE)format=raw,file=$(BUILD)/os.img,index=0,media=disk \
+               -drive if=none,id=sysdisk,$(QEMU_CACHE)file=$(DISK),format=raw \
                -device ich9-ahci,id=ahci \
                -device ide-hd,drive=sysdisk,bus=ahci.0
 QEMU_CPU_FLAGS = $(if $(QEMU_ACCEL),-accel $(QEMU_ACCEL)) $(if $(QEMU_CPU),-cpu $(QEMU_CPU))
 # Optional independent data disk on secondary master: make run DATA_DISK=data.img
 ifneq ($(strip $(DATA_DISK)),)
-QEMU_DRIVES += -drive format=raw,file=$(DATA_DISK),index=2,media=disk
+QEMU_DRIVES += -drive $(QEMU_CACHE)format=raw,file=$(DATA_DISK),index=2,media=disk
 endif
 # auto: verified hardware VirGL on Linux/WSL, portable software framebuffer on Mac.
 # GPU=on requires acceleration; GPU=off forces software; VGA=vmware/std overrides auto.

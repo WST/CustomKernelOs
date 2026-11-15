@@ -12,6 +12,7 @@ u32  ahci_sectors(int unit);
 const char *ahci_model(void);
 int ahci_flush(int unit);
 int  ahci_read(int unit, u32 lba, void *buf);
+int  ahci_read_sectors(int unit, u32 lba, void *buf, u32 count);
 int  ahci_write(int unit, u32 lba, const void *buf, u32 count);
 
 #endif

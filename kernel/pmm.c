@@ -186,9 +186,21 @@ static void pmm_stats_locked(struct pmm_stats *st) {
     st->managed_limit = limit_frame * PAGE_SIZE;
 }
 
+/* Объявлен здесь, чтобы pmm не зависел от заголовка блочного кэша.
+ * Вызывается уже без pmm_lock: кэш отдаёт чистые страницы, не засыпая. */
+u32 block_reclaim(u32 frames);
 u32 pmm_alloc(void) {
     u32 flags=spin_lock_irqsave(&pmm_lock);
     u32 result=pmm_alloc_locked();
+    spin_unlock_irqrestore(&pmm_lock,flags);
+    if (result) return result;
+    static bool reclaiming;
+    if (reclaiming) return 0;
+    reclaiming = true;
+    block_reclaim(8);
+    reclaiming = false;
+    flags=spin_lock_irqsave(&pmm_lock);
+    result=pmm_alloc_locked();
     spin_unlock_irqrestore(&pmm_lock,flags);
     return result;
 }
