@@ -16,7 +16,10 @@ extern PyObject *PyInit_grp(void);
 extern PyObject *PyInit__signal(void);
 extern PyObject *PyInit__thread(void);
 extern PyObject *PyInit_time(void);
+extern PyObject *PyInit__math_integer(void);
 extern PyObject *PyInit_math(void);
+extern PyObject *PyInit_mmap(void);
+extern PyObject *PyInit_pyexpat(void);
 extern PyObject *PyInit_array(void);
 extern PyObject *PyInit__bisect(void);
 extern PyObject *PyInit__csv(void);
@@ -74,7 +77,10 @@ struct _inittab _PyImport_Inittab[] = {
     {"_signal", PyInit__signal},
     {"_thread", PyInit__thread},
     {"time", PyInit_time},
+    {"_math_integer", PyInit__math_integer},
     {"math", PyInit_math},
+    {"mmap", PyInit_mmap},
+    {"pyexpat", PyInit_pyexpat},
     {"array", PyInit_array},
     {"_bisect", PyInit__bisect},
     {"_csv", PyInit__csv},

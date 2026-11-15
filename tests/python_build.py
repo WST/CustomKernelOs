@@ -40,6 +40,7 @@ def main():
         ("Makefile", "Makefile"),
         ("config.c", "Modules/config.c"),
         ("pyinstall.c", "pyinstall.c"),
+        ("pyexpat_stub.c", "Modules/pyexpat.c"),
     ):
         data = (PACKAGE / name).read_bytes()
         target = src / dest

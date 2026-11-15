@@ -13,4 +13,6 @@ copy pyconfig.h pyconfig.h
 copy Makefile Makefile
 copy config.c Modules/config.c
 copy pyinstall.c pyinstall.c
+copy _sysconfigdata__unknown_.py Lib/_sysconfigdata__unknown_.py
+copy pyexpat_stub.c Modules/pyexpat.c
 make -j1

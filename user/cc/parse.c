@@ -985,6 +985,27 @@ static Node *init_desg_expr(InitDesg *desg, Token *tok) {
     return new_unary(ND_DEREF, new_add(lhs, rhs, tok), tok);
 }
 
+/* В объединении значение лежит в том члене, который задали явно.
+ * Первый член — запасной путь для позиционного инициализатора. */
+static bool init_has_value(Initializer *init) {
+    if (!init) return false;
+    if (init->expr) return true;
+    if (init->ty->kind == TY_ARRAY) {
+        for (int i = 0; i < init->ty->array_len; i++)
+            if (init_has_value(init->children[i])) return true;
+    } else if (init->ty->kind == TY_STRUCT || init->ty->kind == TY_UNION) {
+        for (Member *m = init->ty->members; m; m = m->next)
+            if (init_has_value(init->children[m->idx])) return true;
+    }
+    return false;
+}
+
+static Member *union_initialized_member(Initializer *init) {
+    for (Member *m = init->ty->members; m; m = m->next)
+        if (init_has_value(init->children[m->idx])) return m;
+    return init->ty->members;
+}
+
 static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token *tok) {
     if (ty->kind == TY_ARRAY) {
         Node *node = new_node(ND_NULL_EXPR, tok);
@@ -1009,8 +1030,10 @@ static Node *create_lvar_init(Initializer *init, Type *ty, InitDesg *desg, Token
             Node *lhs = init_desg_expr(desg, tok);
             return new_binary(ND_ASSIGN, lhs, init->expr, tok);
         }
-        InitDesg desg2 = { desg, 0, ty->members };
-        return create_lvar_init(init->children[0], ty->members->ty, &desg2, tok);
+        Member *mem = union_initialized_member(init);
+        if (!mem) return new_node(ND_NULL_EXPR, tok);
+        InitDesg desg2 = { desg, 0, mem };
+        return create_lvar_init(init->children[mem->idx], mem->ty, &desg2, tok);
     }
     if (!init->expr) return new_node(ND_NULL_EXPR, tok);
     Node *lhs = init_desg_expr(desg, tok);
@@ -1063,11 +1086,13 @@ static Reloc *write_gvar_data(Reloc *cur, Initializer *init, Type *ty, char *buf
         return cur;
     }
     if (ty->kind == TY_UNION) {
-        if (ty->members && ty->members->is_bitfield) {
-            poke_bitfield(buf, ty->members, offset + ty->members->offset, init->children[0]);
+        Member *mem = union_initialized_member(init);
+        if (!mem) return cur;
+        if (mem->is_bitfield) {
+            poke_bitfield(buf, mem, offset + mem->offset, init->children[mem->idx]);
             return cur;
         }
-        return write_gvar_data(cur, init->children[0], ty->members->ty, buf, offset);
+        return write_gvar_data(cur, init->children[mem->idx], mem->ty, buf, offset + mem->offset);
     }
     if (!init->expr) return cur;
 

@@ -25,7 +25,12 @@
 #define MAP_ANONYMOUS MAP_ANON
 #endif
 #define MAP_FAILED ((void *)-1)
+#define MS_ASYNC 1
+#define MS_SYNC 2
+#define MS_INVALIDATE 4
 void *mmap(void *addr, unsigned len, int prot, int flags, int fd, unsigned off);
 int munmap(void *addr, unsigned len);
 int mprotect(void *addr, unsigned len, int prot);
+int msync(void *addr, unsigned len, int flags);
+int madvise(void *addr, unsigned len, int advice);
 #endif

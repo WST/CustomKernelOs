@@ -367,6 +367,8 @@ void *mmap(void *addr, unsigned len, int prot, int flags, int fd, unsigned off) 
 }
 int munmap(void *addr, unsigned len)             { return syscall3(SYS_MUNMAP, (int)addr, len, 0); }
 int mprotect(void *addr, unsigned len, int prot) { return syscall3(SYS_MPROTECT, (int)addr, len, prot); }
+int msync(void *addr, unsigned len, int flags)   { (void)addr; (void)len; (void)flags; return 0; }
+int madvise(void *addr, unsigned len, int advice){ (void)addr; (void)len; (void)advice; return 0; }
 void  sleep_ms(unsigned ms)                      { syscall3(SYS_SLEEP, ms, 0, 0); }
 int   getpid(void)                               { return syscall3(SYS_GETPID, 0, 0, 0); }
 unsigned ticks(void)                             { return syscall3(SYS_TICKS, 0, 0, 0); }

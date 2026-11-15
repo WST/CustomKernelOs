@@ -124,6 +124,10 @@
 #define HAVE_UNAME 1
 #define HAVE_GETHOSTNAME 1
 #define HAVE_CLOCK 1
+#define HAVE_STRFTIME 1
+#define HAVE_MKTIME 1
+/* mmapmodule.c не задаёт гранулярность, если нет sysconf. */
+#define my_getallocationgranularity getpagesize
 #define HAVE_GETHOSTBYNAME 1
 #define HAVE_GETADDRINFO 1
 #define HAVE_GETNAMEINFO 1
@@ -151,6 +155,8 @@
 #define HAVE_PAUSE 1
 #define HAVE_ALARM 1
 #define PY_FORMAT_SIZE_T "z"
+#define PLATFORM "unknown"
+#define ABIFLAGS ""
 #define SOABI "cpython-315"
 #define _PYTHONFRAMEWORK ""
 #define ALT_SOABI "cpython-315"
