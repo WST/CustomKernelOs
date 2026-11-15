@@ -22,6 +22,10 @@ int block_flush(void);
 int block_flush_device(int id);
 void block_flush_idle(void); /* не ждёт, если диск уже занят ожидающей задачей */
 void block_cache_invalidate(void); /* drop cached sectors; dirty ones are discarded */
+void block_epoch_begin(void);      /* следующая запись кэша принадлежит новому вызову */
+void block_epoch_rollback(void);   /* выбросить грязные секторы только этого вызова */
+/* Отдать до frames чистых страниц кэша. Грязные не выбрасываются: это ещё не записанные данные. */
+u32 block_reclaim(u32 frames);
 bool block_partitioned(void);
 #ifdef HOST_TEST
 void block_io_reset(void);

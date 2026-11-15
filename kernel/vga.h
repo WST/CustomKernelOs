@@ -23,6 +23,7 @@ bool vga_graphics(void);              /* сброс ANSI-состояния и �
 void vga_putc(char c);
 void vga_puts(const char *s);
 void vga_write(const char *s,u32 length);   /* bounded output, one cursor update */
+void vga_flush_pending(void);               /* отложенная прокрутка графической консоли */
 void vga_write_at(int x, int y, const char *s, u8 fg, u8 bg);
 void kprintf(const char *fmt, ...);
 void vkprintf(const char *fmt, va_list ap);

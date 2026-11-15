@@ -139,7 +139,13 @@ static int times_block(u32 ino,bool alloc,u32 *out) {
 #ifdef HOST_TEST
 static u32 kern_now(void) { return 1; }
 #else
+#include "timer.h"
 static u32 kern_now(void) {
+    /* UIP у CMOS держится миллисекунды, а touch зовётся на каждую запись.
+     * Внутри одной секунды повторно в порты не ходим. */
+    static u32 cached, at;
+    u32 tick = timer_ticks();
+    if (cached && (u32)(tick - at) < TIMER_HZ) return cached;
     struct rtc_time t;rtc_read(&t);
     static const unsigned md[12]={0,31,59,90,120,151,181,212,243,273,304,334};
     if(t.year<1970 || t.month<1 || t.month>12) return 0;
@@ -148,7 +154,10 @@ static u32 kern_now(void) {
     days+=md[t.month-1];
     if(t.month>2 && (t.year%4==0 && (t.year%100!=0 || t.year%400==0))) days++;
     days+=t.day?t.day-1:0;
-    return days*86400u + t.hour*3600u + t.min*60u + t.sec;
+    cached = days*86400u + t.hour*3600u + t.min*60u + t.sec;
+    if (!cached) cached = 1;
+    at = tick;
+    return cached;
 }
 #endif
 static int times_store(u32 ino,u32 when) {

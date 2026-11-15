@@ -40,7 +40,7 @@ int main(int argc,char **argv) {
  CHECK(!fs_remove(world,"link"));CHECK(!fs_symlink(world,"/private/secret","persisted"));
  uid=12;gid=12;CHECK(fs_access(owned,4,false)==FS_EACCES);CHECK(fs_remove(world,"owned")==FS_EPERM);
  uid=0;gid=0;mask=022;CHECK(!fs_rename(world,"owned","kept"));CHECK(!fs_chmod(owned,0640));
- CHECK(!fs_init(&formatted) && !formatted);CHECK(!fs_resolve(1,"/shared/kept",&found));CHECK(!fs_stat(found,&st));CHECK(st.uid==11 && st.gid==11 && st.mode==0640);
+ CHECK(!fs_sync() && !fs_init(&formatted) && !formatted);CHECK(!fs_resolve(1,"/shared/kept",&found));CHECK(!fs_stat(found,&st));CHECK(st.uid==11 && st.gid==11 && st.mode==0640);
  CHECK(!fs_resolve(1,"/private/secret",&secret));CHECK(!fs_stat(secret,&st) && st.mode==0600);
  CHECK(!fs_remove(world,"root"));CHECK(!fs_create_mode(world,"reuse",FS_TYPE_FILE,0644,&found));CHECK(!fs_stat(found,&st) && st.uid==0 && st.mode==0644);
  host_close_image();printf("Persistent owner/group/mode, DAC, sticky directories, symlinks and inode reuse: PASS\n");return 0;

@@ -67,6 +67,17 @@ static int select_inode(u32 i) {
     u32 s=SLOT(i); if(s>=4 || !mounts[s].used) return FS_ENODEV;
     myfs_select(s,mounts[s].device); return 0;
 }
+/* Журнал и кэш общие на все тома. Чужой myfs_init стирает их, поэтому
+ * принятые записи сначала сбрасываются. fs_init так не делает: повторное
+ * монтирование после аварии не должно публиковать оборванную группу. */
+static int sync_mounted(void) {
+    int r=0;
+    for(int s=0;s<4;s++) if(mounts[s].used) {
+        myfs_select(s,mounts[s].device);
+        if(myfs_sync()) r=FS_EIO;
+    }
+    return r;
+}
 struct fs_orphan {u32 ino;struct fs_orphan *next;};
 static struct fs_orphan *orphans;
 static void reap_orphans(void) {
@@ -325,6 +336,7 @@ int fs_mount(u32 cwd,const char *device,const char *target) {
     if(!r) r=lookup(ino,"..",&parent);
     for(int s=1;s<4;s++) if(!mounts[s].used) { slot=s; break; }
     if(!r && !slot) r=FS_ENOSPC;
+    if(!r) r=sync_mounted();
     if(!r) { bool formatted; myfs_select(slot,d); r=myfs_init(&formatted,false); }
     if(!r) { mounts[slot].used=true; mounts[slot].device=d; mounts[slot].covered=ino; mounts[slot].parent=parent; }
     lookup_cache_clear(); mutex_unlock(&lock); return r;
@@ -374,6 +386,7 @@ int fs_check_device(const char *device) {
     mutex_lock(&lock);int d=block_find(device),r=0;
     if(d<0)r=FS_ENODEV;
     else if(device_busy(d,false))r=FS_EBUSY;
+    else if(sync_mounted())r=FS_EIO;
     else {bool formatted;myfs_select(4,d);r=myfs_init(&formatted,false);if(!r)r=myfs_unmount();}
     mutex_unlock(&lock);return r;
 }
@@ -383,6 +396,7 @@ int fs_mkfs(const char *device) {
     else if(device_busy(d,false)) r=FS_EBUSY;
     /* Whole disks with a partition table must be explicitly reinitialized first. */
     else if(!block_get(d)->partition && block_disk_partitioned(d/5)) r=FS_EINVAL;
+    else if(sync_mounted()) r=FS_EIO;
     else { myfs_select(4,d); r=myfs_format(); }
     mutex_unlock(&lock); return r;
 }
