@@ -6,6 +6,9 @@ int ahci_port_info(unsigned index, struct hw_sata_info *out);
 
 /* SATA AHCI. A present port replaces the IDE disk of the same index:
  * port 0 is /dev/sdb, port 1 is /dev/sdc. IDE remains the fallback. */
+/* 16 страниц DMA по 4 КиБ: 64 КиБ за одну команду. Больше за раз ATA PIO не умеет,
+ * там потолок 32 сектора и он остаётся в ata.c. */
+#define AHCI_MAX_SECTORS 128
 bool ahci_init(void);
 bool ahci_present(int unit);
 u32  ahci_sectors(int unit);

@@ -30,6 +30,13 @@ static struct block_device devices[BLOCK_MAX];
 static bool tables[2];
 static struct mutex block_lock;
 #define CACHE_RUN 32
+/* Пачка сброса и опережающего чтения. ATA PIO не берёт больше CACHE_RUN,
+ * AHCI умеет AHCI_MAX_SECTORS и буфер рассчитан на этот потолок. */
+#ifdef HOST_TEST
+#define RUN_MAX CACHE_RUN
+#else
+#define RUN_MAX AHCI_MAX_SECTORS
+#endif
 #define SECTORS_PER_PAGE 8
 #define F_VALID 1u
 #define F_DIRTY 2u
@@ -41,7 +48,9 @@ struct cache_ent {
     u32 lba, next, dirty_next, dirty_prev;
     i16 unit;
     u16 flags;
+    u32 stamp;
 };
+static u32 epoch;
 static struct cache_ent *cache;
 static u32 cache_slots, hash_mask, clock_hand, dirty_head;
 static u32 *hash;
@@ -186,8 +195,19 @@ static u32 sectors(int u) {
     return ata_unit_sectors(u);
 #endif
 }
+static u32 run_limit(int unit) {
+#ifdef HOST_TEST
+    (void)unit;
+    return CACHE_RUN;
+#else
+    return ahci_present(unit) ? AHCI_MAX_SECTORS : CACHE_RUN;
+#endif
+}
 static int device_read_run(int u, u32 lba, void *buf, u32 n) {
-    if (!n || n > CACHE_RUN) return -1;
+    if (!n || n > RUN_MAX) return -1;
+#ifndef HOST_TEST
+    if (!ahci_present(u) && n > CACHE_RUN) return -1;
+#endif
 #ifdef HOST_TEST
     if (u) return -1;
     u8 *p = buf;
@@ -200,7 +220,10 @@ static int device_read_run(int u, u32 lba, void *buf, u32 n) {
 }
 static int device_write_run(int u, u32 lba, const void *buf, u32 n) {
     if (u >= 0 && u < 2) device_dirty[u] = true;
-    if (!n || n > CACHE_RUN) return -1;
+    if (!n || n > RUN_MAX) return -1;
+#ifndef HOST_TEST
+    if (!ahci_present(u) && n > CACHE_RUN) return -1;
+#endif
 #ifdef HOST_TEST
     if (u) return -1;
     const u8 *p = buf;
@@ -223,15 +246,16 @@ static int cache_find(int unit, u32 lba) {
  * Список грязных — стек, поэтому старт может оказаться в конце пачки:
  * сначала сдвигаемся к её началу, иначе каждый сектор уходит отдельно. */
 static int flush_from(int unit, u32 lba) {
+    u32 limit = run_limit(unit);
     u32 back = 0;
-    while (back + 1 < CACHE_RUN && lba) {
+    while (back + 1 < limit && lba) {
         int prev = cache_find(unit, lba - 1);
         if (prev < 0 || !(cache[prev].flags & F_DIRTY)) break;
         lba--;
         back++;
     }
     u32 n = 0;
-    while (n < CACHE_RUN) {
+    while (n < limit) {
         int i = cache_find(unit, lba + n);
         if (i < 0 || !(cache[i].flags & F_DIRTY)) break;
         u8 *src = slot_data((u32)i);
@@ -287,10 +311,10 @@ static int ensure_cache(void) {
         if (!cache_slots) cache_slots = choose_slots();
 #endif
         if (!cache) cache = cache_alloc(cache_slots, sizeof *cache);
-        if (!run_buf) run_buf = cache_alloc(CACHE_RUN, 512);
+        if (!run_buf) run_buf = cache_alloc(RUN_MAX, 512);
         /* Отдельный буфер: сброс грязного слота во время опережающего чтения
          * не затирает только что прочитанную пачку. */
-        if (!flush_buf) flush_buf = cache_alloc(CACHE_RUN, 512);
+        if (!flush_buf) flush_buf = cache_alloc(RUN_MAX, 512);
 #ifdef HOST_TEST
         if (!data_blob) data_blob = cache_alloc(cache_slots, 512);
 #else
@@ -340,6 +364,7 @@ static int cache_store(int unit, u32 lba, const void *buf, bool through) {
             cache[i].unit = (i16)unit;
             cache[i].lba = lba;
             if (!through) dirty_add((u32)i);
+            cache[i].stamp = epoch;
             cache[i].flags = (u16)(F_VALID | F_REF | (cache[i].flags & F_LIST) | (through ? 0 : F_DIRTY));
             hash_link((u32)i);
             rc = 0;
@@ -391,9 +416,9 @@ static int cache_load(int unit, u32 lba, void *buf) {
         u32 max = sectors(unit), n = 1;
         if (!max || lba >= max) rc = -1;
         else {
-            /* The second consecutive miss reads a 16 KiB run. A random miss
-             * stays one sector, so a directory lookup does not evict the file. */
-            if (seq_valid && seq_unit == unit && seq_lba == lba) n = CACHE_RUN;
+            /* Второй промах подряд читает пачку. Случайный промах — один сектор,
+             * чтобы обход каталога не вытеснил файл. */
+            if (seq_valid && seq_unit == unit && seq_lba == lba) n = run_limit(unit);
             if (n > max - lba) n = max - lba;
             if (device_read_run(unit, lba, run_buf, n)) rc = -1;
             else {
@@ -457,6 +482,20 @@ void block_flush_idle(void) {
 #else
     block_flush();
 #endif
+}
+void block_epoch_begin(void) {
+    if (++epoch == 0) epoch = 1;
+}
+void block_epoch_rollback(void) {
+    if (!cache || !epoch) return;
+    mutex_lock(&block_lock);
+    for (u32 i = 0; i < cache_slots; i++) {
+        if (!(cache[i].flags & F_DIRTY) || cache[i].stamp != epoch) continue;
+        dirty_unlink(i);
+        if (cache[i].flags & F_VALID) hash_unlink(i);
+        cache[i].flags = 0;
+    }
+    mutex_unlock(&block_lock);
 }
 void block_cache_invalidate(void) {
     mutex_lock(&block_lock);

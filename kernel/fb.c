@@ -23,6 +23,7 @@
  * пишет в видеопамять, нужно дождаться, пока карта доделает очередь (SYNC),
  * иначе запоздавшее копирование затрёт свежие пиксели. */
 #include "fb.h"
+#include "vga.h"
 #include "virtgpu.h"
 #include "ipc.h"
 #include "pci.h"
@@ -280,8 +281,16 @@ static void present(void) {
 }
 
 static u32 tick_count;
+void fb_console_show(void) {
+    u32 f = irq_save();
+    present();
+    irq_restore(f);
+}
+
 void fb_tick(void) {
     if (drv == DRV_VIRTIO) vgpu_cursor_tick();
+    /* Прокрутка консоли копилась в сетке символов: кадр отдаём здесь, а не на каждой строке. */
+    vga_flush_pending();
     if (!ready || frame_depth) return;
     present();
     if (!gpu_ok && probe_tries && (++tick_count & 7) == 0) gpu_probe();

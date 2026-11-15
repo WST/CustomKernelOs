@@ -86,7 +86,16 @@ struct fs_state {
 };
 static struct fs_state states[5];
 static int selected;
-void myfs_select(int slot, int device) { selected = slot; states[slot].device = device; }
+int myfs_sync(void);
+static void sync_if_switching(int slot);
+/* Буфер журнала один на все тома и не помнит устройство сектора.
+ * Смена тома публикует группу, иначе чужие блоки с тем же номером
+ * читаются как свои. Открытую транзакцию не трогаем. */
+void myfs_select(int slot, int device) {
+    sync_if_switching(slot);
+    selected = slot;
+    states[slot].device = device;
+}
 #define sb (states[selected].super)
 #define bitmap (states[selected].bits)
 static int prepare_bitmap(u32 bytes) {
@@ -101,6 +110,10 @@ static int prepare_bitmap(u32 bytes) {
 /* ---------------------------------------------------------------- блоки */
 
 #include "myfs-journal.inc"
+static void sync_if_switching(int slot) {
+    if (slot != selected && !transaction_depth && mounted)
+        myfs_sync();
+}
 static int bread(u32 b, void *buf) { return journal_read(b,buf); }
 static int bwrite(u32 b, const void *buf) {
     return journal_write(b,buf,false);
@@ -111,6 +124,7 @@ static int bwrite_data(u32 b, const void *buf) {
 
 static bool bit_get(u32 b) { return bitmap[b / 8] & (1 << (b % 8)); }
 static void bit_set(u32 b, bool v) {
+    bitmap_undo_touch(b);
     if (v) bitmap[b / 8] |=  (1 << (b % 8));
     else   bitmap[b / 8] &= ~(1 << (b % 8));
 }
@@ -594,7 +608,18 @@ static int myfs_write_impl(u32 ino, u32 off, const void *buf, u32 n) {
             else if (bread(b, blk)) { r = FS_EIO; break; }
         }
         memcpy(blk + bo, src + done, chunk);
-        if (bwrite_data(b, blk)) {
+        /* Новый блок файла пишется один раз в свой сектор. Журнал хранит только
+         * метаданные: пока commit не прошёл, на блок никто не ссылается.
+         * Перезапись и каталог остаются в журнале, иначе авария порвёт середину. */
+        if (in.type == FS_TYPE_FILE && created) {
+            journal_absorb_data(b, blk);
+            if (block_write(states[selected].device, b, blk)) {
+                drop_new_block(&in, pos / BS, b);
+                r = FS_EIO;
+                break;
+            }
+            pending_data += BS;
+        } else if (bwrite_data(b, blk)) {
             if (created) drop_new_block(&in, pos / BS, b);
             r = FS_EIO;
             break;
@@ -677,6 +702,15 @@ static int read_v1(u32 dir, u32 off, struct dirent_v1 *de) {
     return 1;
 }
 
+/* Заголовок v2 из уже прочитанного сектора. 0 — заголовок не влезает в сектор. */
+static int v2_header(const u8 *sec, u32 bo, u32 valid, struct dirent_v2 *h) {
+    if (bo >= valid || bo + 8 > valid) return 0;
+    h->ino = (u32)sec[bo] | (u32)sec[bo + 1] << 8 | (u32)sec[bo + 2] << 16 | (u32)sec[bo + 3] << 24;
+    h->reclen = (u16)(sec[bo + 4] | (sec[bo + 5] << 8));
+    h->namelen = sec[bo + 6];
+    if (h->reclen < 12 || (h->reclen & 3) || (unsigned)h->namelen + 9u > h->reclen) return -1;
+    return 1;
+}
 static int read_v2(u32 dir, u32 off, struct dirent_v2 *h, char *name) {
     int n = myfs_read(dir, off, h, sizeof(*h));
     if (n == 0) return 0;
@@ -705,6 +739,28 @@ static int write_v2(u32 dir, u32 off, u32 ino, const char *name, u16 reclen) {
     return w == (int)reclen ? FS_OK : FS_EIO;
 }
 
+/* Запись по смещению. Сектор перечитывается, только когда смещение из него вышло.
+ * 1 — запись есть, 0 — конец каталога. */
+static int v2_slot(u32 dir, u32 off, struct dirent_v2 *h, char *name, u8 *sec, u32 *loaded, int *valid) {
+    u32 base = off & ~(BS - 1);
+    if (*loaded != base) {
+        int n = myfs_read(dir, base, sec, BS);
+        if (n < 0) return n;
+        *valid = n;
+        *loaded = base;
+    }
+    u32 bo = off & (BS - 1);
+    if (bo >= (u32)*valid) return 0;
+    int r = v2_header(sec, bo, (u32)*valid, h);
+    if (r < 0) return FS_EIO;
+    if (!r || (name && bo + 8u + h->namelen > (u32)*valid))
+        return read_v2(dir, off, h, name);
+    if (name) {
+        memcpy(name, sec + bo + 8, h->namelen);
+        name[h->namelen] = 0;
+    }
+    return 1;
+}
 /* Найти запись name. *ino = 0, если имени нет. Отрицательный код — ошибка чтения,
  * её нельзя путать с «не найдено»: иначе создание добавит вторую запись. */
 static int dir_lookup(u32 dir, const char *name, u32 *ino, u32 *offset) {
@@ -724,11 +780,15 @@ static int dir_lookup(u32 dir, const char *name, u32 *ino, u32 *offset) {
             off += sizeof(de);
         }
     }
+    /* Сектор целиком: иначе каждый поиск имени зовёт bmap на заголовок и на имя. */
+    u8 sec[BS];
+    u32 loaded = 0xffffffffu;
+    int valid = 0;
     for (;;) {
         struct dirent_v2 h;
         char got[FS_NAME_MAX + 1];
         u32 start = off;
-        int r = read_v2(dir, off, &h, got);
+        int r = v2_slot(dir, off, &h, got, sec, &loaded, &valid);
         if (r < 0) return r;
         if (r == 0) return FS_OK;
         if (h.ino && h.namelen == strlen(name) && !memcmp(got, name, h.namelen)) {
@@ -761,10 +821,13 @@ static int dir_add(u32 dir, const char *name, u32 ino) {
     }
     u16 need = span_v2(namelen);
     u32 off = 0;
+    u8 sec[BS];
+    u32 loaded = 0xffffffffu;
+    int valid = 0;
     for (;;) {
         struct dirent_v2 h;
         u32 start = off;
-        int r = read_v2(dir, off, &h, NULL);
+        int r = v2_slot(dir, off, &h, NULL, sec, &loaded, &valid);
         if (r < 0) return r;
         if (r == 0) return write_v2(dir, start, ino, name, need);
         if (!h.ino && h.reclen >= need) return write_v2(dir, start, ino, name, h.reclen);
@@ -1044,8 +1107,12 @@ static int myfs_getpath_impl(u32 ino, char *buf, u32 len) {
 
 static int myfs_format_impl(u32 version) {
     static u8 zero[BS];
-    cache_drop_all();
+    /* Старые грязные секторы не должны лечь поверх нового тома. */
+    mounted=false;
     journal_enabled[selected]=journal_failed[selected]=false;
+    transaction_depth=transaction_count=transaction_error=0;
+    pending_data=0;undo_armed=false;
+    cache_drop_all();
     u32 total = block_get(states[selected].device)->sectors;
     if (!total) return FS_ENODEV;
     if (version < VERSION_MIN || version > VERSION) return FS_EINVAL;
@@ -1111,7 +1178,9 @@ static int myfs_format_impl(u32 version) {
 static int myfs_init_impl(bool *formatted, bool allow_format) {
     mounted=false; /* remount/crash must never flush stale backend state */
     transaction_depth=transaction_count=0;
+    pending_data=0;undo_armed=false;undo_lost=false;
     journal_enabled[selected]=journal_failed[selected]=false;
+    block_cache_invalidate();
     cache_drop_all();
     *formatted = false;
     mounted = false;
@@ -1224,29 +1293,87 @@ static int bitmap_drain(void) {
         if(transaction_commit())return FS_EIO;
     }
 }
+static void cache_forget(void) {
+    inocache.valid=false;
+    blkcache.valid=false;
+    inoblk.valid=false;
+    ind_level.valid=ind_double.valid=ind_triple.valid=false;
+    ind_level.dirty=ind_double.dirty=ind_triple.dirty=false;
+    permissions_cache_clear();
+}
+static int commit_pending(void) {
+    if(journal_failed[selected])return FS_EIO;
+    if(!mounted || !journal_enabled[selected])return 0;
+    if(transaction_depth)return FS_EINVAL;
+    /* Пустая группа всё равно сбрасывает битмап: fsck помечает сектор
+     * грязным, но не кладёт его в журнал, пока в нём только освобождения. */
+    int err=0;
+    bool staged=transaction_count!=0;
+    if(staged)err=transaction_commit();
+    /* Данные нового файла уже ушли первым барьером commit. Отдельный сброс
+     * нужен, только если метаданных в этой группе не было. */
+    if(!err && pending_data && !staged)err=block_flush_device(states[selected].device)?FS_EIO:0;
+    if(!err)err=bitmap_drain();
+    if(err){journal_failed[selected]=true;mounted=false;return FS_EIO;}
+    pending_data=0;
+    return 0;
+}
+static int reload_bitmap(void) {
+    cache_forget();
+    if(disk_read(0,&sb))return FS_EIO;
+    available_blocks=available_inodes=0;
+    memset(states[selected].bitmap_dirty,0,sizeof states[selected].bitmap_dirty);
+    memset(states[selected].bitmap_alloc_dirty,0,sizeof states[selected].bitmap_alloc_dirty);
+    for(u32 i=0;i<sb.bitmap_blocks;i++)if(disk_read(sb.bitmap_start+i,bitmap+i*BS))return FS_EIO;
+    for(u32 b=sb.data_start;b<sb.total_blocks;b++)if(!bit_get(b))available_blocks++;
+    struct inode in;
+    for(u32 i=FS_ROOT;i<sb.inode_count;i++){if(iread(i,&in))return FS_EIO;if(!in.type)available_inodes++;}
+    states[selected].hint=sb.data_start;states[selected].ino_hint=FS_ROOT+1;
+    return 0;
+}
+static void rollback_syscall(void) {
+    if(undo_log && transaction) {
+        transaction_count=undo_count;
+        if(undo_count)memcpy(transaction,undo_log,undo_count*sizeof(*transaction));
+    }
+    transaction_error=0;
+    block_epoch_rollback();
+    cache_forget();
+    if(!undo_lost) {
+        for(unsigned i=0;i<bitmap_undo_n;i++)
+            memcpy(bitmap+bitmap_undo_sec[i]*BS,bitmap_undo_data+i*BS,BS);
+        available_blocks=saved_blocks;
+        available_inodes=saved_inodes;
+        states[selected].hint=saved_hint;
+        states[selected].ino_hint=saved_ino_hint;
+    }
+    undo_armed=false;
+    bitmap_undo_n=0;
+}
 static int transaction_end(int result) {
     if(!transaction_depth)return result;
     if(result<0 && !transaction_error)transaction_error=result;
     if(transaction_depth==1 && !transaction_error && sync_meta())transaction_error=FS_EIO;
     if(--transaction_depth)return result;
     int err=transaction_error;
-    if(!err)err=transaction_commit();
-    if(!err)err=bitmap_drain();
-    transaction_count=0;
-    if(err) {
-        mounted=false;cache_drop_all();
-        /* A failed barrier may have committed: only mount recovery can decide. */
-        if(err==FS_EIO) {journal_failed[selected]=true;return err;}
-        if(disk_read(0,&sb)) {journal_failed[selected]=true;return FS_EIO;}
-        available_blocks=available_inodes=0;
-        for(u32 i=0;i<sb.bitmap_blocks;i++)if(disk_read(sb.bitmap_start+i,bitmap+i*BS)) {journal_failed[selected]=true;return FS_EIO;}
-        for(u32 b=sb.data_start;b<sb.total_blocks;b++)if(!bit_get(b))available_blocks++;
-        struct inode in;
-        for(u32 i=FS_ROOT;i<sb.inode_count;i++){if(iread(i,&in)){journal_failed[selected]=true;return FS_EIO;}if(!in.type)available_inodes++;}
-        states[selected].hint=sb.data_start;states[selected].ino_hint=FS_ROOT+1;mounted=true;
+    if(!err){undo_armed=false;return result;}
+    if(err==FS_EIO) {
+        /* Барьер мог уже опубликовать commit: решает только следующее монтирование. */
+        block_cache_invalidate();
+        cache_forget();
+        transaction_count=0;pending_data=0;undo_armed=false;
+        mounted=false;journal_failed[selected]=true;
         return err;
     }
-    return result;
+    bool lost=undo_lost;
+    rollback_syscall();
+    if(lost) {
+        undo_lost=false;
+        int c=transaction_count?transaction_commit():0;
+        transaction_count=0;pending_data=0;
+        if(c || reload_bitmap()){journal_failed[selected]=true;mounted=false;return FS_EIO;}
+    }
+    return err;
 }
 
 /* ---------------------------------------------------------------- блокировка
@@ -1315,9 +1442,12 @@ void myfs_info(struct fs_info *info) { myfs_info_impl(info); }
 
 int myfs_sync(void) {
     if(journal_failed[selected])return FS_EIO;
+    if(!mounted)return FS_ENODEV;
+    /* Том без журнала (v1) пишет сразу в кэш: sync обязан сбросить его на диск. */
+    if(!journal_enabled[selected])return disk_barrier()?FS_EIO:0;
     int r=transaction_begin();if(r)return r;
     r=transaction_end(sync_meta());
-    return r?r:disk_barrier();
+    return r?r:commit_pending();
 }
 int myfs_unmount(void) {int r=myfs_sync();if(r)return r;mounted=false;cache_drop_all();journal_enabled[selected]=false;return 0;}
 

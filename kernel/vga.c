@@ -25,6 +25,9 @@ static bool fbmode;                     /* рисуем пикселями */
 static bool firmware_console;           /* avoid slow reads of physical VBE VRAM */
 static unsigned cursor_defer;           /* draw the final cursor once per output */
 static u32 dirty_cells[(MAX_W*MAX_H+31)/32];
+static u32 dirty_count;
+/* Поток строк (tar -v) не ждёт VirGL на каждой переводке: пиксели догоняют сетку по таймеру. */
+static bool scroll_burst;
 static bool suspended;                  /* экран захватила программа — только запоминаем */
 static bool cur_on = true;              /* видим ли курсор */
 static int  cur_x = -1, cur_y = -1;     /* где нарисован курсор (графика) */
@@ -49,9 +52,33 @@ static void draw_cell(int i) {
     fb_glyph(i % W, i / W, v & 0xFF, palette[a & 15], palette[a >> 4]);
 }
 
+/* Графическая консоль не на прошивке: символы копятся и догоняют экран пачкой.
+ * Иначе каждая строка tar -v ждёт полный кадр VirGL. */
+static bool pixel_defer(void) { return fbmode && !firmware_console && !suspended; }
+
+static void mark_dirty(int i) {
+    u32 bit = 1u << (i % 32);
+    if (dirty_cells[i / 32] & bit) return;
+    dirty_cells[i / 32] |= bit;
+    dirty_count++;
+}
+
 static void paint_cell(int i) {
     if (firmware_console && cursor_defer) dirty_cells[i/32]|=1u<<(i%32);
     else draw_cell(i);
+}
+
+static void draw_dirty(void) {
+    if (!dirty_count || !fbmode || suspended) return;
+    for (int i = 0; i < W * H; i++) {
+        u32 bit = 1u << (i % 32);
+        if (!(dirty_cells[i / 32] & bit)) continue;
+        dirty_cells[i / 32] &= ~bit;
+        draw_cell(i);
+    }
+    dirty_count = 0;
+    scroll_burst = false;
+    fb_console_show();
 }
 
 static void flush_cells(void) {
@@ -66,7 +93,8 @@ static inline void set_cell(int i, u16 v) {
     if (cells[i]==v) return;
     cells[i] = v;
     if (fbmode && !suspended) {
-        paint_cell(i);
+        if (pixel_defer()) mark_dirty(i);
+        else paint_cell(i);
         if (i == cur_y * W + cur_x) cur_x = cur_y = -1;   /* затёрли курсор — нарисуем заново */
     }
 }
@@ -79,7 +107,10 @@ static void erase_cursor(void) {
 
 static void update_cursor(void) {
     if (cursor_defer) return;
-    flush_cells();
+    if (pixel_defer()) {
+        if (scroll_burst) return;
+        draw_dirty();
+    } else flush_cells();
     if (!fbmode) {
         u16 pos = row * W + col;
         outb(0x3D4, 0x0F); outb(0x3D5, pos & 0xFF);
@@ -97,19 +128,32 @@ static void update_cursor(void) {
 
 static void scroll(void) {
     if (row < H) return;
-    if (fbmode) erase_cursor();
-    /* VBE video memory is uncached MMIO. Scrolling pixels reads almost the
-     * whole screen over the display bus for every newline. Compare the RAM
-     * text cells instead and only write glyphs whose character/color changed. */
-    bool redraw=firmware_console && fbmode && !suspended;
+    if (fbmode) cur_x = cur_y = -1;
+    /* Кадр не сдвигаем здесь. VirGL и некэшируемая VBE-память делают полный
+     * прямоугольник на каждую строку дороже самой распаковки. Сетка в RAM
+     * сдвигается сразу, пиксели догоняет vga_flush_pending. */
+    bool defer = pixel_defer();
+    bool direct = firmware_console && fbmode && !suspended;
+    if (defer) scroll_burst = true;
     for (int i = 0; i < H * W; i++) {
-        u16 next=i<(H-1)*W ? cells[i+W] : cell(' ');
-        if (cells[i]==next) continue;
-        cells[i]=next;
-        if (redraw) paint_cell(i);
+        u16 next = i < (H - 1) * W ? cells[i + W] : cell(' ');
+        if (cells[i] == next) continue;
+        cells[i] = next;
+        if (direct) paint_cell(i);
+        else if (defer) mark_dirty(i);
     }
-    if (fbmode && !suspended && !redraw) fb_scroll(FONT_H, palette[attr >> 4]);
     row = H - 1;
+}
+
+void vga_flush_pending(void) {
+    if (!scroll_burst && !dirty_count) return;
+    u32 f = irq_save();
+    unsigned saved = cursor_defer;
+    cursor_defer = 0;
+    draw_dirty();
+    update_cursor();
+    cursor_defer = saved;
+    irq_restore(f);
 }
 
 void vga_set_color(u8 fg, u8 bg) { attr = (bg << 4) | (fg & 0x0F); }
@@ -119,6 +163,9 @@ void vga_reset_terminal(void) { u32 f = irq_save(); esc_state = 0; attr = defaul
 static void clear_nolock(void) {
     for (int i = 0; i < W * H; i++) cells[i] = cell(' ');
     if (fbmode && !suspended) { cur_x = -1; fb_fill(0, 0, PW, PH, palette[attr >> 4]); }
+    dirty_count = 0;
+    scroll_burst = false;
+    memset(dirty_cells, 0, sizeof dirty_cells);
     col = row = 0;
     update_cursor();
 }

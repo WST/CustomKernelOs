@@ -26,18 +26,36 @@ int ata_unit_flush(int unit){if(unit || fail_flush)return -1;memcpy(stable,drive
 static void boot(void){bool formatted;block_cache_invalidate();memcpy(drive,stable,sizeof(drive));CHECK(fs_init(&formatted)==0 && !formatted);}
 static void reset(void){armed=false;fail_flush=fail_write=false;memcpy(stable,baseline,sizeof(stable));boot();events=0;}
 static int operation(unsigned op){
- u32 ino;
+ u32 ino;int r;
  switch(op){
- case 0:return fs_write(file,80,"NEW CONTENT",11)==11?0:-1;
- case 1:return fs_write(file,7000,"APPEND",6)==6?0:-1;
- case 2:return fs_create(FS_ROOT,"/new-directory",FS_TYPE_DIR,&ino);
- case 3:return fs_rename(FS_ROOT,"/a/child","/b/moved");
- case 4:return fs_remove(FS_ROOT,"/data");
- case 5:return fs_truncate(file);
- case 6:return fs_chmod(file,0600);
- case 7:return fs_symlink(FS_ROOT,"/data","/link");
- default:return -1;
+ case 0:r=fs_write(file,80,"NEW CONTENT",11)==11?0:-1;break;
+ case 1:r=fs_write(file,7000,"APPEND",6)==6?0:-1;break;
+ case 2:r=fs_create(FS_ROOT,"/new-directory",FS_TYPE_DIR,&ino);break;
+ case 3:r=fs_rename(FS_ROOT,"/a/child","/b/moved");break;
+ case 4:r=fs_remove(FS_ROOT,"/data");break;
+ case 5:r=fs_truncate(file);break;
+ case 6:r=fs_chmod(file,0600);break;
+ case 7:r=fs_symlink(FS_ROOT,"/data","/link");break;
+ default:r=-1;break;
  }
+ return r?r:fs_sync();
+}
+static int large_save(const u8 *large){
+ int w=fs_write(file,0,large,32768);
+ if(w!=32768)return -1;
+ return fs_sync();
+}
+struct snap{int data_err;u32 size,mode;u8 bytes[8192];int a,child,b,moved,newer,link_n;char link[64];};
+static void fill_snap(struct snap *s){
+ memset(s,0,sizeof *s);u32 ino=0;
+ s->data_err=fs_resolve(1,"/data",&ino);
+ if(!s->data_err){struct fs_stat st;if(fs_stat(ino,&st))s->data_err=-1;else{
+  s->size=st.size;s->mode=st.mode;u32 n=st.size>sizeof s->bytes?sizeof s->bytes:st.size;
+  if(n&&fs_read(ino,0,s->bytes,n)!=(int)n)s->data_err=-1;}}
+ s->a=fs_resolve(1,"/a",&ino)==0;s->child=fs_resolve(1,"/a/child",&ino)==0;
+ s->b=fs_resolve(1,"/b",&ino)==0;s->moved=fs_resolve(1,"/b/moved",&ino)==0;
+ s->newer=fs_resolve(1,"/new-directory",&ino)==0;
+ s->link_n=fs_readlink(1,"/link",s->link,sizeof s->link);
 }
 /* Compare complete disk images except the expendable journal payload sectors. */
 static bool same(const void *a,const void *b){return !memcmp(a,b,(N-121)*512);}
@@ -48,13 +66,16 @@ int main(void){
  CHECK(fs_create(1,"/a",FS_TYPE_DIR,0)==0 && fs_create(1,"/b",FS_TYPE_DIR,0)==0);
  CHECK(fs_create(1,"/a/child",FS_TYPE_DIR,0)==0);
  CHECK(fs_sync()==0);memcpy(baseline,stable,sizeof(stable));
+ struct snap base_snap;fill_snap(&base_snap);
  unsigned crashes=0;
  for(unsigned op=0;op<8;op++){
   policy=0;reset();CHECK(operation(op)==0);unsigned count=events;CHECK(fs_sync()==0);memcpy(after,stable,sizeof(after));
+  struct snap after_snap;fill_snap(&after_snap);
   for(policy=0;policy<3;policy++)for(cut=1;cut<=count;cut++){
    reset();armed=true;
    if(!__builtin_setjmp(jump)){operation(op);CHECK(false);}
-   armed=false;boot();CHECK(same(stable,baseline) || same(stable,after));
+   armed=false;boot();struct snap got;fill_snap(&got);
+   CHECK(!memcmp(&got,&base_snap,sizeof got)||!memcmp(&got,&after_snap,sizeof got));
    /* A second mount must leave the repaired filesystem unchanged. */
    static u8 recovered[N][512];memcpy(recovered,stable,sizeof(stable));boot();CHECK(same(recovered,stable));crashes++;
   }
@@ -76,9 +97,9 @@ int main(void){
 
  /* Multi-transaction saves retain a complete, durable prefix of 16 KiB chunks. */
  static u8 large[32768],readback[32768];memset(large,0xa7,sizeof(large));
- policy=0;reset();CHECK(fs_write(file,0,large,sizeof(large))==sizeof(large));unsigned large_events=events;
+ policy=0;reset();CHECK(large_save(large)==0);unsigned large_events=events;
  for(policy=0;policy<3;policy++)for(cut=1;cut<=large_events;cut++){
-  reset();armed=true;if(!__builtin_setjmp(jump)){fs_write(file,0,large,sizeof(large));CHECK(false);}armed=false;
+  reset();armed=true;if(!__builtin_setjmp(jump)){large_save(large);CHECK(false);}armed=false;
   boot();struct fs_stat st;CHECK(fs_stat(file,&st)==0 && (st.size==2048 || st.size==16384 || st.size==32768));
   CHECK(fs_read(file,0,readback,st.size)==(int)st.size);
   CHECK(!memcmp(readback,st.size==2048?data:large,st.size));crashes++;
@@ -94,13 +115,13 @@ int main(void){
  reset();u32 *super=(u32 *)stable[0];u32 bitmap_sector=super[3];
  stable[bitmap_sector][10]^=0x80;boot();CHECK(same(stable,baseline));
  reset();super=(u32 *)stable[0];u32 inode_start=super[5];u32 ino;
- CHECK(fs_create(1,"/duplicate",FS_TYPE_FILE,&ino)==0);CHECK(fs_write(ino,0,"X",1)==1);
+ policy=0;CHECK(fs_create(1,"/duplicate",FS_TYPE_FILE,&ino)==0);CHECK(fs_write(ino,0,"X",1)==1);CHECK(fs_sync()==0);
  u32 *src=(u32 *)(stable[inode_start+file/8]+(file%8)*64);
  u32 *dst=(u32 *)(stable[inode_start+ino/8]+(ino%8)*64);dst[2]=src[2];
  block_cache_invalidate();memcpy(drive,stable,sizeof(drive));bool f;CHECK(fs_init(&f)==FS_EIO);
  /* Open-but-unlinked files left by a crash are reclaimed, restartably. */
  reset();CHECK(operation(4)==0);memcpy(after,stable,sizeof(after));
- reset();myfs_select(0,0);CHECK(myfs_remove_keep(1,"/data",true)==0);
+ reset();myfs_select(0,0);CHECK(myfs_remove_keep(1,"/data",true)==0);CHECK(myfs_sync()==0);
  static u8 orphaned[N][512];memcpy(orphaned,stable,sizeof(stable));events=0;boot();unsigned orphan_events=events;
  CHECK(same(stable,after));
  for(policy=0;policy<3;policy++)for(cut=1;cut<=orphan_events;cut++){

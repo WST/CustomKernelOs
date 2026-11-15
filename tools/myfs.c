@@ -290,7 +290,14 @@ static int cmd_grow(const char *image, const char *mb_text) {
     }
     struct fs_info after;
     fs_info(&after);
+    /* Группа ещё в памяти: закрытие сбрасывает только кэш секторов. */
+    r = fs_sync();
     host_close_image();
+    if (r) {
+        host_remove_file(neu);
+        err("myfs: grow failed, %s is unchanged\n", image);
+        return r;
+    }
     if (host_replace_image(image, neu)) { err("myfs: cannot replace %s (new image is %s)\n", image, neu); return FS_EIO; }
     say("myfs: %s %u MB -> %u MB, %d entries, %u KB free, %u/%u inodes used\n",
         image, old_kb / 1024, mb, n_snaps, after.free_blocks / 2,
@@ -376,6 +383,12 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "grow") && argc > 3)    r = cmd_grow(argv[1], argv[3]);
     else { err("myfs: bad command\n"); r = FS_EINVAL; }
 
+    /* grow сам закрывает образ после sync. Повторный sync писал бы в закрытый файл.
+     * Ошибка команды не отменяет уже принятые записи этой же группы. */
+    if (strcmp(cmd, "grow")) {
+        int s = fs_sync();
+        if (!r) r = s;
+    }
     host_close_image();
     if (r) { err("myfs: %s\n", fs_strerror(r)); return 1; }
     return 0;

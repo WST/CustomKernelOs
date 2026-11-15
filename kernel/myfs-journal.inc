@@ -52,10 +52,19 @@ static int journal_recover(void) {
 }
 static int journal_read(u32 b,void *p) {
     if(journal_failed[selected])return FS_EIO;
-    if(transaction_depth) for(unsigned i=0;i<transaction_count;i++)if(transaction[i].target==b) {
+    /* Между вызовами depth уже 0, а группа ещё не сброшена: чтение обязано видеть её. */
+    if(transaction_count) for(unsigned i=0;i<transaction_count;i++)if(transaction[i].target==b) {
         memcpy(p,transaction[i].bytes,BS);return 0;
     }
     int r=disk_read(b,p);if(r && transaction_depth)transaction_error=FS_EIO;return r;
+}
+/* Повторное использование сектора не должно оставлять в группе старую копию:
+ * чтение смотрит сначала туда и иначе не увидит новые байты в кэше. */
+static void journal_absorb_data(u32 b,const void *p) {
+    if(!transaction)return;
+    for(unsigned i=0;i<transaction_count;i++) if(transaction[i].target==b) {
+        memcpy(transaction[i].bytes,p,BS);return;
+    }
 }
 static int journal_write(u32 b,const void *p,bool data) {
     if(journal_failed[selected])return FS_EIO;
@@ -68,12 +77,49 @@ static int journal_write(u32 b,const void *p,bool data) {
     }
     return data ? (block_write(states[selected].device,b,p)?FS_EIO:0) : disk_write(b,p);
 }
+/* Группа вызовов копится в журнале, пока не заполнится метаданными или 2 МиБ
+ * новых данных. Откат одного вызова не должен стирать уже принятые предыдущие. */
+#define COMMIT_DATA (2u<<20)
+#define COMMIT_ROOM 48u
+static struct journal_entry *undo_log;
+static unsigned undo_count;
+static bool undo_armed, undo_lost;
+static u32 pending_data, saved_blocks, saved_inodes, saved_hint, saved_ino_hint;
+static u32 bitmap_undo_sec[32];
+static unsigned bitmap_undo_n;
+static u8 *bitmap_undo_data;
+static int commit_pending(void);
+static void bitmap_undo_touch(u32 block) {
+    if(!undo_armed || undo_lost || !bitmap) return;
+    u32 sec=block/BITS_PER_BLK;
+    if(sec>=sb.bitmap_blocks) return;
+    for(unsigned i=0;i<bitmap_undo_n;i++) if(bitmap_undo_sec[i]==sec) return;
+    if(bitmap_undo_n>=32){undo_lost=true;return;}
+    memcpy(bitmap_undo_data+bitmap_undo_n*BS,bitmap+sec*BS,BS);
+    bitmap_undo_sec[bitmap_undo_n++]=sec;
+}
 static int transaction_begin(void) {
     if(journal_failed[selected])return FS_EIO;
     if(!journal_enabled[selected])return 0;
     if(!transaction)transaction=bitmap_alloc(JOURNAL_MAX*sizeof(*transaction));
     if(!transaction)return FS_ENOSPC;
-    if(!transaction_depth) {transaction_count=0;transaction_error=0;}
+    if(!undo_log)undo_log=bitmap_alloc(JOURNAL_MAX*sizeof(*transaction));
+    if(!undo_log)return FS_ENOSPC;
+    if(!bitmap_undo_data)bitmap_undo_data=bitmap_alloc(32*BS);
+    if(!bitmap_undo_data)return FS_ENOSPC;
+    if(!transaction_depth) {
+        /* Место в журнале оставляем текущему вызову: перезапись 16 КиБ и её inode. */
+        if(transaction_count+COMMIT_ROOM>=JOURNAL_MAX || pending_data>=COMMIT_DATA) {
+            int c=commit_pending();
+            if(c)return c;
+        }
+        undo_count=transaction_count;
+        if(undo_count)memcpy(undo_log,transaction,undo_count*sizeof(*transaction));
+        bitmap_undo_n=0;undo_lost=false;undo_armed=true;transaction_error=0;
+        saved_blocks=available_blocks;saved_inodes=available_inodes;
+        saved_hint=states[selected].hint;saved_ino_hint=states[selected].ino_hint;
+        block_epoch_begin();
+    }
     transaction_depth++;return 0;
 }
 static int transaction_commit(void) {
