@@ -1,0 +1,6 @@
+name python
+rm /ext/bin/python3
+rm /ext/bin/pip
+rm /ext/bin/pip3
+rm /ext/bin/virtualenv
+rm -r /ext/lib/python3.15

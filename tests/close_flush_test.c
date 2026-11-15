@@ -10,9 +10,9 @@ struct task *task_current(void) { return &thread; }
 struct task *task_process(struct task *t) { CHECK(t==&thread);return &process; }
 int block_flush(void) { flushes++;CHECK(process.fds[3]==NULL);return flush_result; }
 void file_close(struct file *f) { CHECK(f==&handle);CHECK(flushes==1);closes++; }
-static void prepare(int result) { process.fds[3]=&handle;process.cloexec=1u<<3;flush_result=result;flushes=closes=0; }
+static void prepare(int result) { process.fds[3]=&handle;cloexec_set(&process, 3, 1);flush_result=result;flushes=closes=0; }
 int main(void) {
-    prepare(-1);CHECK(sys_close(3)==-EIO);CHECK(closes==1 && !process.fds[3] && !(process.cloexec&(1u<<3)));
+    prepare(-1);CHECK(sys_close(3)==-EIO);CHECK(closes==1 && !process.fds[3] && !cloexec_get(&process, 3));
     CHECK(sys_close(3)==-EBADF && flushes==1 && closes==1);
     prepare(0);CHECK(sys_close(3)==0 && closes==1 && flushes==1);
     CHECK(sys_close(MAX_FDS)==-EBADF && flushes==1 && closes==1);

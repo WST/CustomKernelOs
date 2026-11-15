@@ -75,7 +75,7 @@ static bool is_keyword(Token *tok) {
         "return", "if", "else", "for", "while", "int", "sizeof", "char", "struct", "union",
         "short", "long", "void", "typedef", "_Bool", "enum", "static", "goto", "break",
         "continue", "switch", "case", "default", "extern", "_Alignof", "signed", "unsigned",
-        "const", "volatile", "auto", "register", "restrict", "__restrict", "inline", "__inline",
+        "const", "volatile", "_Atomic", "auto", "register", "restrict", "__restrict", "inline", "__inline",
         "float", "double", "do", "__attribute__", "__syscall", "_Static_assert", "_Noreturn",
     };
     for (int i = 0; i < (int)(sizeof(kw) / sizeof(*kw)); i++)
@@ -147,15 +147,41 @@ static Token *read_string(char *start, int line) {
 
 static Token *read_char(char *start, int line) {
     char *p = start + 1;
-    if (*p == 0) error("%s:%d: unclosed char literal", cur_file->name, line);
-    int c;
-    if (*p == '\\') c = read_escape(&p, p + 1);
-    else c = (unsigned char)*p++;
+    if (*p == 0 || *p == '\'') error("%s:%d: unclosed char literal", cur_file->name, line);
+    unsigned v = 0;
+    int n = 0;
+    while (*p && *p != '\'') {
+        int c;
+        if (*p == '\\') c = read_escape(&p, p + 1);
+        else c = (unsigned char)*p++;
+        v = (v << 8) | (unsigned)(unsigned char)c;
+        n++;
+    }
     if (*p != '\'') error("%s:%d: unclosed char literal", cur_file->name, line);
     Token *t = new_token(TK_NUM, start, p + 1, line);
-    t->val = (signed char)c;
+    t->val = n == 1 ? (signed char)v : (int)v;
     t->ival = (unsigned long long)(long long)t->val;
     t->ty = ty_int;
+    return t;
+}
+
+/* L"текст": wchar_t — int, байты литерала лежат подряд, включая завершающий нуль. */
+static Token *read_wide_string(char *start, int line) {
+    char *q = start + 1;
+    char *end = string_end(q + 1, line);
+    unsigned *buf = xcalloc((size_t)(end - q + 1) * sizeof(unsigned));
+    int n = 0;
+    for (char *p = q + 1; p < end;) {
+        unsigned c;
+        if (*p == '\\') c = (unsigned)(unsigned char)read_escape(&p, p + 1);
+        else c = (unsigned char)*p++;
+        buf[n++] = c;
+    }
+    buf[n++] = 0;
+    Token *t = new_token(TK_STR, start, end + 1, line);
+    t->ty = array_of(ty_int, n);
+    t->str = (char *)buf;
+    t->str_len = n * 4;
     return t;
 }
 
@@ -343,6 +369,11 @@ Token *tokenize(File *file) {
             p += t->len;
             continue;
         }
+        if (*p == 'L' && p[1] == '"') {
+            cur = cur->next = read_wide_string(p, line);
+            p += cur->len;
+            continue;
+        }
         if (*p == '"') { cur = cur->next = read_string(p, line); p += cur->len; continue; }
         if (*p == '\'') { cur = cur->next = read_char(p, line); p += cur->len; continue; }
         if (is_ident1(*p)) {
@@ -353,7 +384,7 @@ Token *tokenize(File *file) {
         }
         int n = punct_len(p);
         if (n) { cur = cur->next = new_token(TK_PUNCT, p, p + n, line); p += n; continue; }
-        if ((unsigned char)*p >= 0x80 || *p == '\r' || *p == '\f') { p++; continue; }   /* мусор вне строк */
+        if ((unsigned char)*p >= 0x80 || *p == '\r' || *p == '\f' || *p == '`') { p++; continue; }   /* мусор вне строк */
         error("%s:%d: unexpected character '%c'", file->name, line, *p);
     }
     cur = cur->next = new_token(TK_EOF, p, p, line);

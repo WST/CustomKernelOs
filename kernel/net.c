@@ -207,10 +207,10 @@ int net_ping(u32 ip, u16 seq, u32 timeout_ms) {
 
         u32 f = irq_save();
         u32 deadline = timer_ticks() + timeout_ms / (1000 / TIMER_HZ);
-        while (!pinger.done && (i32)(timer_ticks() - deadline) < 0 && !task_current()->kill_pending)
+        while (!pinger.done && (i32)(timer_ticks() - deadline) < 0 && !task_intr(task_current()))
             task_wait_timeout(&pinger, deadline - timer_ticks());
         irq_restore(f);
-        if (task_current()->kill_pending) return -EINTR;
+        if (task_intr(task_current())) return -EINTR;
         return pinger.done ? (int)pinger.rtt : -ETIMEDOUT;
     }
     return -EHOSTUNREACH;
