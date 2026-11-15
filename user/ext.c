@@ -4,7 +4,7 @@
  *   ext install <имя>
  *   ext uninstall <имя>
  *
- * Пакет — каталог /ext/instructions/<имя>/. Имя каталога и есть имя пакета.
+ * Порт — каталог /ext/instructions/<имя>/. Имя каталога и есть имя порта.
  *   setup.inst              установка
  *   uninstall.inst          снятие; ext uninstall не трогает зависимости
  *   остальные файлы         патчи и заготовки вроде config.h
@@ -14,19 +14,19 @@
  *   descr <текст>
  *   workdir <путь>          создать каталог и перейти в него
  *   mkdir <путь>            создать каталог, в том числе вложенный
- *   depend <имя>            сначала поставить этот пакет, если его ещё нет
+ *   depend <имя>            сначала поставить этот порт, если его ещё нет
  *   fetch [-r N] <url> [куда]
  *   git <аргументы git>     /ext/bin/git или /bin/git. Если файла нет,
  *                           сначала выполняется ext install git, как depend git
  *   tar <аргументы tar>     /bin/tar, в том числе xzf для tar.gz
  *   make [аргументы]        /bin/make
  *   cc <аргументы cc>
- *   copy <файл> <куда>      файл из каталога пакета в дерево сборки
- *   patch [-p N] <файл>     unified diff из каталога пакета, по умолчанию -p1
+ *   copy <файл> <куда>      файл из каталога порта в дерево сборки
+ *   patch [-p N] <файл>     unified diff из каталога порта, по умолчанию -p1
  *   rm <путь>               удалить файл
  * # до конца строки — комментарий.
  * fetch вызывает /bin/download. Без -r повторов два.
- * Поставленный пакет отмечается в /ext/installed/<имя>. Пакет с отметкой
+ * Поставленный порт отмечается в /ext/installed/<имя>. Порт с отметкой
  * пропускается и при прямом запросе, и как зависимость. Цикл — ошибка.
  * Отметка снимается только после успешного uninstall.inst.
  */
@@ -180,7 +180,7 @@ static int exec_args(const char *root, const char *pkg, int argc, char **argv) {
     if (argc < 1) return 0;
     if (!strcmp(argv[0], "name") || !strcmp(argv[0], "descr")) return 0;
     if (!strcmp(argv[0], "depend")) {
-        if (argc != 2) { dprintf(STDERR, "ext: depend needs one package\n"); return 1; }
+        if (argc != 2) { dprintf(STDERR, "ext: depend needs one port\n"); return 1; }
         return install_name(root, argv[1]);
     }
     if (!strcmp(argv[0], "workdir")) {
@@ -815,7 +815,7 @@ static int install_name(const char *dir, const char *name) {
     FILE *sf;
     int i, rc, n;
     if (!valid_pkg(name)) {
-        dprintf(STDERR, "ext: %s: bad package name\n", name ? name : "");
+        dprintf(STDERR, "ext: %s: bad port name\n", name ? name : "");
         return 1;
     }
     for (i = 0; i < dep_depth; i++)
@@ -862,7 +862,7 @@ static int uninstall_name(const char *dir, const char *name) {
     FILE *sf;
     int n, r;
     if (!valid_pkg(name)) {
-        dprintf(STDERR, "ext: %s: bad package name\n", name ? name : "");
+        dprintf(STDERR, "ext: %s: bad port name\n", name ? name : "");
         return 1;
     }
     if (!stamp_exists(dir, name)) {

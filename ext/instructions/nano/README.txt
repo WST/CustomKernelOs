@@ -7,7 +7,7 @@ License: GNU GPL version 3 or later; upstream COPYING is installed beside the po
 
 setup.inst downloads upstream, extracts src and COPYING, applies myos.patch,
 and builds the real editor with MyOS cc/make. No prebuilt Linux binaries.
-The native package recipe currently relies on HTTPS transport integrity;
+The native port recipe currently relies on HTTPS transport integrity;
 SHA256 is verified by the host build/test helper.
 
 The private ANSI curses subset draws changed screen runs, reads real terminal

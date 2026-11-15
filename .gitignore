@@ -8,3 +8,6 @@ disk.img
 .env
 .env.*
 !.env.example
+
+# Личные пожелания агенту. Файл заводит разработчик у себя.
+AGENTS.local.md
