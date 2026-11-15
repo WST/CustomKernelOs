@@ -71,8 +71,9 @@
 #define PATH_MAX 1024
 #define NAME_MAX 255
 
-/* Типов ниже в системных заголовках нет. autoconf подставляет их так же. */
-#define sigset_t int
+/* Типов ниже в системных заголовках нет. autoconf подставляет их так же.
+ * sigset_t и socklen_t не подменяем: они уже объявлены в signal.h и
+ * sys/socket.h, и макрос с тем же именем превращает typedef в «int int». */
 #define bits16_t short
 #define u_bits16_t unsigned short
 #define bits32_t int
@@ -80,7 +81,6 @@
 #define bits64_t long long
 #define u_int unsigned int
 #define u_long unsigned long
-#define socklen_t unsigned int
 #define GETGROUPS_T gid_t
 
 #define HAVE_STRUCT_DIRENT_D_INO 1
