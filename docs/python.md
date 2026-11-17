@@ -12,7 +12,7 @@ python3 -m venv /tmp/v
 virtualenv /tmp/e
 ```
 
-Ставятся `/ext/bin/python3`, pip из `ensurepip` и пакет `virtualenv` 20.31.2
+Ставятся `/ext/bin/python3`, pip из `ensurepip` и virtualenv 20.31.2
 с колёсами `distlib`, `filelock` и `platformdirs`. Каталог стандартной
 библиотеки — `/ext/lib/python3.15`. В него не копируются `test`, `tkinter`
 и `idlelib`. `ext uninstall python` удаляет интерпретатор, pip, virtualenv

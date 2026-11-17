@@ -22,7 +22,7 @@ def seed(disk,selected):
         return subprocess.run(['build/myfs',str(disk),*args],check=check,capture_output=True,text=True)
     existing=fs('cat','/etc/ext/autoinstall.conf',check=False)
     if existing.returncode==0:
-        print('ext auto: preserving existing boot package configuration');return
+        print('ext auto: preserving existing boot port configuration');return
     # Distinguish a missing file from an unreadable/corrupt existing path.
     present=fs('stat','/etc/ext/autoinstall.conf',check=False)
     if present.returncode==0:raise ValueError('Existing ext auto configuration cannot be read')
@@ -31,7 +31,7 @@ def seed(disk,selected):
         fs('chown','0','0',directory);fs('chmod','0755',directory)
     with tempfile.TemporaryDirectory(prefix='myos-ext-auto-') as folder:
         path=pathlib.Path(folder)/'autoinstall.conf'
-        path.write_text('# Packages installed at boot; one package per line.\n'+''.join(n+'\n' for n in selected))
+        path.write_text('# Ports installed at boot; one port per line.\n'+''.join(n+'\n' for n in selected))
         fs('put',str(path),'/etc/ext/autoinstall.conf')
         fs('chown','0','0','/etc/ext/autoinstall.conf');fs('chmod','0644','/etc/ext/autoinstall.conf')
         if selected:
