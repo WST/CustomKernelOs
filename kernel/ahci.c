@@ -24,7 +24,8 @@
 #define IS_FATAL ((1u<<30)|(1u<<29)|(1u<<28)|(1u<<27))
 
 static volatile u8 *mmio;
-static u32 data_page[4];
+#define AHCI_DATA_PAGES (AHCI_MAX_SECTORS / 8)
+static u32 data_page[AHCI_DATA_PAGES];
 static struct pci_dev controller;
 static bool dma_failed;
 static bool inventory_ready;
@@ -137,7 +138,8 @@ static int issue(int slot, u8 command, u32 lba, u32 count, bool to_device) {
     if (!command_ready(slot)) return -1;
     u32 base = port_off(unit[slot].index);
     volatile u8 *ct = (volatile u8 *)(unit[slot].page + 1280);
-    for (int i = 0; i < 256; i++) ct[i] = 0;
+    /* FIS и все PRD. Четыре килобайта на описатель, таблица лежит в странице порта. */
+    for (int i = 0; i < 0x80 + AHCI_DATA_PAGES * 16; i++) ct[i] = 0;
     ct[0] = 0x27;
     ct[1] = 0x80;
     ct[2] = command;
@@ -149,7 +151,7 @@ static int issue(int slot, u8 command, u32 lba, u32 count, bool to_device) {
     ct[12] = (u8)count;
     ct[13] = (u8)(count >> 8);
     u32 left = count * 512, prds = 0;
-    for (int i = 0; i < 4 && left; i++) {
+    for (int i = 0; i < AHCI_DATA_PAGES && left; i++) {
         u32 n = left > 4096 ? 4096 : left;
         volatile u32 *prd = (volatile u32 *)(ct + 0x80 + prds * 16);
         prd[0] = data_page[i];
@@ -180,7 +182,7 @@ static int issue(int slot, u8 command, u32 lba, u32 count, bool to_device) {
 
 static void copy_out(const void *src, u32 bytes) {
     const u8 *p = src;
-    for (int i = 0; i < 4 && bytes; i++) {
+    for (int i = 0; i < AHCI_DATA_PAGES && bytes; i++) {
         u32 n = bytes > 4096 ? 4096 : bytes;
         memcpy((void *)data_page[i], p, n);
         p += n;
@@ -189,7 +191,7 @@ static void copy_out(const void *src, u32 bytes) {
 }
 static void copy_in(void *dst, u32 bytes) {
     u8 *p = dst;
-    for (int i = 0; i < 4 && bytes; i++) {
+    for (int i = 0; i < AHCI_DATA_PAGES && bytes; i++) {
         u32 n = bytes > 4096 ? 4096 : bytes;
         memcpy(p, (void *)data_page[i], n);
         p += n;
@@ -293,7 +295,7 @@ static bool ahci_start(bool installer) {
     wr(HBA_GHC, rd(HBA_GHC) | (1u << 31));
     if ((rd(0x10) >> 16) != 1) return false;
     inventory_ready=true;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < AHCI_DATA_PAGES; i++) {
         data_page[i] = pmm_alloc();
         if (!data_page[i]) {
             for(int j=0;j<i;j++){pmm_free(data_page[j]);data_page[j]=0;}
@@ -352,15 +354,18 @@ int ahci_installer_probe(void) {
 }
 const char *ahci_unit_model(int slot) {return ahci_present(slot)?unit[slot].model:"";}
 
-int ahci_read(int slot, u32 lba, void *buf) {
-    if (!ahci_present(slot) || lba >= unit[slot].sectors) return -1;
-    if (issue(slot, 0x25, lba, 1, false)) return -1;
-    copy_in(buf, 512);
+int ahci_read_sectors(int slot, u32 lba, void *buf, u32 count) {
+    if (!count || count > AHCI_MAX_SECTORS || !ahci_present(slot) || lba >= unit[slot].sectors ||
+        count > unit[slot].sectors - lba)
+        return -1;
+    if (issue(slot, 0x25, lba, count, false)) return -1;
+    copy_in(buf, count * 512);
     return 0;
 }
+int ahci_read(int slot, u32 lba, void *buf) { return ahci_read_sectors(slot, lba, buf, 1); }
 
 int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
-    if (!count || count > 32 || !ahci_present(slot) || lba >= unit[slot].sectors ||
+    if (!count || count > AHCI_MAX_SECTORS || !ahci_present(slot) || lba >= unit[slot].sectors ||
         count > unit[slot].sectors - lba)
         return -1;
     /* Check before touching shared data pages, not only inside issue(). */
@@ -369,4 +374,7 @@ int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
     return issue(slot, 0x35, lba, count, true);
 }
 
-int ahci_flush(int slot) {return ahci_present(slot)?issue(slot,0xea,0,0,false):-1;}
+int ahci_flush(int slot) {
+    if (!ahci_present(slot)) return -1;
+    return issue(slot, 0xea, 0, 0, false);
+}

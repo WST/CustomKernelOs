@@ -32,10 +32,11 @@ int main(void) {
     CHECK(block_flush()<0 && writes>0);
     CHECK(block_read(0,500,buf)==0 && !memcmp(buf,data,512));
     fail_write=false;CHECK(block_flush()==0 && !memcmp(disk[500],data,512));
-    /* If every slot is dirty, failed eviction must retain the old contents. */
+    /* Грязный кэш не выбрасывается, чтобы впустить новое чтение.
+     * Сектор при этом читается с устройства и в таблицу не ставится. */
     block_cache_invalidate();
     for(unsigned i=0;i<128;i++)CHECK(block_write(0,i,data)==0);
-    fail_write=true;CHECK(block_read(0,700,buf)<0);
+    fail_write=true;CHECK(block_read(0,700,buf)==0);
     CHECK(block_read(0,0,buf)==0 && !memcmp(buf,data,512));
     fail_write=false;CHECK(block_flush()==0);
     puts("BLOCK CACHE PASS: working-set hits, clean LRU, write errors and retained dirty data");

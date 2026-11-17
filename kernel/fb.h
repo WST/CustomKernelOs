@@ -63,6 +63,7 @@ void fb_scroll(int pixels, u32 bg);  /* сдвинуть всё изображе
 /* скопировать прямоугольник из буфера программы (stride пикселей в строке) */
 void fb_blit(const u32 *src, u32 stride, int x, int y, int w, int h);
 void fb_upload_pending(void);       /* preserve CPU-before-GPU command order */
+void fb_console_show(void);         /* показать уже нарисованные символы консоли */
 int fb_frame(bool begin);          /* owner-controlled, nested begin/end frame */
 void fb_tick(void);                 /* из таймера: показать накопленные изменения */
 

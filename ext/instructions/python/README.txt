@@ -16,5 +16,5 @@ sha256 8e778c6fa421516f4d3369449f8df3b0e1b72c0e0005fe88e3ec772d0a14e750
 
 The guest tar accepts gzip, not xz. A fresh 64 MiB disk is too small:
 the recipe expects a grown volume (the default disk.img is 4 GiB,
-MAX_INODES 131072). Build with make -j1. Frozen modules are produced
+262144 inodes when newly formatted). Build with make -j4. Frozen modules are produced
 by _freeze_module during that make and are not stored in this tree.

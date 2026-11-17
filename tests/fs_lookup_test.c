@@ -24,7 +24,7 @@ int main(int argc,char **argv){
  CHECK(fs_rename(1,"/cache","/renamed")==0);CHECK(fs_resolve(1,"/cache/new",&found)==FS_ENOENT);CHECK(fs_resolve(1,"/renamed/new",&found)==0);
  CHECK(fs_symlink(1,"/renamed/new","/alias")==0);CHECK(fs_resolve(1,"/alias",&found)==0&&found==ino);
  CHECK(fs_remove(1,"/alias")==0);CHECK(fs_symlink(1,"/renamed/f398","/alias")==0);CHECK(fs_resolve(1,"/alias",&found)==0&&found!=ino);
- CHECK(fs_init(&formatted)==0&&!formatted);CHECK(fs_resolve(1,"/renamed/new",&found)==0);
+ CHECK(fs_sync()==0&&fs_init(&formatted)==0&&!formatted);CHECK(fs_resolve(1,"/renamed/new",&found)==0);
  CHECK(fs_format()==0);CHECK(fs_resolve(1,"/renamed/new",&found)==FS_ENOENT);CHECK(fs_resolve(1,"/alias",&found)==FS_ENOENT);
  host_close_image();printf("VFS name cache invalidation: PASS\n");return 0;
 }

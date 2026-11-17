@@ -53,7 +53,7 @@ int main(){
   CHECK(fs_write(ino,(11u+128u+128u*128u+128u*128u*128u)*512u,&mark,1)==FS_EFBIG);
   fs_info(&fi);
   /* remount: всё на месте */
-  CHECK(fs_init(&f)==0 && !f);
+  CHECK(fs_sync()==0 && fs_init(&f)==0 && !f);
   CHECK(fs_resolve(1,"big",&ino)==0 && fs_read(ino,0,rd,n)==n && !memcmp(big,rd,n));
   CHECK(fs_read(ino,past,rd,1)==1 && rd[0]=='Q');
   struct fs_info fi2; fs_info(&fi2); CHECK(fi2.free_blocks==fi.free_blocks);
@@ -139,7 +139,7 @@ int main(){
     memcpy(nested + 180, "/z", 3);
     CHECK(strlen(nested) > 128);
     CHECK(fs_create(1, nested, FS_TYPE_FILE, &up)==0);
-    CHECK(fs_init(&f)==0 && !f);
+    CHECK(fs_sync()==0 && fs_init(&f)==0 && !f);
     CHECK(fs_resolve(1, nested, &up)==0);
   }
   /* Символическая ссылка: цель в теле файла, последний компонент раскрывается
@@ -208,7 +208,7 @@ int main(){
     CHECK(fs_create(1, n28, FS_TYPE_FILE, 0)==FS_ENAMETOOLONG);
     CHECK(fs_create(1, "bigv1", FS_TYPE_FILE, &up)==0);
     CHECK(fs_write(up, (12u+128u+128u*128u)*512u, "Z", 1)==FS_EFBIG);
-    CHECK(fs_init(&f)==0 && !f);
+    CHECK(fs_sync()==0 && fs_init(&f)==0 && !f);
     CHECK(fs_resolve(1, n27, &up)==0);
     CHECK(fs_remove(1, "ok")==0);
     CHECK(fs_resolve(1, "ok", &up)==FS_ENOENT);
@@ -270,7 +270,7 @@ int main(){
   CHECK(fs_mount(1,"/dev/sdb2","/other")==FS_EBUSY);
   char device[128],target[128];
   CHECK(fs_mount_info(1,device,target)==1 && !strcmp(device,"/dev/sdb2") && !strcmp(target,"/mnt"));
-  CHECK(fs_init(&f)==0 && fs_mount(1,"sdb2","/mnt")==0);
+  CHECK(fs_sync()==0 && fs_init(&f)==0 && fs_mount(1,"sdb2","/mnt")==0);
   CHECK(fs_resolve(1,"/mnt/hello",&ino)==0 && fs_read(ino,0,rd,9)==9 && !memcmp(rd,"partition",9));
   /* Invalid and overlapping partition extents are skipped. */
   disk[446+16+8]=1; disk[446+16+9]=0; block_cache_invalidate();
