@@ -41,7 +41,7 @@ bool task_raw_device_busy(int disk) {
     for(int i=0;i<MAX_TASKS;i++) if(tasks[i])
         for(int j=0;j<MAX_FDS;j++) {
             struct file *f=tasks[i]->fds[j];
-            if(f && f->type==FILE_DISK && f->ino>=0xf0000010u && f->ino<0xf0000010u+10 && (int)((f->ino-0xf0000010u)/5)==disk) busy=true;
+            if(f && f->type==FILE_DISK && f->ino>=0xf0000010u && f->ino<0xf0000010u+BLOCK_MAX && (int)((f->ino-0xf0000010u)/5)==disk) busy=true;
         }
     irq_restore(flags); return busy;
 }

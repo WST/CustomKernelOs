@@ -7,6 +7,8 @@ int ahci_port_info(unsigned index, struct hw_sata_info *out);
 /* SATA AHCI. A present port replaces the IDE disk of the same index:
  * port 0 is /dev/sdb, port 1 is /dev/sdc. IDE remains the fallback. */
 bool ahci_init(void);
+int ahci_installer_probe(void);
+const char *ahci_unit_model(int unit);
 bool ahci_present(int unit);
 u32  ahci_sectors(int unit);
 const char *ahci_model(void);

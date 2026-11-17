@@ -66,12 +66,12 @@ static int sys_fsctl(u32 op,u32 arg,u32 ptr) {
         }
         fs_namespace_unlock();if(!r)memcpy((void*)ptr,&out,sizeof(out));return r;
     }
-    if(op<4 || op>8)return -EINVAL;
+    if((op<4 || op>8) && op!=15)return -EINVAL;
     fs_namespace_lock();int r=0;
     if(descriptor){if(f->type!=FILE_DISK)r=FS_EINVAL;else ino=f->ino;}
-    else {char path[PATH_MAX];if(!user_str(arg,path,sizeof(path))){fs_namespace_unlock();return -EFAULT;}r=fs_resolve(p->cwd,path,&ino);}
+    else {char path[PATH_MAX];if(!user_str(arg,path,sizeof(path))){fs_namespace_unlock();return -EFAULT;}r=op==15?fs_resolve_nofollow(p->cwd,path,&ino):fs_resolve(p->cwd,path,&ino);}
     if(!r && (op==4 || op==5))r=fs_chmod(ino,ptr);
-    if(!r && (op==6 || op==7)) {
+    if(!r && (op==6 || op==7 || op==15)) {
         u32 ids[2];if(!user_buf_ok(ptr,8,false)){fs_namespace_unlock();return -EFAULT;}
         memcpy(ids,(void*)ptr,8);r=fs_chown(ino,ids[0],ids[1]);
     }

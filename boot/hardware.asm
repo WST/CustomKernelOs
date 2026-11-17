@@ -47,6 +47,11 @@ dap: db 16,0
     dw 32
     dw 0x9000,0
     dq 1
+%ifdef INSTALLED_ROOT
+times 400-($-$$) db 0
+    db 'MYOSINST'
+    dd 1,ROOT_LBA,KERNEL_SECTORS
+%endif
 times 440-($-$$) db 0
     dd ROOT_DISK_ID
     dw 0

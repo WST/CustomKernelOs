@@ -6,6 +6,7 @@
 #include "hwinfo.h"
 #include "scheduler.h"
 #include "kernelinfo.h"
+#include "installer.h"
 int sysinfo(struct system_info *out, unsigned size);
 /* Returns online CPU count, or negative errno; capacity is in records. */
 int cpuinfo(struct cpu_info *out, unsigned capacity);
@@ -73,7 +74,7 @@ enum {
     SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO,
     SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
     SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
-    SYS_SIGNAL, SYS_SIGRETURN
+    SYS_SIGNAL, SYS_SIGRETURN, SYS_INSTALLCTL
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0

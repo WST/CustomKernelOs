@@ -438,13 +438,13 @@ programs: $(UBINS)
 # Библиотеки для cc — статические архивы, собранные самим cc: /lib/libc.a и
 # /lib/libgfx.a на диске MyOS ($(BUILD)/mlib) и такие же для cc-host -linux ($(CCROOT)/lib).
 CCROOT    := $(BUILD)/ccroot
-CC_HDRS   := user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h $(wildcard $(OSSL_SRC)/include/openssl/*.h) $(wildcard $(OSSL_BLD)/include/openssl/*.h) $(wildcard $(CURL_SRC)/include/curl/*.h)
+CC_HDRS   := user/lib/myos.h user/lib/installer.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h $(wildcard user/include/*.h) $(wildcard user/include/sys/*.h) $(wildcard user/include/netinet/*.h) $(wildcard user/include/arpa/*.h) user/include/netdb.h $(wildcard $(OSSL_SRC)/include/openssl/*.h) $(wildcard $(OSSL_BLD)/include/openssl/*.h) $(wildcard $(CURL_SRC)/include/curl/*.h)
 CC_LIBSRC := user/lib/libc.c user/lib/regex.c user/lib/zlib.c user/lib/gfx.c user/lib/vec.c user/lib/font.c user/lib/win.c
 GFX_PARTS := gfx vec font win
 
 $(CCROOT)/.stamp: $(CC_HDRS) $(CC_LIBSRC) $(OSSL_BLD)/.configured
 	@mkdir -p $(CCROOT)/include/sys $(CCROOT)/include/netinet $(CCROOT)/include/arpa $(CCROOT)/include/openssl $(CCROOT)/include/curl $(CCROOT)/lib
-	@cp user/lib/myos.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
+	@cp user/lib/myos.h user/lib/installer.h user/lib/build_jobs.h user/lib/hwinfo.h user/lib/scheduler.h user/lib/kernelinfo.h user/lib/sysinfo.h user/lib/gfx.h user/lib/win.h user/include/*.h $(CCROOT)/include/
 	@cp user/include/sys/*.h $(CCROOT)/include/sys/
 	@cp user/include/netinet/*.h $(CCROOT)/include/netinet/
 	@cp user/include/arpa/*.h $(CCROOT)/include/arpa/
@@ -610,7 +610,7 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@$(BUILD)/myfs $(DISK) mkdir /usr/share/wallpapers >/dev/null || exit 1
 	@for f in wallpapers/*.jpg; do $(BUILD)/myfs $(DISK) put $$f /usr/share/wallpapers/$$(basename $$f) >/dev/null || exit 1; done
 	@for f in apps/*.desktop; do $(BUILD)/myfs $(DISK) put $$f /usr/share/applications/$$(basename $$f) >/dev/null || exit 1; done
-	@for f in myos.h build_jobs.h hwinfo.h scheduler.h kernelinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
+	@for f in myos.h installer.h build_jobs.h hwinfo.h scheduler.h kernelinfo.h sysinfo.h gfx.h win.h tls.h; do $(BUILD)/myfs $(DISK) put user/lib/$$f /include/$$f >/dev/null || exit 1; done
 	@for f in user/include/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/$$(basename $$f) >/dev/null || exit 1; done
 	@$(BUILD)/myfs $(DISK) mkdir /include/sys >/dev/null 2>&1 || true
 	@for f in user/include/sys/*.h; do $(BUILD)/myfs $(DISK) put $$f /include/sys/$$(basename $$f) >/dev/null || exit 1; done
@@ -1411,3 +1411,36 @@ persistence-lifecycle-smoke:
 	python3 tests/persistence_lifecycle_smoke.py
 persistence-large-test: $(BUILD)/myfs
 	python3 tests/myfs_large_reclaim.py
+
+$(BUILD)/fs.o $(HWBUILD)/fs.o: kernel/fs-install.inc user/lib/installer.h
+$(BUILD)/myfs: kernel/fs-install.inc user/lib/installer.h
+$(BUILD)/user/libc.o $(BUILD)/user/libc.so: user/lib/installer.h
+.PHONY: install-payload
+install-payload: $(HWBUILD)/kernel.bin
+	python3 tools/make_install_payload.py --nasm $(NASM) --nm "$(NM)"
+
+$(BUILD)/user/installercheck.o: tests/installer_check.c user/lib/myos.h | $(BUILD)/user
+	$(CC) $(UCFLAGS) -c $< -o $@
+$(BUILD)/user/installercheck: $(BUILD)/user/installercheck.o $(BUILD)/user/libmyos.a user/user.ld
+	$(LD) $(ULDFLAGS) $< $(BUILD)/user/libmyos.a -o $@
+
+.PHONY: installer-test installer-smoke nvme-test nvme-installer-smoke nvme-boot-smoke
+installer-test: | $(BUILD)
+	$(HOSTCC) -std=gnu17 -O1 -w -fno-builtin -DHOST_TEST -Ikernel tests/disk_install_test.c kernel/fs.c kernel/myfs.c kernel/block.c kernel/string.c -o $(BUILD)/disk-install-test
+	./$(BUILD)/disk-install-test
+installer-smoke: $(HWBUILD)/kernel.bin $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libc.so $(BUILD)/user/installercheck $(addprefix $(BUILD)/user/,sh setup cat mkdir sync stat poweroff)
+	python3 tests/disk_install_smoke.py
+nvme-test: | $(BUILD)
+	$(HOSTCC) -m32 -no-pie -std=gnu17 -O1 -g -fno-builtin -ffunction-sections -fdata-sections tests/nvme_test.c kernel/string.c -Wl,--gc-sections -o $(BUILD)/nvme-test
+	./$(BUILD)/nvme-test
+nvme-installer-smoke: $(HWBUILD)/kernel.bin $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libc.so $(BUILD)/user/installercheck $(addprefix $(BUILD)/user/,sh setup cat mkdir sync stat poweroff)
+	python3 tests/disk_install_smoke.py --storage nvme
+nvme-boot-smoke: $(HWBUILD)/kernel.bin $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libc.so $(addprefix $(BUILD)/user/,sh cat stat poweroff sync)
+	python3 tests/nvme_boot_smoke.py
+.PHONY: uefi-loader uefi-smoke uefi-installer-smoke
+uefi-loader:
+	python3 tools/make_uefi.py
+uefi-smoke: $(HWBUILD)/kernel.bin $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libc.so $(addprefix $(BUILD)/user/,sh cat stat poweroff sync)
+	python3 tests/uefi_smoke.py
+uefi-installer-smoke: $(HWBUILD)/kernel.bin $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libc.so $(BUILD)/user/installercheck $(addprefix $(BUILD)/user/,sh setup cat mkdir sync stat poweroff)
+	python3 tests/disk_install_smoke.py --storage nvme --firmware uefi
