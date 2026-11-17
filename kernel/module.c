@@ -102,28 +102,32 @@ int module_load_image(const void *image, u32 len, const char *name) {
     int slot = -1;
     for (int i = 0; i < MOD_MAX; i++) if (!mods[i].alive) { slot = i; break; }
     if (slot < 0) return -ENOMEM;
-    u32 total = 16;
+    /* GCC ставит .bss на 32 байта, если в ней массив от 32 байт. Куча
+     * выравнивает только на 16, поэтому запас берём внутри блока. */
+    u32 total = 0, max_al = 16;
     for (u16 i = 0; i < eh->e_shnum; i++) {
         if (!(sh[i].sh_flags & SHF_ALLOC)) continue;
         u32 al = sh[i].sh_addralign ? sh[i].sh_addralign : 1;
-        if (al > 16) return -ENOEXEC;
+        if (al > 4096 || (al & (al - 1))) return -ENOEXEC;
+        if (al > max_al) max_al = al;
         total = (total + al - 1) & ~(al - 1);
         if (sh[i].sh_size > 1024 * 1024 || total + sh[i].sh_size < total) return -ENOMEM;
         total += sh[i].sh_size;
     }
-    u8 *base = kmalloc(total + 16);
+    u8 *raw = kmalloc(total + max_al);
     u8 **sec = kmalloc(eh->e_shnum * sizeof(u8 *));
-    if (!base || !sec) { kfree(base); kfree(sec); return -ENOMEM; }
-    memset(base, 0, total + 16);
+    if (!raw || !sec) { kfree(raw); kfree(sec); return -ENOMEM; }
+    u8 *base = (u8 *)(((uptr)raw + max_al - 1) & ~((uptr)max_al - 1));
+    memset(base, 0, total);
     memset(sec, 0, eh->e_shnum * sizeof(u8 *));
-    u32 cursor = 16;
+    u32 cursor = 0;
     for (u16 i = 0; i < eh->e_shnum; i++) {
         if (!(sh[i].sh_flags & SHF_ALLOC)) continue;
         u32 al = sh[i].sh_addralign ? sh[i].sh_addralign : 1;
         cursor = (cursor + al - 1) & ~(al - 1);
         sec[i] = base + cursor;
         if (sh[i].sh_type == SHT_PROGBITS) {
-            if (!range_ok(image, len, sh[i].sh_offset, sh[i].sh_size)) { kfree(base); kfree(sec); return -ENOEXEC; }
+            if (!range_ok(image, len, sh[i].sh_offset, sh[i].sh_size)) { kfree(raw); kfree(sec); return -ENOEXEC; }
             memcpy(sec[i], (const u8 *)image + sh[i].sh_offset, sh[i].sh_size);
         } else if (sh[i].sh_type == SHT_NOBITS) {
             memset(sec[i], 0, sh[i].sh_size);
@@ -135,19 +139,19 @@ int module_load_image(const void *image, u32 len, const char *name) {
     u32 nsym = 0, strsz = 0;
     for (u16 i = 0; i < eh->e_shnum; i++) {
         if (sh[i].sh_type != SHT_REL) continue;
-        if (sh[i].sh_link >= eh->e_shnum || sh[sh[i].sh_link].sh_type != SHT_SYMTAB) { kfree(base); kfree(sec); return -ENOEXEC; }
+        if (sh[i].sh_link >= eh->e_shnum || sh[sh[i].sh_link].sh_type != SHT_SYMTAB) { kfree(raw); kfree(sec); return -ENOEXEC; }
         const struct elf32_shdr *sy = &sh[sh[i].sh_link];
-        if (sy->sh_link >= eh->e_shnum || !range_ok(image, len, sy->sh_offset, sy->sh_size)) { kfree(base); kfree(sec); return -ENOEXEC; }
+        if (sy->sh_link >= eh->e_shnum || !range_ok(image, len, sy->sh_offset, sy->sh_size)) { kfree(raw); kfree(sec); return -ENOEXEC; }
         if (!syms) {
             syms = (const struct elf32_sym *)((const u8 *)image + sy->sh_offset);
             nsym = sy->sh_entsize ? sy->sh_size / sy->sh_entsize : 0;
             const struct elf32_shdr *st = &sh[sy->sh_link];
-            if (!range_ok(image, len, st->sh_offset, st->sh_size)) { kfree(base); kfree(sec); return -ENOEXEC; }
+            if (!range_ok(image, len, st->sh_offset, st->sh_size)) { kfree(raw); kfree(sec); return -ENOEXEC; }
             str = (const char *)image + st->sh_offset;
             strsz = st->sh_size;
         }
         const struct elf32_shdr *st = &sh[sy->sh_link];
-        if (!range_ok(image, len, sh[i].sh_offset, sh[i].sh_size) || sh[i].sh_info >= eh->e_shnum) { kfree(base); kfree(sec); return -ENOEXEC; }
+        if (!range_ok(image, len, sh[i].sh_offset, sh[i].sh_size) || sh[i].sh_info >= eh->e_shnum) { kfree(raw); kfree(sec); return -ENOEXEC; }
         u8 *dest = sec[sh[i].sh_info];
         if (!dest) continue; /* .eh_frame и прочие секции без SHF_ALLOC */
         u32 nrel = sh[i].sh_entsize ? sh[i].sh_size / sh[i].sh_entsize : 0;
@@ -155,27 +159,27 @@ int module_load_image(const void *image, u32 len, const char *name) {
         for (u32 r = 0; r < nrel; r++) {
             u32 symi = ELF_R_SYM(rel[r].r_info);
             u8 type = ELF_R_TYPE(rel[r].r_info);
-            if (symi >= nsym || rel[r].r_offset + 4 > sh[sh[i].sh_info].sh_size) { kfree(base); kfree(sec); return -ENOEXEC; }
+            if (symi >= nsym || rel[r].r_offset + 4 > sh[sh[i].sh_info].sh_size) { kfree(raw); kfree(sec); return -ENOEXEC; }
             const struct elf32_sym *syment = &syms[symi];
             u32 value = 0;
             if (syment->st_shndx == SHN_UNDEF) {
-                if (syment->st_name >= st->sh_size) { kfree(base); kfree(sec); return -ENOEXEC; }
+                if (syment->st_name >= st->sh_size) { kfree(raw); kfree(sec); return -ENOEXEC; }
                 void *ext = lookup(str + syment->st_name);
                 if (!ext) {
                     klogf("KMOD: unresolved %s\n", str + syment->st_name);
-                    kfree(base); kfree(sec); return -ENOENT;
+                    kfree(raw); kfree(sec); return -ENOENT;
                 }
                 value = (u32)(uptr)ext;
             } else if (syment->st_shndx == SHN_ABS) {
                 value = syment->st_value;
             } else if (syment->st_shndx < eh->e_shnum && sec[syment->st_shndx]) {
                 value = (u32)(uptr)sec[syment->st_shndx] + syment->st_value;
-            } else { kfree(base); kfree(sec); return -ENOEXEC; }
+            } else { kfree(raw); kfree(sec); return -ENOEXEC; }
             u8 *at = dest + rel[r].r_offset;
             u32 addend = *(u32 *)at;
             if (type == R_386_32) *(u32 *)at = addend + value;
             else if (type == R_386_PC32) *(u32 *)at = addend + value - (u32)(uptr)at;
-            else { kfree(base); kfree(sec); return -ENOEXEC; }
+            else { kfree(raw); kfree(sec); return -ENOEXEC; }
         }
     }
     const struct myos_module *desc = NULL;
@@ -185,13 +189,13 @@ int module_load_image(const void *image, u32 len, const char *name) {
         desc = (const struct myos_module *)(sec[syms[i].st_shndx] + syms[i].st_value);
         break;
     }
-    if (!desc || desc->magic != MOD_MAGIC || !desc->init || !desc->name) { kfree(base); kfree(sec); return -ENOEXEC; }
+    if (!desc || desc->magic != MOD_MAGIC || !desc->init || !desc->name) { kfree(raw); kfree(sec); return -ENOEXEC; }
     struct elf32_sym *owned_sym = NULL;
     char *owned_str = NULL;
     if (syms && nsym && str && strsz) {
         owned_sym = kmalloc(nsym * sizeof(*syms));
         owned_str = kmalloc(strsz + 1);
-        if (!owned_sym || !owned_str) { kfree(owned_sym); kfree(owned_str); kfree(base); kfree(sec); return -ENOMEM; }
+        if (!owned_sym || !owned_str) { kfree(owned_sym); kfree(owned_str); kfree(raw); kfree(sec); return -ENOMEM; }
         memcpy(owned_sym, syms, nsym * sizeof(*syms));
         memcpy(owned_str, str, strsz);
         owned_str[strsz] = 0;
@@ -205,7 +209,7 @@ int module_load_image(const void *image, u32 len, const char *name) {
         m->name[0] = 0;
         for (int i = 0; name[i] && i < 15; i++) m->name[i] = name[i];
     }
-    m->base = base; m->size = total; m->fini = desc->fini; m->alive = 1;
+    m->base = raw; m->size = total; m->fini = desc->fini; m->alive = 1;
     m->sec = sec; m->shnum = eh->e_shnum; m->sym = syms; m->nsym = nsym; m->str = str;
     struct loaded *prev = loading;
     loading = m;
@@ -214,7 +218,7 @@ int module_load_image(const void *image, u32 len, const char *name) {
     if (rc) {
         if (m->fini && !m->refs) m->fini();
         kfree(owned_sym); kfree(owned_str);
-        kfree(sec); kfree(base);
+        kfree(sec); kfree(raw);
         memset(m, 0, sizeof(*m));
         return rc;
     }

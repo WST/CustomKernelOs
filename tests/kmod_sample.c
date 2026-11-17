@@ -3,6 +3,7 @@
 /* Учебный модуль: внешний вызов проверяет R_386_PC32, строка имени — R_386_32. */
 extern int kmod_ping(int v);
 int kmod_mark;
+char align32[32] __attribute__((aligned(32)));
 
 static int sample_init(void) {
     kmod_mark = kmod_ping(7);

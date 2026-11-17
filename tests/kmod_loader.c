@@ -96,6 +96,8 @@ static void run(void) {
         expect(id >= 0, "load");
         int *mark = module_symbol(id, "kmod_mark");
         expect(mark && *mark == 7, "reloc value");
+        char *aligned = module_symbol(id, "align32");
+        expect(aligned && ((unsigned)aligned % 32) == 0, "bss align 32");
         expect(module_ctl(2, "sample", 0, 0) == 0, "unload");
     }
     if (fail) put("kmod: FAIL\n");

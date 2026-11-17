@@ -18,35 +18,76 @@ MYOS_MODULE(iwl1000);
 MYOS_PCI_ID(0x8086, 0x0083);
 MYOS_PCI_ID(0x8086, 0x0084);
 
-#define MMIO_VIRT 0xE5000000u
+/* 0xE5000000 занят окном ACPI, которое smp_init снимает после загрузки модулей,
+ * и регистрами NVIDIA. Иначе поток wlan и wifid ловят page fault на CSR. */
+#define MMIO_VIRT 0xE6000000u
 #define MMIO_BYTES 0x4000u
+#define CSR_HW_IF 0x000
 #define CSR_INT 0x008
 #define CSR_INT_MASK 0x00c
 #define CSR_RESET 0x020
 #define CSR_GP 0x024
 #define CSR_HW_REV 0x028
 #define CSR_EEPROM 0x02c
+#define CSR_EEPROM_GP 0x030
+#define CSR_OTP_GP 0x034
 #define CSR_INT_FH_RX 0x80000000u
 #define CSR_RESET_SW 0x80u
 #define CSR_RESET_MASTER_DIS 0x100u
 #define CSR_RESET_STOP 0x200u
+#define CSR_RESET_LINK_PM_DIS 0x80000000u
 #define CSR_GP_CLOCK 1u
 #define CSR_GP_INIT_DONE 4u
 #define CSR_GP_ACCESS 8u
+#define CSR_GP_SLEEP 0x10u
 #define CSR_GP_RFKILL 0x08000000u
+#define CSR_HW_IF_HAP_WAKE 0x00080000u
+#define CSR_HW_IF_EEPROM_SEM 0x00200000u
+#define CSR_HW_IF_NIC_READY 0x00400000u
+#define CSR_HW_IF_PREPARE 0x08000000u
+#define CSR_OTP_SELECT 0x00010000u
+#define CSR_OTP_RELATIVE 0x00020000u
+#define CSR_MBOX_SET 0x088
+#define CSR_MBOX_OS_ALIVE 0x20u
+#define CSR_GIO_CHICKEN 0x100
+#define CSR_GIO_DIS_L0S_TIMER 0x20000000u
+#define CSR_GIO_L1A_NO_L0S 0x00800000u
+#define CSR_ANA_PLL 0x20c
+#define CSR_ANA_PLL_1000 0x00880300u
+#define CSR_HPET 0x240
+#define CSR_HPET_VAL 0xFFFF0000u
+#define CSR_DBG_LINK_PWR 0x250
 #define FH_KW 0x197c
 #define FH_CBBC 0x19d0
 #define FH_SRVC_ADDR 0x19c8
-#define FH_RX_WPTR 0x1bc0
+#define FH_TFDIB0(ch) (0x1900u + 8u * (ch))
+#define FH_TFDIB1(ch) (0x1904u + 8u * (ch))
+#define CSR_FH_INT 0x010
+#define FH_RX_STTS 0x1bc0
 #define FH_RX_BASE 0x1bc4
+#define FH_RX_WPTR 0x1bc8
 #define FH_RX_CFG 0x1c00
 #define FH_TX_CFG(ch) (0x1d00u + 0x20u * (ch))
 #define FH_TX_STS(ch) (0x1d00u + 0x20u * (ch) + 8u)
 #define FH_TSSR 0x1eb0
+#define HBUS_MEM_RADDR 0x40c
 #define HBUS_MEM_WADDR 0x410
 #define HBUS_MEM_WDAT 0x418
+#define HBUS_MEM_RDAT 0x41c
 #define HBUS_PRPH_WADDR 0x444
+#define HBUS_PRPH_RADDR 0x448
 #define HBUS_PRPH_WDAT 0x44c
+#define HBUS_PRPH_RDAT 0x450
+#define APMG_CLK_EN 0x3004
+#define APMG_PS 0x300c
+#define APMG_PCI_STT 0x3010
+#define APMG_CLK_DMA 0x200u
+#define APMG_PS_RESET 0x04000000u
+#define APMG_PS_SRC 0x03000000u
+#define APMG_L1_OFF 0x800u
+#define CSR_EEPROM_GP_OWNER 0x180u
+#define CSR_OTP_ECC_FIX 0x00100000u
+#define CSR_OTP_ECC_BAD 0x00200000u
 #define HBUS_WRPTR 0x460
 #define Q_CMD 4
 #define Q_TX 0
@@ -88,19 +129,53 @@ static void *dma_page(void) {
     return (void *)p;
 }
 
-static int wait_bit(u32 reg, u32 mask, u32 want, u32 spins) {
-    for (u32 i = 0; i < spins; i++) if ((rd(reg) & mask) == want) return 1;
-    return 0;
+static int poll_ms(u32 reg, u32 mask, u32 want, int ms) {
+    for (int i = 0; i < ms; i++) {
+        if ((rd(reg) & mask) == want) return 1;
+        sleep_ms(1);
+    }
+    return (rd(reg) & mask) == want;
 }
 
-static int grab_access(void) {
-    wr(CSR_GP, rd(CSR_GP) | CSR_GP_ACCESS);
-    return wait_bit(CSR_GP, CSR_GP_CLOCK, CSR_GP_CLOCK, 200000);
+/* Владение у хоста. Иначе тактовый домен после сброса не поднимается. */
+static void claim_nic(void) {
+    for (int n = 0; n < 5; n++) {
+        wr(CSR_HW_IF, rd(CSR_HW_IF) | CSR_HW_IF_NIC_READY);
+        if (poll_ms(CSR_HW_IF, CSR_HW_IF_NIC_READY, CSR_HW_IF_NIC_READY, 25)) {
+            wr(CSR_MBOX_SET, rd(CSR_MBOX_SET) | CSR_MBOX_OS_ALIVE);
+            return;
+        }
+        wr(CSR_HW_IF, rd(CSR_HW_IF) | CSR_HW_IF_PREPARE);
+    }
+}
+
+/* Сброс гасит INIT_DONE, и пока его не выставить снова, бит такта остаётся нулём.
+ * У 1000 PLL пишется до перехода в рабочее питание, иначе такт тоже не встаёт. */
+static int wake_clock(void) {
+    wr(CSR_GIO_CHICKEN, rd(CSR_GIO_CHICKEN) | CSR_GIO_DIS_L0S_TIMER | CSR_GIO_L1A_NO_L0S);
+    wr(CSR_HPET, rd(CSR_HPET) | CSR_HPET_VAL);
+    wr(CSR_HW_IF, rd(CSR_HW_IF) | CSR_HW_IF_HAP_WAKE);
+    wr(CSR_DBG_LINK_PWR, rd(CSR_DBG_LINK_PWR) | CSR_RESET_LINK_PM_DIS);
+    wr(CSR_ANA_PLL, rd(CSR_ANA_PLL) | CSR_ANA_PLL_1000);
+    wr(CSR_GP, rd(CSR_GP) | CSR_GP_INIT_DONE | CSR_GP_ACCESS);
+    int clock = 0;
+    for (int i = 0; i < 50; i++) {
+        u32 gp = rd(CSR_GP);
+        if (gp & CSR_GP_CLOCK) clock = 1;
+        if (clock && !(gp & CSR_GP_SLEEP)) return 1;
+        sleep_ms(1);
+    }
+    return clock;
 }
 
 static void prph_write(u32 addr, u32 val) {
     wr(HBUS_PRPH_WADDR, (addr & 0x000fffffu) | (3u << 24));
     wr(HBUS_PRPH_WDAT, val);
+}
+
+static u32 prph_read(u32 addr) {
+    wr(HBUS_PRPH_RADDR, (addr & 0x000fffffu) | (3u << 24));
+    return rd(HBUS_PRPH_RDAT);
 }
 
 static int power_d0(void) {
@@ -130,34 +205,69 @@ static int map_bar(void) {
         if (vmm_map(MMIO_VIRT + off, phys + off, PG_WRITE | 0x18)) return 0;
     mmio = (volatile u8 *)MMIO_VIRT;
     u32 cmd = pci_read(dev.bus, dev.dev, dev.func, 4);
-    pci_write(dev.bus, dev.dev, dev.func, 4, cmd | 6);
+    /* INTx этой карты приходит в IOAPIC, а ядро слушает только 8259.
+     * Непогашенный пин крутит прерывание без конца и загрузка замирает. */
+    pci_write(dev.bus, dev.dev, dev.func, 4, cmd | 6u | (1u << 10));
     return 1;
 }
 
-static u16 eeprom_word(u32 addr) {
-    wr(CSR_EEPROM, (addr << 2) | 2);
-    for (int i = 0; i < 10000; i++) {
-        u32 v = rd(CSR_EEPROM);
-        if (v & 1) return (u16)(v >> 16);
+/* Байт образа, с которого читаются MAC и флаги каналов. 1000 кладёт NVM в OTP. */
+static u32 nvm_base;
+
+/* Бит 1 регистра — команда, его ставить нельзя: чтение тогда не поднимает бит готовности.
+ * В битах 15:2 лежит номер слова, поэтому байтовый адрес сдвигается на 1 и маскируется. */
+static int nvm_word(u32 byte_addr, u16 *out) {
+    for (int attempt = 0; attempt < 2; attempt++) {
+        wr(CSR_EEPROM, (byte_addr << 1) & 0xfffcu);
+        for (int i = 0; i < 50000; i++) {
+            u32 v = rd(CSR_EEPROM);
+            if (!(v & 1)) continue;
+            u32 otp = rd(CSR_OTP_GP);
+            if (otp & CSR_OTP_ECC_BAD) {
+                wr(CSR_OTP_GP, otp | CSR_OTP_ECC_BAD);
+                break;
+            }
+            if (otp & CSR_OTP_ECC_FIX) wr(CSR_OTP_GP, rd(CSR_OTP_GP) | CSR_OTP_ECC_FIX);
+            *out = (u16)(v >> 16);
+            return 1;
+        }
     }
-    return 0xffff;
+    return 0;
+}
+
+static int mac_at(u32 base) {
+    u8 tmp[6];
+    for (int i = 0; i < 3; i++) {
+        u16 w;
+        if (!nvm_word(base + (u32)(0x15 + i) * 2u, &w)) return 0;
+        tmp[i * 2] = (u8)w;
+        tmp[i * 2 + 1] = (u8)(w >> 8);
+    }
+    unsigned any = 0, all = 255;
+    for (int i = 0; i < 6; i++) { any |= tmp[i]; all &= tmp[i]; }
+    if (!any || all == 255 || (tmp[0] & 1)) return 0;
+    memcpy(mac, tmp, 6);
+    nvm_base = base;
+    return 1;
 }
 
 static int read_mac(void) {
-    for (int i = 0; i < 3; i++) {
-        u16 w = eeprom_word(0x15 + (u32)i);
-        mac[i * 2] = (u8)w;
-        mac[i * 2 + 1] = (u8)(w >> 8);
-    }
-    unsigned any = 0, all = 255;
-    for (int i = 0; i < 6; i++) { any |= mac[i]; all &= mac[i]; }
-    return any && all != 255 && !(mac[0] & 1);
+    if (mac_at(nvm_base)) return 1;
+    if (nvm_base && mac_at(0)) return 1;
+    u16 w0 = 0xffff, at = 0xffff, img = 0xffff;
+    nvm_word(0, &w0);
+    nvm_word(0x2a, &at);
+    nvm_word(nvm_base + 0x2a, &img);
+    klogf("IWL: OTP has no MAC, base=%x w0=%x at2a=%x atimg=%x reg=%x\n",
+          nvm_base, w0, at, img, rd(CSR_EEPROM));
+    return 0;
 }
 
 static void read_channels(void) {
     int allow = 0;
     for (int i = 0; i < 13; i++) {
-        u16 f = eeprom_word(0x35 + (u32)i);
+        u16 f = 0;
+        if (!nvm_word(nvm_base + (u32)(0x35 + i) * 2u, &f)) continue;
         if (f && f != 0xffff && (f & 1)) allow |= 1 << (i + 1);
     }
     int n = 0;
@@ -166,37 +276,109 @@ static void read_channels(void) {
     if (n >= 11 && (allow & (1 << 12)) && (allow & (1 << 13))) max_ch = 13;
 }
 
-static int hw_blocked(void) { return (rd(CSR_GP) & CSR_GP_RFKILL) != 0; }
+/* Бит 27 равен 1, когда тумблер разрешает радио. Ноль — аппаратная блокировка. */
+static int hw_blocked(void) { return (rd(CSR_GP) & CSR_GP_RFKILL) == 0; }
 
 static int nic_reset(void) {
-    wr(CSR_GP, rd(CSR_GP) | CSR_GP_INIT_DONE);
+    claim_nic();
     wr(CSR_RESET, CSR_RESET_STOP);
-    if (!wait_bit(CSR_RESET, CSR_RESET_MASTER_DIS, CSR_RESET_MASTER_DIS, 200000)) return 0;
+    if (!poll_ms(CSR_RESET, CSR_RESET_MASTER_DIS, CSR_RESET_MASTER_DIS, 100)) {
+        klogf("IWL: master did not stop, csr=%x gp=%x\n", rd(CSR_RESET), rd(CSR_GP));
+        return 0;
+    }
     wr(CSR_RESET, CSR_RESET_SW);
-    sleep_ms(10);
+    sleep_ms(6);
     wr(CSR_INT, 0xffffffffu);
     wr(CSR_INT_MASK, 0);
-    return grab_access();
+    claim_nic();
+    if (wake_clock()) return 1;
+    klogf("IWL: reset did not finish, csr=%x gp=%x hwif=%x pll=%x\n",
+          rd(CSR_RESET), rd(CSR_GP), rd(CSR_HW_IF), rd(CSR_ANA_PLL));
+    return 0;
 }
 
-static u8 *chunk_page, *chunk_tfd;
-
-static int load_chunk(u32 dest, const u8 *src, u32 n) {
-    if (!chunk_page) { chunk_page = dma_page(); chunk_tfd = dma_page(); }
-    if (!chunk_page || !chunk_tfd || n == 0 || n > 4092) return 0;
-    memset(chunk_tfd, 0, 128);
-    memcpy(chunk_page, src, n);
-    chunk_tfd[3] = 1;
-    u32 phys = (u32)(uptr)chunk_page;
-    memcpy(chunk_tfd + 4, &phys, 4);
-    u16 hi = (u16)(n << 4);
-    memcpy(chunk_tfd + 8, &hi, 2);
-    wr(FH_SRVC_ADDR, dest);
-    wr(FH_CBBC + 9 * 4, (u32)(uptr)chunk_tfd >> 8);
-    wr(FH_TX_CFG(9), 0x80000000u | 0x00100000u);
-    for (int i = 0; i < 100000; i++) {
-        if (rd(FH_TSSR) & (1u << 25)) return 1;
+/* Цепочка OTP: слово блока указывает на следующий. Образ — предыдущий блок,
+ * со следующего слова. Нулевой указатель в первом слове значит «образ с нуля». */
+static void nvm_walk(void) {
+    u16 link = 0;
+    u32 next = 0;
+    int first = 1;
+    for (int used = 0; used <= 3;) {
+        u32 valid = next;
+        next = (u32)link * 2u;
+        if (!nvm_word(next, &link)) {
+            klogf("IWL: OTP link read failed at %x, reg=%x\n", next, rd(CSR_EEPROM));
+            nvm_base = 0;
+            return;
+        }
+        if (!link) {
+            nvm_base = first ? 0 : valid + 2;
+            return;
+        }
+        first = 0;
+        used++;
     }
+    klogf("IWL: OTP link list has no end\n");
+    nvm_base = 0;
+}
+
+static int nvm_semaphore(void) {
+    for (int n = 0; n < 40; n++) {
+        wr(CSR_HW_IF, rd(CSR_HW_IF) | CSR_HW_IF_EEPROM_SEM);
+        if (poll_ms(CSR_HW_IF, CSR_HW_IF_EEPROM_SEM, CSR_HW_IF_EEPROM_SEM, 5)) return 1;
+    }
+    return 0;
+}
+
+/* Питание OTP поднимается импульсом сброса в блоке APMG, иначе порт чтения молчит. */
+static void nvm_open(void) {
+    wr(CSR_GP, rd(CSR_GP) | CSR_GP_INIT_DONE | CSR_GP_ACCESS);
+    prph_write(APMG_CLK_EN, prph_read(APMG_CLK_EN) | APMG_CLK_DMA);
+    prph_write(APMG_PCI_STT, prph_read(APMG_PCI_STT) | APMG_L1_OFF);
+    prph_write(APMG_PS, prph_read(APMG_PS) | APMG_PS_RESET);
+    sleep_ms(1);
+    u32 ps = prph_read(APMG_PS);
+    prph_write(APMG_PS, ps & ~APMG_PS_RESET & ~APMG_PS_SRC);
+    if (!nvm_semaphore())
+        klogf("IWL: OTP semaphore not acquired, hwif=%x\n", rd(CSR_HW_IF));
+    wr(CSR_EEPROM_GP, rd(CSR_EEPROM_GP) & ~CSR_EEPROM_GP_OWNER);
+    (void)rd(CSR_OTP_GP);
+    wr(CSR_OTP_GP, (rd(CSR_OTP_GP) & ~CSR_OTP_RELATIVE) | CSR_OTP_ECC_FIX | CSR_OTP_ECC_BAD);
+    nvm_walk();
+}
+
+static u8 *chunk_page;
+
+/* Сервисный канал читает один буфер из TFDIB, а не из кольца TFD.
+ * Без младших бит «буфер действителен» передача не начинается. */
+static int load_chunk(u32 dest, const u8 *src, u32 n) {
+    if (!chunk_page) chunk_page = dma_page();
+    if (!chunk_page || n == 0 || n > 4092) return 0;
+    wr(CSR_GP, rd(CSR_GP) | CSR_GP_INIT_DONE | CSR_GP_ACCESS);
+    if (!poll_ms(CSR_GP, CSR_GP_CLOCK, CSR_GP_CLOCK, 25)) {
+        klogf("IWL: DMA clock is down, gp=%x\n", rd(CSR_GP));
+        return 0;
+    }
+    memcpy(chunk_page, src, n);
+    __asm__ volatile("mfence" ::: "memory");
+    wr(CSR_INT, 1u << 27);
+    wr(CSR_FH_INT, 3u);
+    wr(FH_TX_CFG(9), 0);
+    wr(FH_SRVC_ADDR, dest);
+    wr(FH_TFDIB0(9), (u32)(uptr)chunk_page);
+    wr(FH_TFDIB1(9), n);
+    wr(FH_TX_STS(9), (1u << 20) | (1u << 12) | 3u);
+    wr(FH_TX_CFG(9), 0x80000000u | 0x00100000u);
+    for (int i = 0; i < 100; i++) {
+        if (rd(CSR_INT) & (1u << 27)) {
+            wr(CSR_FH_INT, 3u);
+            wr(CSR_INT, 1u << 27);
+            return 1;
+        }
+        sleep_ms(1);
+    }
+    klogf("IWL: service DMA timed out dest=%x n=%u int=%x fh=%x tssr=%x sts=%x\n",
+          dest, n, rd(CSR_INT), rd(CSR_FH_INT), rd(FH_TSSR), rd(FH_TX_STS(9)));
     return 0;
 }
 
@@ -219,7 +401,16 @@ static int load_image(const struct iwl_slice *text, u32 text_dest, const struct 
 }
 
 static u8 *kw_page;
+static u32 seen_ir;
 
+static u32 sram_dword(u32 addr) {
+    wr(HBUS_MEM_RADDR, addr);
+    return rd(HBUS_MEM_RDAT);
+}
+
+/* 0x1bc0 — адрес статусного слова в памяти хоста, не счётчик буферов.
+ * Счётчик лежит в 0x1bc8 и должен быть кратен 8. Ноль — «принимать некуда»,
+ * поэтому уведомление ALIVE не попадает в очередь. */
 static void rx_setup(void) {
     if (!rx_bd) {
         u8 *meta = dma_page();
@@ -231,11 +422,14 @@ static void rx_setup(void) {
         }
         kw_page = dma_page();
     }
-    wr(FH_KW, (u32)(uptr)kw_page >> 4);
-    wr(FH_RX_WPTR, (u32)(uptr)rx_closed >> 4);
-    wr(FH_RX_BASE, (u32)(uptr)rx_bd >> 8);
-    wr(FH_RX_CFG, 0x80000000u | (5u << 20) | 0x1000u | (0x10u << 4) | 0x8000u);
+    *rx_closed = 0;
     rx_read = 0;
+    wr(FH_RX_CFG, 0);
+    wr(FH_KW, (u32)(uptr)kw_page >> 4);
+    wr(FH_RX_STTS, (u32)(uptr)rx_closed >> 4);
+    wr(FH_RX_BASE, (u32)(uptr)rx_bd >> 8);
+    wr(FH_RX_CFG, 0x80000000u | (5u << 20) | 0x1000u | (0x10u << 4) | 0x8000u | 4u);
+    wr(FH_RX_WPTR, 24);
 }
 
 static void note_packet(const u8 *buf) {
@@ -267,9 +461,9 @@ static void poll_once(void) {
     }
     if (rfkill_noted) { rfkill_noted = 0; wlan_hw_block(0); }
     u32 ir = rd(CSR_INT);
-    if (!ir) return;
-    wr(CSR_INT, ir);
-    if (ir & CSR_INT_FH_RX) poll_rx();
+    seen_ir |= ir;
+    if (ir) wr(CSR_INT, ir);
+    if (rx_closed && (*rx_closed & 0xfff) != rx_read) poll_rx();
 }
 
 static void iwl_thread(void *arg) {
@@ -349,15 +543,29 @@ static int bringup(void) {
         rfkill_noted = 1;
         return -1;
     }
-    if (!read_mac()) { klogf("IWL: EEPROM has no MAC\n"); return -1; }
+    nvm_open();
+    if (!read_mac()) return -1;
     read_channels();
-    klogf("IWL: MAC %02x:%02x:%02x:%02x:%02x:%02x rev %x\n",
-          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], rd(CSR_HW_REV));
+    klogf("IWL: MAC %02x:%02x:%02x:%02x:%02x:%02x base %x rev %x\n",
+          mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], nvm_base, rd(CSR_HW_REV));
     rx_setup();
     if (!load_image(&fw.init, 0, &fw.init_data, 0x800000)) return -1;
+    u32 expect = 0;
+    memcpy(&expect, fw.init.p, 4);
+    u32 got = sram_dword(0);
+    if (got != expect) {
+        klogf("IWL: SRAM mismatch got=%x expect=%x\n", got, expect);
+        return -1;
+    }
+    wr(CSR_GP, (rd(CSR_GP) | CSR_GP_INIT_DONE) & ~CSR_GP_ACCESS);
     wr(CSR_RESET, 0);
+    seen_ir = 0;
     for (int i = 0; i < 300 && !alive; i++) { poll_once(); sleep_ms(10); }
-    if (!alive) { klogf("IWL: INIT firmware did not answer\n"); return -1; }
+    if (!alive) {
+        klogf("IWL: INIT firmware did not answer, int=%x closed=%x\n",
+              seen_ir, rx_closed ? *rx_closed : 0);
+        return -1;
+    }
     alive = 0;
     if (!nic_reset()) return -1;
     rx_setup();
@@ -369,7 +577,6 @@ static int bringup(void) {
     wr(CSR_RESET, 0);
     for (int i = 0; i < 300 && !alive; i++) { poll_once(); sleep_ms(10); }
     if (!alive) { klogf("IWL: runtime firmware did not answer\n"); return -1; }
-    (void)prph_write;
     running = 1;
     return 0;
 }
