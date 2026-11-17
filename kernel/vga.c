@@ -107,6 +107,9 @@ static void erase_cursor(void) {
 
 static void update_cursor(void) {
     if (cursor_defer) return;
+    /* До переключения консоли ячейки лежат в RAM. Запись в CRTC в уже
+     * включённом VBE на Intel гасит ту же трубку, что и панель. */
+    if (firmware_console && !fbmode) return;
     if (pixel_defer()) {
         if (scroll_burst) return;
         draw_dirty();
@@ -175,11 +178,15 @@ void vga_init(void) {
      * aperture is not reliable text storage; preserve early output in RAM. */
     const struct boot_info *boot=boot_info_get();
     firmware_console=boot && boot->fb_phys;
-    if (firmware_console) cells=saved_text;
+    default_attr = attr;
+    if (firmware_console) {
+        cells=saved_text;
+        clear_nolock();
+        return;
+    }
     /* включаем «толстый» курсор: строки 13..15 */
     outb(0x3D4, 0x0A); outb(0x3D5, (inb(0x3D5) & 0xC0) | 13);
     outb(0x3D4, 0x0B); outb(0x3D5, (inb(0x3D5) & 0xE0) | 15);
-    default_attr = attr;
     clear_nolock();
 }
 
@@ -292,6 +299,7 @@ static void cursor_visible(bool on) {
         update_cursor();
         return;
     }
+    if (firmware_console) { cur_on = on; return; }
     outb(0x3D4, 0x0A);
     u8 v = inb(0x3D5);
     outb(0x3D5, on ? (v & ~0x20) : (v | 0x20));

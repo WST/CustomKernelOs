@@ -100,6 +100,9 @@ void kmain(void) {
         struct fb_info fi;
         fb_get_info(&fi);
         vga_switch_to_fb();
+        boot_stage("VBE firmware interpreter");
+        fb_runtime_init();
+        fb_get_info(&fi);
         ok("Graphics: %s, %u MB VRAM, %ux%u, %u bpp -> console %ux%u",
            fi.driver, fi.vram >> 20, fi.width, fi.height, fi.bpp, vga_cols(), vga_rows());
         ok("Framebuffer: base=%x pitch=%u caps=%x",fi.phys,fi.pitch,fi.caps);

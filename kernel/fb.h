@@ -49,6 +49,7 @@ struct fb_info {
 };
 
 bool fb_init(void);                 /* найти карту, забрать шрифт, включить режим */
+void fb_runtime_init(void);         /* видеобиос после появления консоли; режим загрузчика сохраняется */
 bool fb_ready(void);
 void fb_get_info(struct fb_info *out);
 const u8 *fb_font(void);            /* 256 символов по 16 байт */

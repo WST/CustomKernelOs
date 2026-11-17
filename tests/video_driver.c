@@ -27,6 +27,8 @@ static struct boot_info good(void) {
 int main(void) {
     struct boot_info b=good();struct fb_info info;
     CHECK(video_firmware_init(&b,&info));
+    b.version=2;
+    CHECK(video_firmware_init(&b,&info));
     CHECK(info.pitch==8192 && info.vram==8192*1080 && !(info.caps&FB_CAP_GPU));
     nvidia_firmware_identify(&info);
     CHECK(!strcmp(info.driver,"NVIDIA 1660 SUPER VBE"));
@@ -48,7 +50,7 @@ int main(void) {
     for(int test=0;test<11;test++) {
         b=good();
         if(test==0)b.magic=0;
-        if(test==1)b.version=2;
+        if(test==1)b.version=0;
         if(test==2)b.font_phys=0;
         if(test==3)b.fb_phys++;
         if(test==4)b.bpp=24;

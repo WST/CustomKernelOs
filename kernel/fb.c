@@ -389,17 +389,24 @@ int fb_set_mode(u32 w, u32 h) {
     return 0;
 }
 
+void fb_runtime_init(void) {
+    const struct boot_info *boot=boot_info_get();
+    if (!boot || drv!=DRV_FIRMWARE) return;
+    video_runtime_init(boot,&info);
+}
+
 bool fb_init(void) {
     const struct boot_info *boot=boot_info_get();
     if (boot && boot->fb_phys) {
         if (!video_firmware_init(boot,&info)) return false;
         drv=DRV_FIRMWARE;
         nvidia_firmware_identify(&info);
-        /* Reserve every page-table slot before creating process directories. */
+        /* Слоты таблиц резервируем до каталогов процессов. Сам видеобиос
+         * запускается позже, когда консоль уже видна: интерпретатор может
+         * крутиться долго, а до первой заливки экран после VBE чёрный. */
         if(info.phys<=0xffffffffu-FB_VIRT_SZ) {
             for(u32 off=0;off<FB_VIRT_SZ;off+=4096)
                 if(vmm_map(FB_VIRT+off,info.phys+off,PG_WRITE|paging_video_flags()))return false;
-            video_runtime_init(boot,&info);
         }
     } else {
         /* Capture the BIOS font before a VirtIO scanout takes over VGA. */

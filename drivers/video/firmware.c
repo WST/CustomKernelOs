@@ -1,7 +1,9 @@
 #include "video.h"
 
 bool video_firmware_init(const struct boot_info *b, struct fb_info *out) {
-    if (!b || !out || b->magic!=BOOT_INFO_MAGIC || b->version!=1 ||
+    /* Версия 2 дописывает LBA загрузочного тома; геометрия кадра та же.
+     * Загрузчик USB пишет именно 2, отказ оставлял консоль в невидимом тексте. */
+    if (!b || !out || b->magic!=BOOT_INFO_MAGIC || (b->version!=1 && b->version!=2) ||
         b->font_phys!=0x5000 || !b->fb_phys || b->bpp!=32 ||
         b->width<640 || b->width>FB_MAX_W || b->height<480 || b->height>FB_MAX_H ||
         (b->fb_phys&4095) || (b->pitch&3) || b->pitch<b->width*4 ||
