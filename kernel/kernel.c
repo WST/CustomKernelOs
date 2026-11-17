@@ -19,6 +19,7 @@
 #include "fb.h"
 #include "display.h"
 #include "net.h"
+#include "module.h"
 #include "e1000.h"
 #include "mouse.h"
 #include "virtinput.h"
@@ -135,11 +136,13 @@ void kmain(void) {
 #endif
 
     boot_stage("network adapter");
-    if (net_init())
+    if (!net_init())
+        fail("Network", "service did not start");
+    else if (netcfg.up)
         ok("Network: %s, MAC %02x:%02x:%02x:%02x:%02x:%02x, DHCP in background",
            e1000_name(),netcfg.mac[0], netcfg.mac[1], netcfg.mac[2], netcfg.mac[3], netcfg.mac[4], netcfg.mac[5]);
     else
-        fail("Network", "adapter unavailable; use dmesg");
+        ok("Network stack ready; no wired adapter yet");
 
     boot_stage("storage probe");
     bool ide = ata_init();
@@ -166,6 +169,8 @@ void kmain(void) {
             fb_get_info(&after);
             if (fb_ready() && after.gen != before.gen)
                 ok("Display: %ux%u from /etc/display", after.width, after.height);
+            boot_stage("kernel modules");
+            modules_autoload();
         } else {
             fail("MyFS", fs_strerror(r));
         }

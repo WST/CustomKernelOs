@@ -1,0 +1,9 @@
+[Unit]
+Description=Wi-Fi association and saved networks
+
+[Service]
+Type=simple
+ExecStart=/bin/wifid
+User=root
+Restart=no
+StandardInput=null

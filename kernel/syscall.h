@@ -101,6 +101,9 @@ enum {
     SYS_GETPGID,        /* getpgid(pid): 0 — группа текущего процесса */
     SYS_SIGNAL,         /* signal(sig, handler, tramp) -> старый handler */
     SYS_SIGRETURN,      /* восстановить регистры после обработчика */
+    SYS_IFCTL,          /* ifctl(index, &if_info) -> 0 или -ENOENT */
+    SYS_MODCTL,         /* modctl(op, path|index, &info): модули ядра, root для load */
+    SYS_WLANCTL,        /* wlanctl(op, buf, len): Wi-Fi, изменяющие операции — root */
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */
@@ -121,6 +124,8 @@ _Static_assert(SYS_FSCK + 1 == SYS_PREAD, "SYS_PREAD follows SYS_FSCK in user/li
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 _Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
+_Static_assert(SYS_SIGRETURN == 100, "SYS_SIGRETURN stays 100");
+_Static_assert(SYS_IFCTL == 101 && SYS_MODCTL == 102 && SYS_WLANCTL == 103, "new net syscalls stay at the end");
 
 /* коды ошибок (как в Linux) */
 #define EPERM        1

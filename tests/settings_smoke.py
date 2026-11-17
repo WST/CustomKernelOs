@@ -3,7 +3,7 @@ import pathlib, subprocess, time, re, struct
 b=pathlib.Path('build')
 subprocess.run(['make','build/myfs','build/os.img','build/user/settings','build/user/desktop'],check=True)
 image=b/'settings-smoke.img'
-with image.open('wb') as f: f.truncate(8*1024*1024)
+with image.open('wb') as f: f.truncate(32*1024*1024)
 subprocess.run(['make','install','DISK='+str(image)],check=True,stdout=subprocess.DEVNULL)
 # A solid green 2x2 BMP makes the compositor output easy to verify.
 bmp=b/'settings-wall.bmp'
@@ -11,7 +11,7 @@ pixels=(b'\x30\xc0\x20'*2+b'\0\0')*2
 bmp.write_bytes(b'BM'+struct.pack('<IHHI',70,0,0,54)+struct.pack('<IiiHHIIiiII',40,2,2,1,24,0,16,0,0,0,0)+pixels)
 subprocess.run(['build/myfs',str(image),'put',str(bmp),'/wall.bmp'],check=True,stdout=subprocess.DEVNULL)
 script=b/'settings-smoke.sh'
-script.write_text('desktop &\nsleep 1\nsettings\nifconfig > /network-result\nsleep 1000\n')
+script.write_text('desktop &\nsleep 1\nsettings\nsync\nifconfig > /network-result\nsync\necho SETTINGS-SMOKE-DONE\nsleep 1000\n')
 subprocess.run(['build/myfs',str(image),'put',str(script),'/settings-smoke.sh'],check=True,stdout=subprocess.DEVNULL)
 log=b/'settings-smoke.log'; log.write_text('')
 p=subprocess.Popen(['qemu-system-i386','-m','256M','-display','none','-vga','vmware','-nic','user,model=e1000','-drive','format=raw,file=build/os.img,index=0','-drive',f'format=raw,file={image},index=1','-serial',f'file:{log}','-monitor','stdio'],stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE,text=True)
@@ -46,6 +46,7 @@ try:
     monitor('screendump build/settings-wallpaper.ppm'); time.sleep(.3)
     key('esc'); time.sleep(1)
     monitor('screendump build/settings-desktop.ppm'); time.sleep(.5)
+    wait('SETTINGS-SMOKE-DONE')
     assert 'PANIC' not in output(),output()[-2000:]
 finally:
     p.terminate()
