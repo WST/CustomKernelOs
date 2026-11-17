@@ -28,11 +28,15 @@ static inline void set_free(u32 f) { bitmap[f / 32] &= ~(1u << (f % 32)); }
 static inline bool is_used(u32 f)  { return bitmap[f / 32] & (1u << (f % 32)); }
 
 u32 e820_count(void) {
+    const struct boot_info *b=boot_info_get();
+    if(boot_uefi(b))return b->map_count>128?128:b->map_count;
     u32 n = *(volatile u32 *)E820_ADDR;
     return n > 128 ? 128 : n;
 }
 
 const struct e820_entry *e820_get(u32 i) {
+    const struct boot_info *b=boot_info_get();
+    if(boot_uefi(b))return (const struct e820_entry *)b->map_phys+i;
     return (const struct e820_entry *)(E820_ADDR + 4) + i;
 }
 
@@ -97,6 +101,8 @@ void pmm_init(void) {
     for (u32 f=(u32)__kernel_start/PAGE_SIZE; f<((u32)__bss_end+PAGE_SIZE-1)/PAGE_SIZE; f++)
         set_used(f);
     const struct boot_info *boot=boot_info_get();
+    if(boot_uefi(boot))
+        for(u32 f=boot->arena_phys/PAGE_SIZE;f<(boot->arena_phys+boot->arena_bytes)/PAGE_SIZE && f<MAX_FRAMES;f++)set_used(f);
     if (boot_root_valid(boot))
         for (u32 f=boot->root_phys/PAGE_SIZE; f<(boot->root_phys+boot->root_bytes+PAGE_SIZE-1)/PAGE_SIZE; f++)
             set_used(f);

@@ -7,6 +7,10 @@ extern __bss_start
 extern __bss_end
 
 _start:
+    cmp eax,0x55454649
+    jne .bios
+    mov [boot_info_address],esi
+.bios:
     ; обнуляем .bss — в бинарном образе её нет, в памяти может быть мусор
     mov edi, __bss_start
     mov ecx, __bss_end
@@ -22,3 +26,6 @@ _start:
     jmp .hang
 
 section .note.GNU-stack noalloc noexec nowrite progbits
+section .data
+global boot_info_address
+boot_info_address: dd 0x6000

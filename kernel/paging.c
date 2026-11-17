@@ -17,6 +17,7 @@
  * 1..3 ГБ. Таблицы страниц ядра общие, поэтому ядро видно одинаково везде —
  * но без бита PG_USER программа к нему прикоснуться не может. */
 #include "paging.h"
+#include "nvme.h"
 #include "pmm.h"
 #include "heap.h"
 #include "string.h"
@@ -111,6 +112,10 @@ void paging_init(void) {
      * процессов о ней бы не узнали — и ядро упало бы внутри системного вызова. */
     for (u32 a = HEAP_START; a < HEAP_MAX; a += HUGE_SIZE)
         get_pte(page_dir, a, true, false);
+
+    /* Live may enable NVMe from a userspace installer. Share the empty MMIO
+     * page table before creating any process directory; map no device yet. */
+    get_pte(page_dir,NVME_MMIO_BASE,true,false);
 
 
     __asm__ volatile (

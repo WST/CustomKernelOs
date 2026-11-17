@@ -25,7 +25,7 @@ def root_image(path, megabytes):
     run(B/'myfs', path, 'put', B/'user/libc.so', '/lib/libc.so')
 
 
-def live_image(root, output, temporary):
+def live_image(root, output, temporary,uefi=False):
     # Same boot contract as tools/make_usb_image.py, with a minimal test root.
     import sys
     sys.path.insert(0, str(Path('tools').resolve()))
@@ -37,16 +37,25 @@ def live_image(root, output, temporary):
     assert end < phys
     sectors = (len(kernel)+511)//512
     root_lba = (33+sectors+2047)//2048*2048
+    if uefi:
+        from make_uefi import esp,ROOT_START,ESP_START,ESP_SECTORS
+        root_lba=ROOT_START
+        efi,_=esp(kernel,end,mode=1,disk_id=1970347891,root_sectors=root.stat().st_size//512)
     defines = [f'-DKERNEL_LBA=33', f'-DKERNEL_SECTORS={sectors}', f'-DKERNEL_END={end}',
-               f'-DROOT_LBA={root_lba}', f'-DROOT_SECTORS={root.stat().st_size//512}',
+               '-DROOT_DISK_ID=1970347891', f'-DROOT_LBA={root_lba}', f'-DROOT_SECTORS={root.stat().st_size//512}',
                f'-DROOT_PHYS={phys}', f'-DROOT_MIN_BYTES={minimum*1048576}',
                f'-DROOT_MAX_BYTES={maximum*1048576}', f'-DROOT_RESERVE_BYTES={reserve*1048576}']
     for source, name in [('hardware.asm', 'mbr'), ('hardware-stage2.asm', 'stage2')]:
         run('nasm', '-f', 'bin', *defines, 'boot/'+source, '-o', temporary/name)
     with output.open('wb') as stream:
-        stream.write((temporary/'mbr').read_bytes())
+        mbr=bytearray((temporary/'mbr').read_bytes())
+        if uefi:
+            import struct
+            mbr[462:478]=struct.pack('<B3sB3sII',0,b'\xfe\xff\xff',0xef,b'\xfe\xff\xff',ESP_START,ESP_SECTORS)
+        stream.write(mbr)
         stream.write((temporary/'stage2').read_bytes())
         stream.write(kernel)
+        if uefi:stream.seek(ESP_START*512);stream.write(efi)
         stream.seek(root_lba*512)
         stream.write(root.read_bytes())
         stream.truncate((stream.tell()+1048575)//1048576*1048576)

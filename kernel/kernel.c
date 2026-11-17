@@ -9,6 +9,7 @@
 #include "services.h"
 #include "ata.h"
 #include "ahci.h"
+#include "nvme.h"
 #include "fs.h"
 #include "pmm.h"
 #include "paging.h"
@@ -70,8 +71,10 @@ void kmain(void) {
     ok("VGA text console 80x25");
     const struct boot_info *boot=boot_info_get();
     if (boot) {
-        ok("Boot: BIOS/CSM live, root=%x bytes=%u",boot->root_phys,boot->root_bytes);
-        ok("VBE boot: base=%x pitch=%u, %ux%u, %u bpp",
+        if(boot_uefi(boot))ok("Boot: UEFI x64, firmware services exited (%s root)",boot_disk_root(boot)?"disk":"Live");
+        else if(boot_disk_root(boot))ok("Boot: BIOS/CSM installed, disk ID=%x",boot->root_disk_id);
+        else ok("Boot: BIOS/CSM live, root=%x bytes=%u",boot->root_phys,boot->root_bytes);
+        ok("Framebuffer boot: base=%x pitch=%u, %ux%u, %u bpp",
            boot->fb_phys,boot->pitch,boot->width,boot->height,boot->bpp);
     } else ok("Boot: standard disk image");
     boot_stage("GDT/TSS and interrupt tables");
@@ -131,7 +134,8 @@ void kmain(void) {
     boot_stage("xHCI and USB HID input");
     if (xhci_init()) ok("USB xHCI ready: hotplug, USB2 hubs and HID input");
     else fail("USB HID", "no supported direct keyboard/mouse; PS/2 or BIOS legacy may still work");
-    if (boot_info_get()) ok("LIVE MODE: boot USB persistence when available; internal ATA disks are hidden");
+    if (boot_disk_root(boot_info_get())) ok("INSTALLED MODE: native disk root");
+    else if (boot_info_get()) ok("LIVE MODE: boot USB persistence when available; internal ATA disks are hidden");
 #endif
 
     boot_stage("network adapter");
@@ -144,9 +148,12 @@ void kmain(void) {
     boot_stage("storage probe");
     bool ide = ata_init();
     bool sata = ahci_init();
-    if (ide || sata) {
+    bool nvme = nvme_init();
+    if (ide || sata || nvme) {
         if (sata)
             ok("AHCI disk: %s, %u KB", ahci_model(), ahci_sectors(0) / 2);
+        else if(nvme)
+            ok("NVMe disk: %s, %u KB",nvme_model(0),nvme_sectors(0)/2);
         else
             ok("ATA disk: %s, %u KB", ata_model(), ata_sectors() / 2);
         bool formatted;

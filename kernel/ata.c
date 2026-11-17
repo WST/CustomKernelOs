@@ -113,6 +113,10 @@ static bool live_persistent;
 bool ata_init(void) {
     live=boot_info_get();
     if (!boot_root_valid(live)) live=NULL;
+    if(boot_disk_root(live)) {
+        /* Installed BIOS images use the native AHCI root, never a RAM fallback. */
+        live=NULL;units[0].sectors=units[1].sectors=0;return false;
+    }
     if (live) {
         /* Live mode deliberately does not probe or expose internal ATA disks. */
         units[0].sectors=live->root_bytes/512;

@@ -1,4 +1,4 @@
-"""Build a BIOS/CSM USB-HDD image without modifying disk.img or any device."""
+"""Build a BIOS/CSM + UEFI x64 USB image without modifying disk.img or devices."""
 from env_config import settings
 import argparse
 import pathlib
@@ -50,6 +50,11 @@ def main():
         f.truncate(args.root_mb * 1024 * 1024)
     # Install onto the copy, leaving the user's original filesystem untouched.
     subprocess.run(['make','install',f'DISK={live}'],check=True)
+    from make_install_payload import build as build_payload
+    payload=build_payload(args.nasm,args.nm,video_defines)
+    for directory in ['/boot','/boot/install']:
+        subprocess.run(['build/myfs',str(live),'mkdir',directory],check=True,stdout=subprocess.DEVNULL)
+    subprocess.run(['build/myfs',str(live),'put',str(payload),'/boot/install/payload.bin'],check=True)
     size=live.stat().st_size
     if size!=args.root_mb*1024*1024:
         raise SystemExit('Live root size changed during installation')
@@ -63,9 +68,12 @@ def main():
     subprocess.run(['build/myfs',str(live),'rm','/etc/services/enabled/desktop.service'],
                    check=True,stdout=subprocess.DEVNULL)
     sectors=(len(kernel)+511)//512
-    root_lba=(33+sectors+2047)//2048*2048
+    from make_uefi import esp,ROOT_START,ESP_START,ESP_SECTORS
+    root_lba=ROOT_START
     import secrets
     disk_id=secrets.randbelow(0xffffffff)+1
+    width,height=(map(int,args.video.split('x')) if args.video!='auto' else (0,0))
+    efi,_=esp(kernel,end,mode=1,disk_id=disk_id,root_sectors=size//512,width=width,height=height,nasm=args.nasm)
     defines=[f'-DKERNEL_LBA=33',f'-DKERNEL_SECTORS={sectors}',f'-DKERNEL_END={end}',
              f'-DROOT_DISK_ID={disk_id}',f'-DROOT_LBA={root_lba}',f'-DROOT_SECTORS={size//512}',
              f'-DROOT_PHYS={root_phys}',f'-DROOT_MIN_BYTES={root_min*1048576}',
@@ -73,9 +81,12 @@ def main():
     for src,out in [('hardware.asm','mbr.bin'),('hardware-stage2.asm','stage2.bin')]:
         subprocess.run([args.nasm,'-f','bin',*defines,'boot/'+src,'-o',str(b/out)],check=True)
     output=pathlib.Path('build/myos-usb.img')
+    import struct
+    mbr=bytearray((b/'mbr.bin').read_bytes())
+    mbr[462:478]=struct.pack('<B3sB3sII',0,b'\xfe\xff\xff',0xef,b'\xfe\xff\xff',ESP_START,ESP_SECTORS)
     with output.open('wb') as f:
-        f.write((b/'mbr.bin').read_bytes()); f.write((b/'stage2.bin').read_bytes())
-        f.write(kernel); f.seek(root_lba*512)
+        f.write(mbr); f.write((b/'stage2.bin').read_bytes())
+        f.write(kernel);f.seek(ESP_START*512);f.write(efi);f.seek(root_lba*512)
         with live.open('rb') as source: shutil.copyfileobj(source,f,1024*1024)
         total=(f.tell()+1048575)//1048576*1048576
         f.truncate(total)
@@ -84,7 +95,7 @@ def main():
         for chunk in iter(lambda: source.read(1024*1024),b''): digest.update(chunk)
     manifest={'image':str(output),'bytes':output.stat().st_size,
               'sha256':digest.hexdigest(),
-              'boot':'BIOS/CSM only','filesystem':'persistent boot USB (xHCI BOT); RAM fallback on unsupported hardware','disk_id':disk_id,'video_request':args.video,
+              'boot':'BIOS/CSM + UEFI x64 (Secure Boot off)','filesystem':'persistent boot USB (xHCI BOT); RAM fallback on unsupported hardware','disk_id':disk_id,'video_request':args.video,
               'kernel_lba':33,'root_lba':root_lba,'root_bytes':size,'root_phys':root_phys,
               'root_mb':args.root_mb,'ram_reserve_mb':reserve_mb,
               'minimum_usable_end':root_phys+size+reserve_mb*1048576}

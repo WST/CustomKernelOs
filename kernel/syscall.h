@@ -101,6 +101,7 @@ enum {
     SYS_GETPGID,        /* getpgid(pid): 0 — группа текущего процесса */
     SYS_SIGNAL,         /* signal(sig, handler, tramp) -> старый handler */
     SYS_SIGRETURN,      /* восстановить регистры после обработчика */
+    SYS_INSTALLCTL,
     SYS_COUNT
 };
 /* user/lib/myos.h держит те же номера TC_*. */

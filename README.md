@@ -5,6 +5,11 @@
 Live сохраняет изменения на загрузочную USB-флешку через xHCI BOT.
 [Гарантии, ограничения и тесты](docs/persistence.md).
 
+**Установка на диск** — `setup --list` и `setup /dev/sdc` из Live-системы:
+BIOS/CSM и UEFI x64, SATA/AHCI и PCIe NVMe, выбранный диск/namespace с явным подтверждением стирания.
+[Порядок установки и ограничения](docs/disk-installer.md).
+[Сборка и загрузка UEFI](docs/uefi.md).
+
 **Настройки сборки и запуска** — общий `.env` для Make, Live и netboot,
 включая Python-сервер в Windows. [Пример](.env.example), [правила и параметры](docs/environment.md).
 

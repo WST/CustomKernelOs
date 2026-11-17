@@ -2766,10 +2766,11 @@ int mkfifo(const char *path, mode_t mode) {
 int fchmod(int fd,mode_t mode){return ioerr(fs_call(5,fd,mode));}
 int chown(const char *path,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(6,(int)path,(int)ids));}
 int lchown(const char *path,uid_t uid,gid_t gid){
-    struct stat st;
-    if (lstat(path,&st)<0) return -1;
-    if (S_ISLNK(st.st_mode)){errno=EOPNOTSUPP;return -1;}
-    return chown(path,uid,gid);
+#ifdef __LINUX_TEST__
+    return ioerr(__syscall(198,(int)path,uid,gid));
+#else
+    unsigned ids[2]={uid,gid};return ioerr(fs_call(15,(int)path,(int)ids));
+#endif
 }
 int fchown(int fd,uid_t uid,gid_t gid){unsigned ids[2]={uid,gid};return ioerr(fs_call(7,fd,(int)ids));}
 static void stat_times(struct stat *st) {
@@ -5098,3 +5099,5 @@ int system(const char *cmd) {
 int umount(const char *target) {return syscall3(SYS_UMOUNT,(int)target,0,0);}
 int sync(void) {return syscall3(SYS_SYNC,0,0,0);}
 int fsck(const char *device) {return syscall3(SYS_FSCK,(int)device,0,0);}
+
+int disk_install(unsigned op,unsigned index,struct disk_install_info *info) {return syscall3(SYS_INSTALLCTL,op,index,(int)info);}
