@@ -51,25 +51,31 @@ static int byte_of(int li, int col) {                   /* столбец -> б�
 }
 static int u8_chars(const char *s) { int k = 0; for (; *s; s++) if (!cont(*s)) k++; return k; }
 
-static void ensure_cap(int r, int need) {
-    if (caps[r] >= need) return;
+/* false — памяти нет, строка прежняя */
+static bool ensure_cap(int r, int need) {
+    if (caps[r] >= need) return true;
     int cap = caps[r] ? caps[r] : 16;
     while (cap < need) cap *= 2;
     char *p = malloc(cap);
+    if (!p) { strcpy(status_msg, "out of memory"); return false; }
     if (lines[r]) memcpy(p, lines[r], lens[r]);
     free(lines[r]);
     lines[r] = p;
     caps[r] = cap;
+    return true;
 }
 
-static void insert_line(int at, const char *s, int n) {
-    if (n_lines >= MAX_LINES) return;
+static bool insert_line(int at, const char *s, int n) {
+    if (n_lines >= MAX_LINES) return false;
+    int cap = 16;
+    while (cap < n + 1) cap *= 2;
+    char *p = malloc(cap);
+    if (!p) { strcpy(status_msg, "out of memory"); return false; }
+    memcpy(p, s, n);
     for (int i = n_lines; i > at; i--) { lines[i] = lines[i - 1]; lens[i] = lens[i - 1]; caps[i] = caps[i - 1]; }
-    lines[at] = NULL; lens[at] = 0; caps[at] = 0;
-    ensure_cap(at, n + 1);
-    memcpy(lines[at], s, n);
-    lens[at] = n;
+    lines[at] = p; lens[at] = n; caps[at] = cap;
     n_lines++;
+    return true;
 }
 
 static void delete_line(int at) {
@@ -79,9 +85,11 @@ static void delete_line(int at) {
     lines[n_lines] = NULL; lens[n_lines] = 0; caps[n_lines] = 0;
 }
 
+/* Буфер строки 0 остаётся: очистка не просит памяти. */
 static void clear_text(void) {
-    while (n_lines) delete_line(n_lines - 1);
-    insert_line(0, "", 0);
+    while (n_lines > 1) delete_line(n_lines - 1);
+    if (n_lines) lens[0] = 0;
+    else insert_line(0, "", 0);
     cur_r = cur_c = top = left = 0;
     anchor_r = anchor_c = 0;
     selecting = false;
@@ -187,7 +195,7 @@ static void erase_selection(void) {
         lens[r0] -= c1 - c0;
     } else {
         int tail = lens[r1] - c1;
-        ensure_cap(r0, c0 + tail + 1);
+        if (!ensure_cap(r0, c0 + tail + 1)) return;
         memcpy(lines[r0] + c0, lines[r1] + c1, tail);
         lens[r0] = c0 + tail;
         for (int r = r1; r > r0; r--) delete_line(r);
@@ -257,7 +265,7 @@ static void paste_text(void) {
         if (cp == '\n' || cp == '\t') text_key(cp);
         else if (cp >= 32 && cp != 127) {
             char u[4]; int n = utf8_put(u, cp);
-            ensure_cap(cur_r, lens[cur_r] + n + 1);
+            if (!ensure_cap(cur_r, lens[cur_r] + n + 1)) break;
             memmove(lines[cur_r] + cur_c + n, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
             memcpy(lines[cur_r] + cur_c, u, n);
             cur_c += n; lens[cur_r] += n; changed(); drop_selection();
@@ -416,11 +424,10 @@ static void text_key(int k) {
             while (indent < cur_c && lines[cur_r][indent] == ' ') indent++;
             if (cur_c && (lines[cur_r][cur_c-1] == '{' || lines[cur_r][cur_c-1] == ':')) indent += 4;
         }
-        insert_line(cur_r + 1, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
+        if (!insert_line(cur_r + 1, lines[cur_r] + cur_c, lens[cur_r] - cur_c)) return;
         lens[cur_r] = cur_c;
         cur_r++; cur_c = 0;
-        if (indent) {
-            ensure_cap(cur_r, lens[cur_r] + indent + 1);
+        if (indent && ensure_cap(cur_r, lens[cur_r] + indent + 1)) {
             memmove(lines[cur_r] + indent, lines[cur_r], lens[cur_r]);
             memset(lines[cur_r], ' ', indent); lens[cur_r] += indent; cur_c = indent;
         }
@@ -434,7 +441,7 @@ static void text_key(int k) {
             lens[cur_r] -= cur_c - st; cur_c = st;
         } else if (cur_r > 0) {
             int pl = lens[cur_r - 1];
-            ensure_cap(cur_r - 1, pl + lens[cur_r] + 1);
+            if (!ensure_cap(cur_r - 1, pl + lens[cur_r] + 1)) return;
             memcpy(lines[cur_r - 1] + pl, lines[cur_r], lens[cur_r]);
             lens[cur_r - 1] += lens[cur_r];
             delete_line(cur_r);
@@ -449,7 +456,7 @@ static void text_key(int k) {
             memmove(lines[cur_r] + cur_c, lines[cur_r] + e, lens[cur_r] - e);
             lens[cur_r] -= e - cur_c;
         } else if (cur_r < n_lines - 1) {
-            ensure_cap(cur_r, lens[cur_r] + lens[cur_r + 1] + 1);
+            if (!ensure_cap(cur_r, lens[cur_r] + lens[cur_r + 1] + 1)) return;
             memcpy(lines[cur_r] + lens[cur_r], lines[cur_r + 1], lens[cur_r + 1]);
             lens[cur_r] += lens[cur_r + 1];
             delete_line(cur_r + 1);
@@ -464,7 +471,7 @@ static void text_key(int k) {
         if ((k < 32 || k >= 127) && !other) return;
         char u[4];
         int n = utf8_put(u, k);
-        ensure_cap(cur_r, lens[cur_r] + n + 1);
+        if (!ensure_cap(cur_r, lens[cur_r] + n + 1)) return;
         memmove(lines[cur_r] + cur_c + n, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
         memcpy(lines[cur_r] + cur_c, u, n);
         cur_c += n;
@@ -501,6 +508,7 @@ int main(int argc, char **argv) {
     if (!win) { dprintf(STDERR, "code: the desktop is not running\n"); return 1; }
     win_set_resizable(win, 720, 320);
     clear_text();
+    if (!n_lines) { dprintf(STDERR, "code: out of memory\n"); win_destroy(win); return 1; }
     char initial_dir[128];getcwd(initial_dir,sizeof(initial_dir));
     workspace_open(initial_dir);
     index_headers("/include","",0);
