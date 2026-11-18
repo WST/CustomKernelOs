@@ -106,7 +106,7 @@ static bool complete_key(int k) {
         char *s = suggestions[suggestion_index];
         int prefix = cur_c - prefix_start, extra = strlen(s) - prefix;
         int close=completion_delim && (cur_c==lens[cur_r] || lines[cur_r][cur_c]!=completion_delim);
-        ensure_cap(cur_r, lens[cur_r] + extra + close + 1);
+        if (!ensure_cap(cur_r, lens[cur_r] + extra + close + 1)) return true;
         memmove(lines[cur_r] + cur_c + extra + close, lines[cur_r] + cur_c, lens[cur_r] - cur_c);
         memcpy(lines[cur_r] + cur_c, s + prefix, extra);
         if(close) lines[cur_r][cur_c+extra]=completion_delim;

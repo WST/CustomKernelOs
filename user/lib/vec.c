@@ -553,6 +553,7 @@ void gfx_draw_mask(int x, int y, const uint8_t *m, int w, int h, color_t c, int 
 
 /* картинка 0xAARRGGBB (AA — непрозрачность, 0 — пусто) */
 void gfx_draw_argb(int x, int y, const uint32_t *img, int w, int h) {
+    if (!img) return;                                   /* gfx_canvas_end без памяти */
     int bx0, by0, bx1, by1;
     gfx_bounds(&bx0, &by0, &bx1, &by1);
     for (int j = 0; j < h; j++) {
@@ -579,17 +580,23 @@ void gfx_canvas_begin(struct gfx_canvas *cv, int w, int h, int pass) {
         cv->save_buf = gfx_buf; cv->save_w = gfx_w; cv->save_h = gfx_h;
         cv->black = malloc(w * h * 4);
         cv->white = malloc(w * h * 4);
+        if (!cv->black || !cv->white) {
+            free(cv->black); free(cv->white);
+            cv->black = cv->white = NULL;
+        }
     }
     color_t *b = pass == 0 ? cv->black : cv->white;
-    for (int i = 0; i < w * h; i++) b[i] = pass == 0 ? 0 : 0xFFFFFF;
+    if (b) for (int i = 0; i < w * h; i++) b[i] = pass == 0 ? 0 : 0xFFFFFF;
     if (pass == 0) cv->saved_clip = gfx_clip_get(&cv->cx, &cv->cy, &cv->cw, &cv->ch);
     gfx_no_clip();
-    gfx_buf = b; gfx_w = w; gfx_h = h;
+    /* без памяти холст нулевого размера: рисование между begin и end ничего не трогает */
+    gfx_buf = b; gfx_w = b ? w : 0; gfx_h = b ? h : 0;
 }
 
 uint32_t *gfx_canvas_end(struct gfx_canvas *cv) {
     gfx_buf = cv->save_buf; gfx_w = cv->save_w; gfx_h = cv->save_h;
     if (cv->saved_clip) gfx_set_clip(cv->cx, cv->cy, cv->cw, cv->ch);
+    if (!cv->black || !cv->white) return NULL;
     int n = cv->w * cv->h;
     uint32_t *out = (uint32_t *)cv->black;
     for (int i = 0; i < n; i++) {

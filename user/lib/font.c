@@ -76,13 +76,13 @@ static int load_font(int id) {
     snprintf(path, sizeof(path), "%s/%s", font_dir, font_names[id]);
     f->d = read_file(path, &f->len);
     if (!f->d) return 0;
-    if (f->len < 12) return 0;
+    if (f->len < 12) goto bad;
     int head = find_table(f, "head"), hhea = find_table(f, "hhea"), maxp = find_table(f, "maxp");
     int cmap = find_table(f, "cmap");
     f->loca = find_table(f, "loca");
     f->glyf = find_table(f, "glyf");
     f->hmtx = find_table(f, "hmtx");
-    if (!head || !hhea || !maxp || !cmap || !f->loca || !f->glyf || !f->hmtx) return 0;
+    if (!head || !hhea || !maxp || !cmap || !f->loca || !f->glyf || !f->hmtx) goto bad;
     f->upem = u16(f->d + head + 18);
     f->locfmt = s16(f->d + head + 50);
     f->asc = s16(f->d + hhea + 4);
@@ -99,7 +99,7 @@ static int load_font(int id) {
         if (off + 4 > f->len || u16(f->d + off) != 4) continue;
         if ((plat == 3 && enc == 1) || plat == 0) { f->cmap = off; break; }
     }
-    if (!f->cmap) return 0;
+    if (!f->cmap) goto bad;
     /* kern, формат 0: число пар берём из заголовка (длина подтаблицы может переполниться) */
     int kern = find_table(f, "kern");
     if (kern && u16(f->d + kern) == 0 && u16(f->d + kern + 2) > 0) {
@@ -120,6 +120,10 @@ static int load_font(int id) {
     if (f->xh <= 0) f->xh = f->upem / 2;
     font_state[id] = 1;
     return 1;
+bad:
+    free(f->d);
+    f->d = NULL;
+    return 0;
 }
 
 int font_available(int id) { return load_font(id); }

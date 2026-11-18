@@ -21,7 +21,7 @@ static int has_selection(void) { return selected; }
 static bool cont(char c) { return ((unsigned char)c & 0xc0)==0x80; }
 static int col_of(int r,int b) { int n=0; for(int i=0;i<b;i++) n+=!cont(lines[r][i]); return n; }
 static int byte_of(int r,int col) { int b=0; while(b<lens[r] && col) { b++; while(b<lens[r] && cont(lines[r][b])) b++; col--; } return b; }
-static void ensure_cap(int r,int n) { lines[r]=realloc(lines[r],n); }
+static bool ensure_cap(int r,int n) { char *p=realloc(lines[r],n); if(!p) return false; lines[r]=p; return true; }
 static void changed(void) {}
 static void drop_selection(void) { selected=false; }
 static void gfx_text(int x,int y,const char*s,unsigned c,int bg) {

@@ -34,6 +34,23 @@ int clipboard_editor_test(void) {
     anchor_r = 0; anchor_c = 0; cur_r = 2; cur_c = 1;
     text_key(8);
     if (n_lines != 1 || lens[0] != 5 || memcmp(lines[0], "    d", 5)) return 11;
+    /* load: первая строка ложится в буфер строки 0; MAX_LINES строк — целиком, без ложной нехватки памяти. */
+    static char newlines[MAX_LINES];
+    const char *file = "/tmp/notepad-load-check.txt";
+    int fd = open(file, O_WRITE);
+    if (fd < 0 || write(fd, "one\n\ttwo\nthree", 14) != 14) return 12;
+    close(fd);
+    load(file);
+    if (n_lines != 3 || lens[0] != 3 || memcmp(lines[0], "one", 3) || lens[1] != 7 ||
+        memcmp(lines[1], "    two", 7) || lens[2] != 5 || strncmp(status_msg, "opened", 6)) return 13;
+    memset(newlines, '\n', sizeof(newlines));
+    fd = open(file, O_WRITE);
+    if (fd < 0 || write(fd, newlines, MAX_LINES - 1) != MAX_LINES - 1) return 14;
+    close(fd);
+    load(file);
+    if (n_lines != MAX_LINES || lens[0] || strncmp(status_msg, "opened", 6)) return 15;
+    unlink(file);
     clear_text();
+    if (n_lines != 1 || lens[0]) return 16;
     return 0;
 }

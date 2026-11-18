@@ -102,6 +102,7 @@ void win_destroy(window *w) {
     m.a = w->id;
     msg_send(desktop, &m);
     for (int i = 0; i < MAX_WINDOWS; i++) if (wins[i] == w) wins[i] = NULL;
+    if (gfx_buf == w->pixels) { gfx_buf = NULL; gfx_w = gfx_h = 0; }
     release_buffer(w);
     free(w);
 }
