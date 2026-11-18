@@ -27,6 +27,7 @@ static void test_ccm(void) {
     u8 want_m[8] = { 0x17,0xe8,0xd1,0x2c,0xfd,0xf9,0x26,0xe0 };
     expect(same(out, want_c, 23), "rfc3610 cipher");
     expect(same(mic, want_m, 8), "rfc3610 mic");
+    expect(wlan_ccmp_aad_sample(), "ccmp aad protected bit");
     expect(ccm_decrypt(key, nonce, aad, 8, out, 23, mic, back) == 0, "ccm decrypt");
     expect(same(back, plain, 23), "ccm plain");
     mic[0] ^= 1;
@@ -54,8 +55,12 @@ static void test_frames(void) {
     expect(n == 30 && buf[0] == 0xb0, "auth");
     buf[26] = 2;
     expect(wlan_auth_ok(buf, 30), "auth ok");
-    n = wlan_build_assoc(buf, sizeof(buf), bssid, sa, (const u8 *)"MyOS", 4);
-    expect(n > 28 && buf[0] == 0x00, "assoc");
+    n = wlan_build_assoc(buf, sizeof(buf), bssid, sa, (const u8 *)"MyOS", 4, 0);
+    expect(n > 28 && buf[0] == 0x00 && !(buf[24] & 0x10), "open assoc has no privacy");
+    expect(buf[n - 15] == 50 && buf[n - 14] == 4, "open assoc rates");
+    expect(buf[n - 9] == 0xdd && buf[n - 4] == 2, "open assoc wmm");
+    n = wlan_build_assoc(buf, sizeof(buf), bssid, sa, (const u8 *)"MyOS", 4, 1);
+    expect((buf[24] & 0x10) && same(buf + n - 22, wlan_rsn_ie, 22), "secure assoc carries rsn");
     u8 dst[6] = { 0xff,0xff,0xff,0xff,0xff,0xff };
     memset(eth, 0, sizeof(eth));
     memcpy(eth, dst, 6);
@@ -63,7 +68,7 @@ static void test_frames(void) {
     eth[12] = 0x88; eth[13] = 0x8e; eth[14] = 1;
     expect(wlan_is_eapol_eth(eth, 15), "eapol");
     eth[12] = 0x08; eth[13] = 0x00;
-    n = wlan_eth_to_wifi(buf, sizeof(buf), eth, 32, bssid, 1);
+    n = wlan_eth_to_wifi(buf, sizeof(buf), eth, 32, bssid, 1, 0);
     expect(n == 50, "eth to wifi len");
     int m = wlan_wifi_to_eth(back, sizeof(back), buf, (u32)n);
     expect(m == 32 && same(back, eth, 32), "wifi to eth");

@@ -106,7 +106,10 @@ MYOS_PCI_ID(0x8086, 0x0084);
 #define Q_N 20
 #define RING_N 256
 #define SCHED_STRIDE 320
-#define RX_N 16
+/* Каждый принятый кадр занимает два буфера (192 и 193). При 16 буферах на занятом
+ * канале прошивка выбрасывала ответы на команды и на assoc. */
+#define RX_LOG 6
+#define RX_N (1 << RX_LOG)
 #define STA_BCAST 15
 #define STA_AP 0
 
@@ -122,7 +125,7 @@ static struct pci_dev dev;
 static u8 mac[6];
 static int max_ch = 11;
 static int alive, rfkill_noted, running;
-static u32 pages[96];
+static u32 pages[160];
 static int npages;
 static u8 *fw_buf;
 static struct iwl_fw fw;
@@ -138,19 +141,43 @@ static u32 rx_wptr;
 static int cur_ch = 1;
 static u8 ap_mac[6];
 static int ap_set;
-static u8 join_bssid[6], join_tsf[8];
-static volatile u16 join_aid, join_bint;
+static u8 join_bssid[6], join_tsf[8], join_phy[8];
+static int join_phy_ok;
+static volatile u16 join_aid, join_bint, join_cap;
+static volatile u8 join_dtim, join_ht, join_ht_sec, join_ht_prot, join_erp;
+/* Маяк со скана: после auth нового маяка может не быть, а интервал и capability нужны RXON. */
+/* Четырёх ячеек мало: чужой маяк затирал нужную точку, и в RXON уходили
+ * интервал 100 и capability 0 вместо маяка самой сети. */
+#define BEACON_KEEP_N 32
+struct beacon_keep {
+    u8 bssid[6];
+    u8 tsf[8];
+    u8 phy[8];
+    u16 bint, cap;
+    u8 dtim, used, ht, ht_sec, ht_prot, erp, phy_ok;
+    u32 seq;
+};
+static struct beacon_keep beacon_keep[BEACON_KEEP_N];
+static u32 beacon_seq;
 static int join_set;
+static volatile u32 join_rx;
 static volatile u32 data_acked;
+static int data_tx_logged;
 static u32 xtal;
 static u16 temp_off;
+/* Последний RXON и остаток до маяка: после падения сверяются с тем, что прошивка записала сама. */
+static u8 last_rxon[52];
+static u32 last_binit;
+/* Метка из уведомления 192: это часы прошивки, не поле timestamp в теле маяка. */
+static u8 phy_tsf[8];
+static int phy_tsf_ok;
 static u8 tx_ant = 1, rx_ant = 3;
 static u16 rfcfg;
 static u8 calib_blob[4][1024];
 static u16 calib_n[4];
 static int calib_got, rx_frames, rx_notes;
 static u8 rx_last_cmd, reply_cmd, err_cmd;
-static u32 err_type, err_info, err_ptr;
+static u32 err_type, err_info, err_ptr, log_ptr;
 static int fw_dumped;
 static u8 rx_hist[4][12], rx_hist_slot[4];
 static u32 rx_hist_n;
@@ -500,7 +527,7 @@ static void rx_setup(void) {
     wr(FH_KW, (u32)(uptr)kw_page >> 4);
     wr(FH_RX_STTS, (u32)(uptr)rx_closed >> 4);
     wr(FH_RX_BASE, (u32)(uptr)rx_bd >> 8);
-    wr(FH_RX_CFG, 0x80000000u | (4u << 20) | 0x1000u | (0x10u << 4) | 0x8000u | 4u);
+    wr(FH_RX_CFG, 0x80000000u | ((u32)RX_LOG << 20) | 0x1000u | (0x10u << 4) | 0x8000u | 4u);
     rx_wptr = (RX_N - 1u) & ~7u;
     wr(FH_RX_WPTR, rx_wptr);
 }
@@ -516,12 +543,15 @@ static int rssi_dbm(const u8 *phy) {
     return best - (int)agc - 44;
 }
 
+/* calib_need FreeBSD для 1000: LO, TX IQ, периодический TX IQ (17) и base band.
+ * DC этой карте не отдают. Без кода 17 прошивка падает, как только связь
+ * включает периодическую калибровку. */
 static void save_calib(const u8 *payload, u32 n) {
     if (!want_calib || n < 4) return;
     int slot = -1;
-    if (payload[0] == 8) slot = 0;
-    else if (payload[0] == 9) slot = 1;
-    else if (payload[0] == 11) slot = 2;
+    if (payload[0] == 9) slot = 0;
+    else if (payload[0] == 11) slot = 1;
+    else if (payload[0] == 17) slot = 2;
     else if (payload[0] == 16) slot = 3;
     if (slot < 0) return;
     if (n > sizeof(calib_blob[0])) n = sizeof(calib_blob[0]);
@@ -530,15 +560,83 @@ static void save_calib(const u8 *payload, u32 n) {
     calib_got++;
 }
 
+static void keep_beacon(const u8 *frame, u32 n) {
+    int slot = -1;
+    for (int i = 0; i < BEACON_KEEP_N; i++)
+        if (beacon_keep[i].used && !memcmp(beacon_keep[i].bssid, frame + 16, 6)) slot = i;
+    if (slot < 0) {
+        for (int i = 0; i < BEACON_KEEP_N; i++)
+            if (!beacon_keep[i].used) { slot = i; break; }
+        if (slot < 0) {
+            u32 oldest = ~0u;
+            slot = 0;
+            for (int i = 0; i < BEACON_KEEP_N; i++) {
+                if (join_set && !memcmp(beacon_keep[i].bssid, join_bssid, 6)) continue;
+                if (beacon_keep[i].seq <= oldest) { oldest = beacon_keep[i].seq; slot = i; }
+            }
+        }
+    }
+    struct beacon_keep *b = &beacon_keep[slot];
+    b->used = 1;
+    b->seq = ++beacon_seq;
+    memcpy(b->bssid, frame + 16, 6);
+    memcpy(b->tsf, frame + 24, 8);
+    b->bint = (u16)(frame[32] | (frame[33] << 8));
+    b->cap = (u16)(frame[34] | (frame[35] << 8));
+    b->dtim = 0;
+    b->ht = b->ht_sec = b->ht_prot = b->erp = 0;
+    for (u32 i = 36; i + 2 <= n && i + 2u + frame[i + 1] <= n; i += 2u + frame[i + 1]) {
+        u8 id = frame[i], ln = frame[i + 1];
+        if (id == 5 && ln >= 2 && frame[i + 3]) b->dtim = frame[i + 3];
+        else if (id == 42 && ln >= 1) b->erp = (frame[i + 2] & 2) ? 1 : 0;
+        else if (id == 61 && ln >= 3) {
+            b->ht = 1;
+            b->ht_sec = frame[i + 3] & 3;
+            b->ht_prot = frame[i + 4] & 3;
+        }
+    }
+    b->phy_ok = 0;
+    if (phy_tsf_ok) {
+        memcpy(b->phy, phy_tsf, 8);
+        b->phy_ok = 1;
+    }
+}
+
+static void recall_beacon(const u8 *bssid) {
+    for (int i = 0; i < BEACON_KEEP_N; i++) {
+        if (!beacon_keep[i].used || memcmp(beacon_keep[i].bssid, bssid, 6)) continue;
+        if (!join_bint) {
+            memcpy(join_tsf, beacon_keep[i].tsf, 8);
+            join_bint = beacon_keep[i].bint;
+            join_dtim = beacon_keep[i].dtim;
+            join_phy_ok = beacon_keep[i].phy_ok;
+            if (join_phy_ok) memcpy(join_phy, beacon_keep[i].phy, 8);
+        }
+        if (!join_cap) join_cap = beacon_keep[i].cap;
+        join_ht = beacon_keep[i].ht;
+        join_ht_sec = beacon_keep[i].ht_sec;
+        join_ht_prot = beacon_keep[i].ht_prot;
+        join_erp = beacon_keep[i].erp;
+        return;
+    }
+}
+
 static void take_frame(const u8 *frame, u32 n, const u8 *status) {
     u32 flags = (u32)status[0] | ((u32)status[1] << 8) | ((u32)status[2] << 16) | ((u32)status[3] << 24);
     if ((flags & 3u) != 3u) return;
     rx_frames++;
+    u8 fc = n >= 1 ? frame[0] : 0;
+    if ((fc == 0x80 || fc == 0x50) && n >= 36) keep_beacon(frame, n);
+    if (n >= 16 && !memcmp(frame + 10, join_bssid, 6)) join_rx++;
     if (n >= 30 && !memcmp(frame + 16, join_bssid, 6)) {
-        u8 fc = frame[0];
         if ((fc == 0x80 || fc == 0x50) && n >= 36) {
             memcpy(join_tsf, frame + 24, 8);
+            join_phy_ok = phy_tsf_ok;
+            if (join_phy_ok) memcpy(join_phy, phy_tsf, 8);
             join_bint = (u16)(frame[32] | (frame[33] << 8));
+            join_cap = (u16)(frame[34] | (frame[35] << 8));
+            for (u32 i = 36; i + 2 <= n && i + 2 + frame[i + 1] <= n; i += 2u + frame[i + 1])
+                if (frame[i] == 5 && frame[i + 1] >= 2 && frame[i + 3]) join_dtim = frame[i + 3];
         } else if ((fc == 0x10 || fc == 0x30) && frame[26] == 0 && frame[27] == 0) {
             join_aid = (u16)((frame[28] | (frame[29] << 8)) & 0x3fff);
         }
@@ -568,7 +666,10 @@ static void note_packet(const u8 *buf) {
     if (size < 4 || size > 4096) return;
     const u8 *payload = buf + 8;
     u32 plen = size - 4;
-    if (cmd == 1 && plen >= 24) memcpy(&err_ptr, payload + 20, 4);
+    if (cmd == 1 && plen >= 24) {
+        memcpy(&log_ptr, payload + 16, 4);
+        memcpy(&err_ptr, payload + 20, 4);
+    }
     if (cmd == 2 && plen >= 12) {
         err_type = (u32)payload[0] | ((u32)payload[1] << 8) | ((u32)payload[2] << 16) | ((u32)payload[3] << 24);
         err_cmd = payload[4];
@@ -576,16 +677,27 @@ static void note_packet(const u8 *buf) {
         reply_err = 1;
         klogf("IWL: error type=%x cmd=%u seq=%02x%02x info=%x\n",
               err_type, err_cmd, payload[7], payload[6], err_info);
+    } else if (cmd == 28 && plen >= 34 && (payload[30] & 0x0c) == 0) {
+        /* Кадры управления редки: auth и assoc. Статус 1 — точка подтвердила приём. */
+        klogf("IWL: tx %02x status %x tries %u ap_rx %u\n", payload[30],
+              (u32)payload[32] | ((u32)payload[33] << 8), payload[3], join_rx);
+    } else if (cmd == 28 && plen >= 34 && (payload[30] & 0x0c) == 0x08 && !data_tx_logged) {
+        data_tx_logged = 1;
+        klogf("IWL: tx data status %x\n", (u32)payload[32] | ((u32)payload[33] << 8));
     } else if (cmd == 102) save_calib(payload, plen);
     else if (cmd == 103) want_calib = 0;
-    else if (cmd == 130) klogf("IWL: scan start\n");
     else if (cmd == 132) scan_done = 1;
-    else if (cmd == 192 && plen >= 20 + 14) {
-        last_rssi = rssi_dbm(payload + 20);
-        have_phy = 1;
+    else if (cmd == 192 && plen >= 12) {
+        memcpy(phy_tsf, payload + 4, 8);
+        phy_tsf_ok = 1;
+        if (plen >= 20 + 14) {
+            last_rssi = rssi_dbm(payload + 20);
+            have_phy = 1;
+        }
     } else if (cmd == 193 && plen >= 8) {
         u32 n = (u32)payload[0] | ((u32)payload[1] << 8);
         if (n >= 24 && 4u + n + 4u <= plen) take_frame(payload + 4, n, payload + 4 + n);
+        phy_tsf_ok = 0;
     }
 }
 
@@ -635,7 +747,7 @@ static void iwl_thread(void *arg) {
     (void)arg;
     for (;;) {
         if (running && mmio && !rx_hold) poll_once();
-        sleep_ms(10);
+        sleep_ms(5);
     }
 }
 
@@ -748,26 +860,53 @@ static void dump_fw_error(void) {
     }
     wr(CSR_GP, rd(CSR_GP) | CSR_GP_INIT_DONE | CSR_GP_ACCESS);
     poll_ms(CSR_GP, CSR_GP_CLOCK, CSR_GP_CLOCK, 25);
-    u32 d[12];
-    for (u32 i = 0; i < 12; i++) d[i] = sram_dword(err_ptr + i * 4u);
+    u32 d[24];
+    for (u32 i = 0; i < 24; i++) d[i] = sram_dword(err_ptr + i * 4u);
+    u32 cap = 0, mode = 0, next = 0, raw[9];
+    memset(raw, 0, sizeof(raw));
+    if (log_ptr >= 0x800000u && log_ptr < 0x900000u) {
+        cap = sram_dword(log_ptr);
+        mode = sram_dword(log_ptr + 4);
+        next = sram_dword(log_ptr + 12);
+        /* mode 1: время, данные, номер. Три последние записи, от старой к новой. */
+        if ((mode == 0 || mode == 1) && cap >= 1 && cap <= 1024 && next <= cap) {
+            u32 nword = mode == 1 ? 3u : 2u;
+            for (u32 k = 0; k < 3; k++) {
+                u32 back = 3u - k;
+                if (next < back && sram_dword(log_ptr + 8) == 0) continue;
+                u32 idx = (next + cap - back) % cap;
+                u32 p = log_ptr + 16u + idx * nword * 4u;
+                for (u32 j = 0; j < nword && k * 3u + j < 9u; j++) raw[k * 3u + j] = sram_dword(p + j * 4u);
+            }
+        }
+    }
     wr(CSR_GP, (rd(CSR_GP) | CSR_GP_INIT_DONE) & ~CSR_GP_ACCESS);
     klogf("IWL: firmware error valid=%x id=%x pc=%x line=%x data=%x:%x blink=%x int=%x\n",
           d[0], d[1], d[2], d[9], d[7], d[8], d[3], ir);
+    /* Слова 10–12 — время маяка и TSF, 22 — заголовок команды, как его видит прошивка. */
+    klogf("IWL: fw bcon=%x tsf=%x:%x hcmd=%x logpc=%x sp=%x\n",
+          d[10], d[12], d[11], d[22], d[19], d[21]);
+    klogf("IWL: evlog mode=%x next=%x %x %x %x / %x %x %x / %x %x %x\n", mode, next, raw[0], raw[1], raw[2],
+          raw[3], raw[4], raw[5], raw[6], raw[7], raw[8]);
+    u32 w[13];
+    memset(w, 0, sizeof(w));
+    memcpy(w, last_rxon, 50);
+    klogf("IWL: rxon %x %x %x %x %x %x %x\n", w[0], w[1], w[2], w[3], w[4], w[5], w[6]);
+    klogf("IWL: rxon %x %x %x %x %x %x init=%x\n", w[7], w[8], w[9], w[10], w[11], w[12], last_binit);
 }
 
 /* Прошивка API 5 принимает следующую команду только после ответа на предыдущую. */
 static int cmd_sync(u8 code, const void *payload, u32 len) {
     int held = rx_hold;
     rx_hold = 1;
-    if (running && !held) sleep_ms(20);
     reply_seen = 0;
     reply_err = 0;
     reply_cmd = 0;
     seen_ir = 0;
     if (host_cmd(code, payload, len)) { if (!held) rx_hold = 0; return -1; }
-    for (int i = 0; i < 200 && !reply_err && !reply_seen; i++) {
+    for (int i = 0; i < 400 && !reply_err && !reply_seen; i++) {
         poll_once();
-        sleep_ms(10);
+        sleep_ms(5);
     }
     if (!reply_err && !reply_seen) poll_once();
     int rc = 0;
@@ -783,9 +922,10 @@ static int cmd_sync(u8 code, const void *payload, u32 len) {
         wr(CSR_GP, (rd(CSR_GP) | CSR_GP_INIT_DONE) & ~CSR_GP_ACCESS);
         klogf("IWL: cmd %u slot %u no reply rdptr=%x gp1=%x notes=%u\n",
               code, want_slot, rdptr, rd(CSR_UCODE_GP1), rx_hist_n);
-        for (u32 k = rx_hist_n > 4 ? rx_hist_n - 4 : 0; k < rx_hist_n; k++) {
-            const u8 *b = rx_hist[k & 3u];
-            klogf("IWL: rb%u %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n", rx_hist_slot[k & 3u],
+        if (rx_hist_n) {
+            const u8 *b = rx_hist[(rx_hist_n - 1u) & 3u];
+            klogf("IWL: rb%u %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x\n",
+                  rx_hist_slot[(rx_hist_n - 1u) & 3u],
                   b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9], b[10], b[11]);
         }
         dump_fw_error();
@@ -819,7 +959,7 @@ static u32 cck_rate(void) { return 10u | (1u << 9) | ((u32)tx_one() << 14); }
 
 /* Три состояния RXON, как во FreeBSD: простой канал, подготовка к auth с BSSID
  * и связь после assoc с AID и фильтром BSS. wlap всегда свой MAC. */
-enum { RXON_IDLE, RXON_JOIN, RXON_RUN };
+enum { RXON_IDLE, RXON_JOIN, RXON_ARMED, RXON_RUN };
 
 static int send_rxon(int channel, const u8 *bssid, int mode) {
     struct rxon c;
@@ -831,23 +971,36 @@ static int send_rxon(int channel, const u8 *bssid, int mode) {
     c.rx_chain = rx_chain_value();
     c.ht1 = c.ht2 = c.ht3 = 0xff;
     c.flags = (1u << 0) | (1u << 2) | (1u << 15) | (1u << 30);
-    c.filter = (1u << 2) | (1u << 3);
+    /* Живой iwn на этой точке: фильтр только multicast, без NODECRYPT.
+     * Кадры рукопожатия и так открытые. */
+    c.filter = 1u << 2;
     if (mode == RXON_IDLE) {
         c.cck = 0x0f;
         c.ofdm = 0xff;
-        c.filter |= 1u << 6;
     } else if (mode == RXON_JOIN) {
         c.cck = 0x03;
         c.ofdm = 0x15;
-        c.filter |= 1u << 6;
     } else {
         c.cck = 0x0f;
         c.ofdm = 0x15;
-        c.assoc = join_aid;
-        c.filter |= 1u << 5;
+        if (join_cap & 0x20u) c.flags |= 1u << 5;
+        if (join_cap & 0x400u) c.flags |= 1u << 4;
+        if (join_erp) c.flags |= 1u << 3;
+        /* Ширину 40 МГц и поле защиты HT не ставим: у работающей связи iwn
+         * на этой точке флаги 40008015, защиты HT там нет. Канал 9 со вторичным
+         * выше (это уже 13) прошивка и раньше отвергала, pc=1e404. */
+        if (mode == RXON_RUN) {
+            c.assoc = join_aid;
+            c.filter |= 1u << 5;
+            klogf("IWL: rxon run aid %u flags %x filter %x cap %x\n", join_aid, c.flags, c.filter, join_cap);
+        } else {
+            klogf("IWL: rxon tune flags %x cap %x ht %u sec %u prot %u erp %u\n",
+                  c.flags, join_cap, join_ht, join_ht_sec, join_ht_prot, join_erp);
+        }
     }
     c.channel = (u16)channel;
     cur_ch = channel;
+    memcpy(last_rxon, &c, sizeof(c));
     return cmd_sync(0x10, &c, sizeof(c));
 }
 
@@ -871,6 +1024,9 @@ static int add_sta(const u8 *addr, u8 id) {
     memset(node, 0, sizeof(node));
     memcpy(node + 4, addr, 6);
     node[12] = id;
+    if (id == STA_AP && join_ht) {
+        put32(node + 76, (3u << 19) | (5u << 23));
+    }
     return cmd_sync(24, node, sizeof(node));
 }
 
@@ -887,22 +1043,59 @@ static int rxon_commit(int channel, const u8 *bssid, int mode) {
     return set_txpower();
 }
 
-/* Время до следующего маяка в микросекундах: TSF по модулю интервала без 64-битного деления. */
+/* Время до следующего маяка в микросекундах: TSF по модулю интервала без 64-битного деления.
+ * Период DTIM ноль прошивка не принимает: связавшись, она падает. Linux ставит 1, если маяк молчит. */
 static int send_timing(void) {
     u8 t[20];
     memset(t, 0, sizeof(t));
-    u32 bint = join_bint ? join_bint : 100;
+    u32 bint = join_bint && join_bint <= 1024 ? join_bint : 100;
     u32 period = bint * 1024u;
+    const u8 *ts = join_phy_ok ? join_phy : join_tsf;
     u32 lo, hi;
-    memcpy(&lo, join_tsf, 4);
-    memcpy(&hi, join_tsf + 4, 4);
+    memcpy(&lo, ts, 4);
+    memcpy(&hi, ts + 4, 4);
     u32 r = hi % period;
     for (int i = 31; i >= 0; i--) r = ((r << 1) | ((lo >> i) & 1u)) % period;
-    memcpy(t, join_tsf, 8);
+    memcpy(t, ts, 8);
     put16(t + 8, (u16)bint);
     put32(t + 12, period - r);
     put16(t + 16, 10);
+    t[18] = join_dtim ? join_dtim : 1;
+    last_binit = period - r;
+    klogf("IWL: timing bint %u dtim %u init %x phy %u ts %x:%x\n",
+          bint, t[18], last_binit, join_phy_ok, hi, lo);
     return cmd_sync(20, t, sizeof(t));
+}
+
+/* Параметры EDCA по умолчанию 802.11 для BE, BK, VI, VO. RXON без ассоциации их стирает. */
+static int send_edca(void) {
+    u8 edca[36];
+    memset(edca, 0, sizeof(edca));
+    put32(edca, 1);
+    static const u16 cwmin[] = { 15, 15, 7, 3 };
+    static const u16 cwmax[] = { 1023, 1023, 15, 7 };
+    static const u8 aifsn[] = { 3, 7, 2, 2 };
+    static const u16 txop[] = { 0, 0, 3008, 1504 };
+    for (int i = 0; i < 4; i++) {
+        u8 *a = edca + 4 + i * 8;
+        put16(a, cwmin[i]);
+        put16(a + 2, cwmax[i]);
+        a[4] = aifsn[i];
+        put16(a + 6, txop[i]);
+    }
+    return cmd_sync(19, edca, sizeof(edca));
+}
+
+/* Начальные пороги приёмника для 1000 (минимумы таблицы FreeBSD) и сброс
+ * усилений, как iwn_init_sensitivity после RXON с AID. */
+static int send_sensitivity(void) {
+    u8 s[24];
+    memset(s, 0, sizeof(s));
+    static const u16 v[] = { 1, 95, 95, 120, 240, 170, 90, 170, 190, 390, 125, 62 };
+    for (int i = 0; i < 12; i++) put16(s + i * 2, v[i]);
+    if (cmd_sync(168, s, sizeof(s))) return -1;
+    u8 gain[4] = { 18, 0, 1, 1 };
+    return cmd_sync(176, gain, sizeof(gain));
 }
 
 static int ensure_join(const u8 *bssid) {
@@ -911,18 +1104,52 @@ static int ensure_join(const u8 *bssid) {
     join_set = 0;
     join_aid = 0;
     join_bint = 0;
+    join_dtim = 0;
+    join_cap = 0;
+    join_ht = join_ht_sec = join_ht_prot = join_erp = 0;
+    join_phy_ok = 0;
     memset(join_tsf, 0, sizeof(join_tsf));
+    memset(join_phy, 0, sizeof(join_phy));
     memcpy(join_bssid, bssid, 6);
+    /* Auth и assoc уходят через широковещательную станцию. Слот точки FreeBSD
+     * заполняет только после RXON с AID, уже на работающей связи. */
     if (rxon_commit(cur_ch, bssid, RXON_JOIN)) return -1;
     join_set = 1;
     return 0;
 }
 
+/* Полный RXON с этим битом ронял прошивку до калибровки 17. После уже принятой
+ * связи фильтр меняет короткая команда 17: кадры остаются зашифрованными,
+ * расшифровывает их ядро. */
+static int send_rxon_open(void) {
+    u8 a[24];
+    memset(a, 0, sizeof(a));
+    u32 flags = (1u << 0) | (1u << 2) | (1u << 15) | (1u << 30);
+    if (join_cap & 0x20u) flags |= 1u << 5;
+    if (join_cap & 0x400u) flags |= 1u << 4;
+    if (join_erp) flags |= 1u << 3;
+    u32 filter = (1u << 2) | (1u << 3) | (1u << 5);
+    put32(a, flags);
+    put32(a + 4, filter);
+    a[8] = 0x15;
+    a[9] = 0x0f;
+    a[12] = a[13] = a[14] = 0xff;
+    put16(a + 16, rx_chain_value());
+    klogf("IWL: rxon assoc filter %x\n", filter);
+    return cmd_sync(17, a, sizeof(a));
+}
+
+/* Порядок FreeBSD iwn_run: время маяка, RXON с AID при пустом слоте точки,
+ * мощность, затем сама станция, её скорости и чувствительность.
+ * RXON с AID таблицу станций не стирает: повторный ADD_NODE широковещательной
+ * станции 15 роняет прошивку (pc=3910, data=1:f). EDCA шлётся последней. */
 static int ensure_ap(const u8 *bssid) {
     if (ap_set && !memcmp(ap_mac, bssid, 6)) return 0;
     if (ensure_join(bssid)) return -1;
-    if (send_timing() || rxon_commit(cur_ch, bssid, RXON_RUN) ||
-        add_sta(bssid, STA_AP) || linkq(STA_AP, 32)) return -1;
+    recall_beacon(bssid);
+    if (send_timing() || send_rxon(cur_ch, bssid, RXON_RUN) || set_txpower() ||
+        add_sta(bssid, STA_AP) || linkq(STA_AP, 32) ||
+        send_sensitivity() || send_edca() || send_rxon_open()) return -1;
     memcpy(ap_mac, bssid, 6);
     ap_set = 1;
     return 0;
@@ -999,6 +1226,11 @@ static int drv_tx(void *p, const void *mpdu, u32 len) {
     return send_data(f, len, sta);
 }
 static int drv_radio(void *p) { (void)p; return hw_blocked(); }
+static int drv_joined(void *p, const u8 bssid[6], u16 aid) {
+    (void)p;
+    join_aid = aid;
+    return ensure_ap(bssid);
+}
 
 static int drv_scan(void *p) {
     (void)p;
@@ -1042,9 +1274,11 @@ static int drv_scan(void *p) {
     rx_frames = 0;
     rx_notes = 0;
     if (host_cmd(128, buf, need)) { rx_hold = 0; return -1; }
-    for (int i = 0; i < 300 && !scan_done; i++) { poll_once(); sleep_ms(10); }
-    if (scan_done) klogf("IWL: scan complete rx=%d\n", rx_frames);
-    else klogf("IWL: scan timed out rx=%d notes=%d last=%u\n", rx_frames, rx_notes, rx_last_cmd);
+    for (int i = 0; i < 600 && !scan_done; i++) { poll_once(); sleep_ms(5); }
+    /* 130 приходит на каждый канал: в журнале остаются первый скан и сбои. */
+    static int scans_logged;
+    if (!scan_done) klogf("IWL: scan timed out rx=%d notes=%d last=%u\n", rx_frames, rx_notes, rx_last_cmd);
+    else if (!scans_logged++) klogf("IWL: scan complete rx=%d\n", rx_frames);
     rx_hold = 0;
     return 0;
 }
@@ -1122,14 +1356,21 @@ static int pcie_l0s(void) {
 }
 
 /* Порядок FreeBSD для 1000: post_alive (WiMAX, кристалл, калибровки), затем config
- * (маска TX, RXON со станцией и мощностью, критическая температура, питание CAM).
- * Поправку температуры (код 18) прошивка 1000 не ждёт. */
+ * (маска TX, простой Bluetooth coex, RXON со станцией и мощностью, критическая
+ * температура, питание CAM). Поправку температуры (код 18) прошивка 1000 не ждёт.
+ * Bluetooth у 1000 нет, но iwn шлёт 155 всё равно (bt_mode SIMPLE). */
 static int runtime_tune(void) {
     if (send_wimax() || send_crystal()) return -1;
     for (int i = 0; i < 4; i++)
         if (calib_n[i] && cmd_sync(176, calib_blob[i], calib_n[i])) return -1;
     u32 txmask = tx_ant;
-    if (cmd_sync(152, &txmask, sizeof(txmask)) || rxon_commit(1, NULL, RXON_IDLE)) return -1;
+    u8 bt[12];
+    memset(bt, 0, sizeof(bt));
+    bt[0] = 3;
+    bt[1] = 30;
+    bt[2] = 5;
+    if (cmd_sync(152, &txmask, sizeof(txmask)) || cmd_sync(155, bt, sizeof(bt)) ||
+        rxon_commit(1, NULL, RXON_IDLE)) return -1;
     wr(CSR_UCODE_GP1_CLR, 1u << 3);
     u8 crit[12];
     memset(crit, 0, sizeof(crit));
@@ -1140,21 +1381,7 @@ static int runtime_tune(void) {
     if (!pcie_l0s()) put16(pm, 1u << 3);
     /* CAM — режим прошивки по умолчанию; без ответа на 119 она продолжает принимать. */
     cmd_sync(119, pm, sizeof(pm));
-    u8 edca[36];
-    memset(edca, 0, sizeof(edca));
-    put32(edca, 1);
-    static const u16 cwmin[] = { 15, 15, 7, 3 };
-    static const u16 cwmax[] = { 1023, 1023, 15, 7 };
-    static const u8 aifsn[] = { 3, 7, 2, 2 };
-    static const u16 txop[] = { 0, 0, 3008, 1504 };
-    for (int i = 0; i < 4; i++) {
-        u8 *a = edca + 4 + i * 8;
-        put16(a, cwmin[i]);
-        put16(a + 2, cwmax[i]);
-        a[4] = aifsn[i];
-        put16(a + 6, txop[i]);
-    }
-    cmd_sync(19, edca, sizeof(edca));
+    send_edca();
     return 0;
 }
 
@@ -1212,7 +1439,9 @@ static int bringup(void) {
     if (host_cmd(101, cfg, sizeof(cfg))) return -1;
     for (int i = 0; i < 200 && want_calib; i++) { poll_once(); sleep_ms(10); }
     want_calib = 0;
-    klogf("IWL: calibration results %d notes=%d last=%u\n", calib_count(), rx_notes, rx_last_cmd);
+    klogf("IWL: calibration results %d codes %u %u %u %u notes=%d last=%u\n", calib_count(),
+          calib_n[0] ? calib_blob[0][0] : 0, calib_n[1] ? calib_blob[1][0] : 0,
+          calib_n[2] ? calib_blob[2][0] : 0, calib_n[3] ? calib_blob[3][0] : 0, rx_notes, rx_last_cmd);
     alive = 0;
     if (!nic_reset()) return -1;
     nic_config();
@@ -1242,7 +1471,7 @@ static int iwl_init(void) {
     }
     if (iwl_fw_parse(fw_buf, n, &fw)) { klogf("IWL: firmware file is not API 5\n"); return -2; }
     if (bringup()) return -5;
-    static const struct wlan_ops ops = { drv_up, drv_down, drv_channel, drv_tx, drv_radio, drv_scan };
+    static const struct wlan_ops ops = { drv_up, drv_down, drv_channel, drv_tx, drv_radio, drv_scan, drv_joined };
     if (wlan_attach("wlan0", mac, &ops, NULL, max_ch)) return -16;
     task_create("wlan", iwl_thread, NULL);
     if (hw_blocked()) wlan_hw_block(1);

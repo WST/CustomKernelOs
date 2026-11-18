@@ -64,9 +64,36 @@ static const char *net_tabs[] = {"Проводная", "Wi-Fi", "Общие"};
 #define WIFI_BTN_Y (WIFI_TOP + 32)
 #define WIFI_ROW_Y (WIFI_TOP + 80)
 #define WIFI_ROW_H 24
-#define WIFI_ROWS 4
-#define WIFI_PASS_Y (WIFI_ROW_Y + WIFI_ROWS * WIFI_ROW_H + 16)
+#define WIFI_ROWS 6
+#define WIFI_PASS_Y (WIFI_ROW_Y + WIFI_ROWS * WIFI_ROW_H + 30)
 #define WIFI_ACT_Y (WIFI_PASS_Y + 46)
+#define WIFI_BAR_W 14
+/* Первая видимая строка. Выбор держится по имени сети, поэтому смена порядка его не теряет. */
+static int wifi_top;
+static int wifi_rows(void) { int n=(int)wifi_view->count; return n<WIFI_ROWS ? n : WIFI_ROWS; }
+static int wifi_list_w(void) { return (int)wifi_view->count>WIFI_ROWS ? CW-WIFI_BAR_W-6 : CW; }
+static void wifi_scroll(int delta) {
+    int max=(int)wifi_view->count-WIFI_ROWS;
+    wifi_top+=delta;
+    if(wifi_top>max) wifi_top=max;
+    if(wifi_top<0) wifi_top=0;
+}
+static int wifi_selected(void) {
+    for(int i=0;i<(int)wifi_view->count;i++) if(wifi_ssid[0] && !strcmp(wifi_view->ap[i].ssid,wifi_ssid)) return i;
+    return -1;
+}
+/* Стрелки двигают выбор по списку и прокручивают его так, чтобы выбранная строка была видна. */
+static void wifi_step(int delta) {
+    int n=(int)wifi_view->count;
+    if(!n) return;
+    int i=wifi_selected();
+    i=i<0 ? (delta>0 ? 0 : n-1) : i+delta;
+    if(i<0) i=0;
+    if(i>=n) i=n-1;
+    snprintf(wifi_ssid,sizeof(wifi_ssid),"%s",wifi_view->ap[i].ssid);
+    if(i<wifi_top) wifi_top=i;
+    if(i>=wifi_top+WIFI_ROWS) wifi_top=i-WIFI_ROWS+1;
+}
 static int wlan_present(void) {
     struct if_info inf;
     for (int i = 0; i < 4; i++) {
@@ -138,7 +165,7 @@ static int hover_region(void) {
         if(net_tab==1 && wlan_present() && wifi_link()) {
             if(over(CX,WIFI_BTN_Y,160,38)) return 11;
             if(over(CX+172,WIFI_BTN_Y,160,38)) return 12;
-            for(int i=0;i<WIFI_ROWS;i++) if(over(CX,WIFI_ROW_Y+i*WIFI_ROW_H,CW,WIFI_ROW_H)) return 15+i;
+            for(int i=0;i<wifi_rows();i++) if(over(CX,WIFI_ROW_Y+i*WIFI_ROW_H,wifi_list_w(),WIFI_ROW_H)) return 15+wifi_top+i;
             if(over(CX,WIFI_ACT_Y,140,38)) return 13;
             if(over(CX+150,WIFI_ACT_Y,120,38)) return 14;
         }
@@ -222,20 +249,37 @@ static void draw_wifi(char *line) {
     label(12,CX+180,WIFI_TOP,line,MUTED);
     button(CX,WIFI_BTN_Y,160,"Сканировать",false);
     button(CX+172,WIFI_BTN_Y,160,wifi_view->blocked ? "Включить" : "Выключить",false);
-    int rows=(int)wifi_view->count; if(rows>WIFI_ROWS) rows=WIFI_ROWS;
+    wifi_scroll(0);
+    int rows=wifi_rows(), lw=wifi_list_w(), count=(int)wifi_view->count;
     if(!rows) label(12,CX,WIFI_ROW_Y,"Список сетей пуст",MUTED);
     for(int i=0;i<rows;i++) {
-        struct wifi_ap *ap=&wifi_view->ap[i];
+        struct wifi_ap *ap=&wifi_view->ap[wifi_top+i];
         int ry=WIFI_ROW_Y+i*WIFI_ROW_H;
         int on=!strcmp(ap->ssid,wifi_ssid);
-        if(on || over(CX,ry,CW,WIFI_ROW_H)) gfx_round_rect(CX,ry-2,CW,WIFI_ROW_H,6,on ? RGB(251,236,228) : RGB(244,246,248));
-        snprintf(line,160,"%s%s  %d",ap->ssid[0] ? ap->ssid : "(скрытая)",ap->secured ? "  замок" : "",ap->bars);
-        label(12,CX+8,ry,line,on ? UI_ACCENT : INK);
+        if(on || over(CX,ry,lw,WIFI_ROW_H)) gfx_round_rect(CX,ry-2,lw,WIFI_ROW_H,6,on ? RGB(251,236,228) : RGB(244,246,248));
+        gfx_set_clip(CX+8,ry-2,lw-120,WIFI_ROW_H);
+        label(12,CX+8,ry,ap->ssid[0] ? ap->ssid : "(скрытая)",on ? UI_ACCENT : INK);
+        gfx_no_clip();
+        snprintf(line,160,"%s%s%d/4",ap->saved ? "сохр. " : "",ap->secured ? "замок " : "",ap->bars);
+        label(12,CX+lw-8-text_width(FONT_UI,12,line),ry,line,MUTED);
     }
+    if(count>WIFI_ROWS) {
+        int tx=CX+CW-WIFI_BAR_W, th=WIFI_ROWS*WIFI_ROW_H;
+        int thumb=th*WIFI_ROWS/count, ty=WIFI_ROW_Y-2+(th-thumb)*wifi_top/(count-WIFI_ROWS);
+        gfx_round_rect(tx,WIFI_ROW_Y-2,WIFI_BAR_W,th,6,RGB(239,241,244));
+        gfx_round_rect(tx+2,ty,WIFI_BAR_W-4,thumb,5,RGB(177,184,195));
+    }
+    int sel=wifi_selected();
+    struct wifi_ap *pick=sel>=0 ? &wifi_view->ap[sel] : NULL;
+    if(!pick) snprintf(line,160,"Выберите сеть в списке");
+    else if(pick->secured) snprintf(line,160,"Пароль сети «%s»",pick->ssid);
+    else snprintf(line,160,"«%s» — открытая сеть, пароль не нужен",pick->ssid);
+    label(12,CX,WIFI_PASS_Y-20,line,MUTED);
     field(WIFI_PASS_Y,wifi_pass,focus==2);
+    if(!wifi_pass[0] && focus!=2) label(14,CX+12,WIFI_PASS_Y+10,pick && !pick->secured ? "не требуется" : "пароль",MUTED);
     button(CX,WIFI_ACT_Y,140,"Подключить",true);
     button(CX+150,WIFI_ACT_Y,120,"Забыть",false);
-    if(wifi_view->error[0]) label(12,CX,WIFI_ACT_Y+46,wifi_view->error,MUTED);
+    if(wifi_view->error[0]) label(12,CX+290,WIFI_ACT_Y+12,wifi_view->error,MUTED);
 }
 static void draw_general(char *line,char *a,char *b) {
     struct net_info n; memset(&n,0,sizeof(n)); netinfo(&n);
@@ -366,6 +410,13 @@ int main(void) {
             int before=hover_region();hover_x=e.x;hover_y=e.y;
             if(before==hover_region())continue;
         }
+        if(e.type==EV_MOUSE_WHEEL && page==0 && net_tab==1 && wlan_present() && wifi_link() &&
+           ui_inside(e.x,e.y,CX,WIFI_ROW_Y-2,CW,WIFI_ROWS*WIFI_ROW_H)) {
+            int before=wifi_top;
+            wifi_scroll(-e.wheel);
+            if(before!=wifi_top) draw();
+            continue;
+        }
         if(e.type==EV_MOUSE_UP || e.type==EV_FOCUS || e.type==EV_MOUSE_WHEEL)continue;
         if(e.type==EV_TIMEOUT && page!=0 && page!=3)continue;
         if(e.type==EV_MOUSE_DOWN) {
@@ -380,12 +431,15 @@ int main(void) {
                 } else if(!switched && net_tab==1 && wlan_present() && wifi_link()) {
                     if(ui_inside(e.x,e.y,CX,WIFI_BTN_Y,160,38)) wifi_order(WIFI_SCAN, 0, 0, 0);
                     if(ui_inside(e.x,e.y,CX+172,WIFI_BTN_Y,160,38)) wifi_order(WIFI_RADIO, 0, 0, wifi_view->blocked ? 1u : 0u);
-                    int rows=(int)wifi_view->count; if(rows>WIFI_ROWS) rows=WIFI_ROWS;
-                    for(int i=0;i<rows;i++) if(ui_inside(e.x,e.y,CX,WIFI_ROW_Y+i*WIFI_ROW_H,CW,WIFI_ROW_H)) {
-                        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", wifi_view->ap[i].ssid);
-                        if(!wifi_view->ap[i].secured) wifi_order(WIFI_CONNECT, wifi_ssid, "", 0);
+                    wifi_scroll(0);
+                    for(int i=0;i<wifi_rows();i++) if(ui_inside(e.x,e.y,CX,WIFI_ROW_Y+i*WIFI_ROW_H,wifi_list_w(),WIFI_ROW_H)) {
+                        struct wifi_ap *ap=&wifi_view->ap[wifi_top+i];
+                        snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", ap->ssid);
+                        if(!ap->secured) wifi_order(WIFI_CONNECT, wifi_ssid, "", 0);
                         else focus=2;
                     }
+                    if((int)wifi_view->count>WIFI_ROWS && ui_inside(e.x,e.y,CX+CW-WIFI_BAR_W,WIFI_ROW_Y-2,WIFI_BAR_W,WIFI_ROWS*WIFI_ROW_H))
+                        wifi_scroll(e.y<WIFI_ROW_Y-2+WIFI_ROWS*WIFI_ROW_H/2 ? -WIFI_ROWS : WIFI_ROWS);
                     if(ui_inside(e.x,e.y,CX,WIFI_PASS_Y,CW,38)) focus=2;
                     if(ui_inside(e.x,e.y,CX,WIFI_ACT_Y,140,38) && wifi_ssid[0]) wifi_order(WIFI_CONNECT, wifi_ssid, wifi_pass, 0);
                     if(ui_inside(e.x,e.y,CX+150,WIFI_ACT_Y,120,38) && wifi_ssid[0]) wifi_order(WIFI_FORGET, wifi_ssid, 0, 0);
@@ -424,7 +478,9 @@ int main(void) {
             selected=(selected+(e.key==KEY_RIGHT ? 1 : 5))%6;
             wall_path(selected,path,sizeof(path)); wallpaper_save(0);
         }
-        if(e.type==EV_KEY && !focus && (e.key==KEY_DOWN || e.key==KEY_UP)) { page=(page+(e.key==KEY_DOWN ? 1 : 3))%4; status[0]=0; }
+        if(e.type==EV_KEY && (e.key==KEY_DOWN || e.key==KEY_UP) && page==0 && net_tab==1 && wlan_present() && wifi_link())
+            wifi_step(e.key==KEY_DOWN ? 1 : -1);
+        else if(e.type==EV_KEY && !focus && (e.key==KEY_DOWN || e.key==KEY_UP)) { page=(page+(e.key==KEY_DOWN ? 1 : 3))%4; status[0]=0; }
         if(e.type==EV_KEY && e.key=='\t' && page<2) {
             if(page==0 && net_tab==1) focus=focus==2 ? 0 : 2;
             else if(page==0 && net_tab!=0) focus=0;

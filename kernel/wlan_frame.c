@@ -2,7 +2,7 @@
 #include "string.h"
 
 /* AES-CCM с L=2 и MIC 8 байт: так у CCMP. Маска AAD — по 802.11: из FC убираются
- * retry, power, more-data и protected, номер последовательности обнуляется. */
+ * retry, power и more-data, бит защиты ставится в 1, номер последовательности обнуляется. */
 
 static const u8 sbox[256] = {
     0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
@@ -152,13 +152,17 @@ static int hdr_len(const u8 *fc) {
     if ((fc[0] & 0x0c) != 0x08) return 24;
     int qos = (fc[0] & 0x80) != 0;
     int a4 = (fc[1] & 0x03) == 0x03;
-    return 24 + (a4 ? 6 : 0) + (qos ? 2 : 0);
+    /* У QoS-кадра бит Order — это 4 байта HT Control перед телом, не «строгий порядок». */
+    int htc = qos && (fc[1] & 0x80);
+    return 24 + (a4 ? 6 : 0) + (qos ? 2 : 0) + (htc ? 4 : 0);
 }
 
 static void ccmp_aad(const u8 *hdr, u8 aad[24], u32 *alen) {
     int qos = (hdr[0] & 0x0c) == 0x08 && (hdr[0] & 0x80);
     aad[0] = (u8)(hdr[0] & 0x8f);
-    aad[1] = (u8)(hdr[1] & 0x87);
+    /* Бит защиты в подписи кадра обязан быть 1. Ноль не сходится с точкой,
+     * и она выбрасывает DHCP, хотя кадр по радио принят. */
+    aad[1] = (u8)((hdr[1] & 0xc7) | 0x40);
     if (qos) aad[1] = (u8)(aad[1] & ~0x80);
     memcpy(aad + 2, hdr + 4, 18);
     aad[20] = (u8)(hdr[22] & 0x0f);
@@ -194,6 +198,21 @@ int wlan_ccmp_encrypt(u8 *out, u32 cap, const u8 *mpdu, u32 len, const u8 key[16
     ccm_encrypt(key, nonce, aad, alen, mpdu + h, len - h, ccmp + 8, mic);
     memcpy(ccmp + 8 + (len - h), mic, 8);
     return (int)(len + 16);
+}
+
+int wlan_ccmp_aad_sample(void) {
+    u8 hdr[24] = {
+        0x08, 0x48, 0xc3, 0x2c, 0x0f, 0xd2, 0xe1, 0x28, 0xa5, 0x7c, 0x50, 0x30,
+        0xf1, 0x84, 0x44, 0x08, 0xab, 0xae, 0xa5, 0xb8, 0xfc, 0xba, 0x80, 0x33
+    };
+    u8 want[22] = {
+        0x08, 0x40, 0x0f, 0xd2, 0xe1, 0x28, 0xa5, 0x7c, 0x50, 0x30, 0xf1, 0x84,
+        0x44, 0x08, 0xab, 0xae, 0xa5, 0xb8, 0xfc, 0xba, 0x00, 0x00
+    };
+    u8 aad[24];
+    u32 alen = 0;
+    ccmp_aad(hdr, aad, &alen);
+    return alen == 22 && memcmp(aad, want, 22) == 0;
 }
 
 int wlan_ccmp_decrypt(u8 *out, u32 cap, const u8 *mpdu, u32 len, const u8 key[16]) {
@@ -267,10 +286,15 @@ int wlan_build_auth(u8 *out, u32 cap, const u8 bssid[6], const u8 sa[6]) {
     return 30;
 }
 
-int wlan_build_assoc(u8 *out, u32 cap, const u8 bssid[6], const u8 sa[6], const u8 *ssid, u8 ssid_len) {
-    if (ssid_len > 32 || cap < (u32)(24 + 4 + 2 + ssid_len + 10)) return -1;
+/* Тот же RSN, что во втором сообщении рукопожатия: точка сверяет их побайтно. */
+const u8 wlan_rsn_ie[22] = {
+    48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0
+};
+
+int wlan_build_assoc(u8 *out, u32 cap, const u8 bssid[6], const u8 sa[6], const u8 *ssid, u8 ssid_len, int secure) {
+    if (ssid_len > 32 || cap < (u32)(24 + 4 + 2 + ssid_len + 10 + 6 + 9 + 22)) return -1;
     mgmt_hdr(out, 0x00, bssid, sa, bssid);
-    put16(out + 24, 0x0431);
+    put16(out + 24, secure ? 0x0431 : 0x0421);
     put16(out + 26, 10);
     u8 *p = out + 28;
     *p++ = 0; *p++ = ssid_len;
@@ -279,6 +303,14 @@ int wlan_build_assoc(u8 *out, u32 cap, const u8 bssid[6], const u8 sa[6], const 
     *p++ = 1; *p++ = 8;
     memcpy(p, "\x82\x84\x8b\x96\x0c\x12\x18\x24", 8);
     p += 8;
+    *p++ = 50; *p++ = 4;
+    memcpy(p, "\x30\x48\x60\x6c", 4);
+    p += 4;
+    /* WMM: без этого элемента точка не ждёт QoS и отбрасывает обычные данные. */
+    static const u8 wmm[9] = { 0xdd, 7, 0x00, 0x50, 0xf2, 2, 0, 1, 0 };
+    memcpy(p, wmm, sizeof(wmm));
+    p += sizeof(wmm);
+    if (secure) { memcpy(p, wlan_rsn_ie, sizeof(wlan_rsn_ie)); p += sizeof(wlan_rsn_ie); }
     return (int)(p - out);
 }
 
@@ -294,19 +326,22 @@ int wlan_is_eapol_eth(const u8 *eth, u32 len) {
     return eth && len >= 14 && eth[12] == 0x88 && eth[13] == 0x8e;
 }
 
-int wlan_eth_to_wifi(u8 *out, u32 cap, const u8 *eth, u32 elen, const u8 bssid[6], u16 seq) {
-    if (!eth || elen < 14 || cap < elen + 18) return -1;
-    memset(out, 0, 24);
-    out[0] = 0x08;
+int wlan_eth_to_wifi(u8 *out, u32 cap, const u8 *eth, u32 elen, const u8 bssid[6], u16 seq, int qos) {
+    u32 extra = qos ? 2u : 0u;
+    if (!eth || elen < 14 || cap < elen + 18 + extra) return -1;
+    memset(out, 0, 24 + extra);
+    out[0] = qos ? 0x88 : 0x08;
     out[1] = 0x01;
     memcpy(out + 4, bssid, 6);
     memcpy(out + 10, eth + 6, 6);
     memcpy(out + 16, eth, 6);
     put16(out + 22, (u16)((seq & 0x0fff) << 4));
-    out[24] = 0xaa; out[25] = 0xaa; out[26] = 0x03;
-    out[27] = out[28] = out[29] = 0;
-    memcpy(out + 30, eth + 12, elen - 12);
-    return (int)(elen + 18);
+    u8 *p = out + 24;
+    if (qos) { p[0] = p[1] = 0; p += 2; }
+    p[0] = 0xaa; p[1] = 0xaa; p[2] = 0x03;
+    p[3] = p[4] = p[5] = 0;
+    memcpy(p + 6, eth + 12, elen - 12);
+    return (int)(elen + 18 + extra);
 }
 
 int wlan_wifi_to_eth(u8 *out, u32 cap, const u8 *mpdu, u32 mlen) {

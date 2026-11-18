@@ -42,6 +42,9 @@ struct wlan_ops {
     int (*radio)(void *dev); /* 1 радио выключено аппаратно */
     /* Своими силами обходит каналы и вызывает wlan_rx. NULL — пробные кадры. */
     int (*scan)(void *dev);
+    /* Сразу после assoc: карта, которая фильтрует данные сама, иначе не пропустит
+     * первое сообщение рукопожатия. NULL — карте ничего не нужно. */
+    int (*joined)(void *dev, const u8 bssid[6], u16 aid);
 };
 
 int wlan_attach(const char *name, const u8 mac[6], const struct wlan_ops *ops, void *dev, int max_channel);

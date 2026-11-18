@@ -178,15 +178,23 @@ int wpa_read_m1(const unsigned char *frame, unsigned len, unsigned char anonce[3
     return 0;
 }
 
+const unsigned char wpa_rsn_ie[22] = {
+    48, 20, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 4, 1, 0, 0x00, 0x0f, 0xac, 2, 0, 0
+};
+
+/* Key Data второго сообщения — RSN из assoc. Без него точка обрывает рукопожатие. */
 int wpa_build_m2(unsigned char *out, const unsigned char replay[8], const unsigned char snonce[32], const unsigned char kck[16]) {
-    memset(out, 0, 99);
-    out[0] = 1; out[1] = 3; put16b(out + 2, 95);
+    unsigned n = 99 + sizeof(wpa_rsn_ie);
+    memset(out, 0, n);
+    out[0] = 1; out[1] = 3; put16b(out + 2, n - 4);
     out[4] = 2;
     put16b(out + 5, 0x010a); /* MIC, pairwise, version 2 */
     memcpy(out + 9, replay, 8);
     memcpy(out + 17, snonce, 32);
-    wpa_eapol_mic(kck, out, 99);
-    return 99;
+    put16b(out + 97, sizeof(wpa_rsn_ie));
+    memcpy(out + 99, wpa_rsn_ie, sizeof(wpa_rsn_ie));
+    wpa_eapol_mic(kck, out, n);
+    return (int)n;
 }
 
 static const unsigned char sbox[256] = {
@@ -314,9 +322,10 @@ int wpa_aes_roundtrip(void) {
 }
 
 int wpa_aes_wrap(const unsigned char kek[16], const unsigned char *in, unsigned inlen, unsigned char *out) {
-    if (!inlen || inlen % 8 || inlen > 32) return -1;
+    /* У третьего сообщения свёртка часто 80 байт, а не 32. */
+    if (!inlen || inlen % 8 || inlen > 128) return -1;
     unsigned n = inlen / 8;
-    unsigned char rk[176], a[8], r[4][8], b[16];
+    unsigned char rk[176], a[8], r[16][8], b[16];
     aes_key(kek, rk);
     memset(a, 0xa6, 8);
     for (unsigned i = 0; i < n; i++) memcpy(r[i], in + i * 8, 8);
@@ -340,10 +349,9 @@ int wpa_aes_wrap(const unsigned char kek[16], const unsigned char *in, unsigned 
 }
 
 int wpa_aes_unwrap(const unsigned char kek[16], const unsigned char *in, unsigned inlen, unsigned char *out) {
-    if (!in || inlen < 24 || (inlen % 8)) return -1;
+    if (!in || inlen < 24 || (inlen % 8) || inlen > 136) return -1;
     unsigned n = inlen / 8 - 1;
-    if (n > 4) return -1;
-    unsigned char rk[176], a[8], r[4][8], b[16];
+    unsigned char rk[176], a[8], r[16][8], b[16];
     aes_key(kek, rk);
     memcpy(a, in, 8);
     for (unsigned i = 0; i < n; i++) memcpy(r[i], in + 8 + i * 8, 8);
@@ -367,22 +375,27 @@ int wpa_aes_unwrap(const unsigned char kek[16], const unsigned char *in, unsigne
 }
 
 int wpa_take_m3(const unsigned char *frame, unsigned len, const unsigned char kck[16], const unsigned char kek[16],
-                unsigned char gtk[16], unsigned char *m4) {
+                unsigned char gtk[16], unsigned char *m4, unsigned char *keyid) {
     if (!wpa_eapol_ok(kck, frame, len)) return -1;
     unsigned info = get16b(frame + 5);
-    if (!(info & 0x80) || !(info & 0x100) || !(info & 0x2000)) return -1;
+    /* 0x1000 — зашифрованные данные ключа. 0x2000 — другое поле, у настоящего
+     * третьего сообщения его нет, и проверка отбрасывала верную подпись. */
+    if (!(info & 0x80) || !(info & 0x100) || !(info & 0x1000)) return -2;
     unsigned kd = get16b(frame + 97);
-    if (99 + kd > len || kd < 8) return -1;
-    unsigned char plain[64];
-    if (wpa_aes_unwrap(kek, frame + 99, kd, plain) < 0) return -1;
+    unsigned char plain[256];
+    if (99 + kd > len || kd < 8 || kd - 8 > sizeof(plain)) return -3;
+    if (wpa_aes_unwrap(kek, frame + 99, kd, plain) < 0) return -3;
     const unsigned char *g = 0;
-    for (unsigned i = 0; i + 8 < kd - 8; i++) {
-        if (plain[i] == 0xdd && i + 8 < 56 && plain[i+2] == 0x00 && plain[i+3] == 0x0f && plain[i+4] == 0xac && plain[i+5] == 1) {
+    unsigned char id = 0;
+    for (unsigned i = 0; i + 8 + 16 <= kd - 8; i++) {
+        if (plain[i] == 0xdd && plain[i+2] == 0x00 && plain[i+3] == 0x0f && plain[i+4] == 0xac && plain[i+5] == 1) {
             g = plain + i + 8;
+            id = (unsigned char)(plain[i + 6] & 3);
             break;
         }
     }
-    if (!g) return -1;
+    if (!g) return -3;
+    if (keyid) *keyid = id;
     memcpy(gtk, g, 16);
     memset(m4, 0, 99);
     m4[0] = 1; m4[1] = 3; put16b(m4 + 2, 95); m4[4] = 2;
@@ -436,4 +449,35 @@ int wpa_choose(const struct wpa_net *saved, int nsaved, const char ssids[][33], 
         }
     }
     return best;
+}
+
+static int seen_before(const struct wpa_seen *a, const struct wpa_seen *b, const char *current) {
+    int ca = current && current[0] && !strcmp(a->ssid, current);
+    int cb = current && current[0] && !strcmp(b->ssid, current);
+    if (ca != cb) return ca;
+    if (a->saved != b->saved) return a->saved;
+    if (a->bars != b->bars) return a->bars > b->bars;
+    int c = strcmp(a->ssid, b->ssid);
+    if (c) return c < 0;
+    return memcmp(a->bssid, b->bssid, 6) < 0;
+}
+
+int wpa_order_seen(struct wpa_seen *v, int n, const char *current) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        int j = 0;
+        while (j < m && strcmp(v[j].ssid, v[i].ssid)) j++;
+        if (j == m) { if (m != i) v[m] = v[i]; m++; continue; }
+        int secured = v[j].secured || v[i].secured, saved = v[j].saved || v[i].saved;
+        if (v[i].rssi > v[j].rssi) v[j] = v[i];
+        v[j].secured = secured;
+        v[j].saved = saved;
+    }
+    for (int i = 1; i < m; i++) {
+        struct wpa_seen t = v[i];
+        int j = i;
+        while (j > 0 && seen_before(&t, &v[j - 1], current)) { v[j] = v[j - 1]; j--; }
+        v[j] = t;
+    }
+    return m;
 }

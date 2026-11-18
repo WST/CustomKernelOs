@@ -163,7 +163,7 @@ void wlan_sim_maybe(void) {
     if (wlan_present()) return;
     u32 ino;
     if (!fs_ready() || fs_resolve(FS_ROOT, "/etc/wifi/sim", &ino)) return;
-    static const struct wlan_ops ops = { sim_up, sim_down, sim_ch, sim_tx, sim_radio };
+    static const struct wlan_ops ops = { sim_up, sim_down, sim_ch, sim_tx, sim_radio, NULL, NULL };
     if (wlan_attach("wlan0", sta, &ops, NULL, 11)) return;
     klogf("WLAN: simulated open network MyOS on wlan0\n");
 }

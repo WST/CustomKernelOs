@@ -9,14 +9,17 @@ struct wifi_ap {
     unsigned char channel, bars, secured, saved;
     int rssi;
 };
+/* Вся структура живёт в одной странице 4 КиБ. */
+#define WIFI_AP_MAX 48
 struct wifi_pub {
     unsigned magic, seq, state, bars, secured, blocked, count, channel;
     int rssi;
     char ssid[33];
     char error[48];
     unsigned char mac[6], bssid[6];
-    struct wifi_ap ap[16];
+    struct wifi_ap ap[WIFI_AP_MAX];
 };
+_Static_assert(sizeof(struct wifi_pub) <= 4096, "wifi_pub fits one page");
 struct wifi_req {
     unsigned seq, op, priority;
     char ssid[33];

@@ -74,8 +74,10 @@ static void forget(const char *ssid) {
     }
 }
 
-static int eapol_wait(struct wlan_eapol_u *e) {
-    for (int i = 0; i < 40; i++) {
+/* Первое сообщение может прийти раньше, чем карта начнёт пропускать данные точки;
+ * точка повторяет его до четырёх раз с паузой до секунды. */
+static int eapol_wait(struct wlan_eapol_u *e, int ms) {
+    for (int i = 0; i < ms / 20; i++) {
         int n = wlanctl(WLAN_EAPOL_RX, e, sizeof(*e));
         if (n > 0) return n;
         sleep_ms(20);
@@ -89,7 +91,11 @@ static int handshake(const char *ssid, const char *pass) {
     wpa_pmk(pass, ssid, pmk);
     unsigned t = ticks();
     for (int i = 0; i < 32; i++) snonce[i] = (unsigned char)(t * 17 + i * 13);
-    if (!eapol_wait(&e) || wpa_read_m1(e.data, e.len, anonce, replay)) { snprintf(last_err, sizeof(last_err), "нет ответа точки"); return -1; }
+    if (!eapol_wait(&e, 4000) || wpa_read_m1(e.data, e.len, anonce, replay)) { snprintf(last_err, sizeof(last_err), "нет первого сообщения"); return -1; }
+    /* Отвечать надо на последний повтор: у него больше счётчик. */
+    struct wlan_eapol_u later;
+    while (wlanctl(WLAN_EAPOL_RX, &later, sizeof(later)) > 0)
+        wpa_read_m1(later.data, later.len, anonce, replay);
     struct wlan_status_u st;
     if (wlanctl(WLAN_STATUS, &st, sizeof(st)) < 0) return -1;
     wpa_ptk(pmk, st.bssid, st.mac, anonce, snonce, ptk);
@@ -101,10 +107,16 @@ static int handshake(const char *ssid, const char *pass) {
     key.kind = WLAN_KEY_PTK;
     memcpy(key.key, ptk + 32, 16);
     if (wlanctl(WLAN_SET_KEY, &key, sizeof(key)) < 0) return -1;
-    if (!eapol_wait(&e)) { snprintf(last_err, sizeof(last_err), "нет третьего сообщения"); return -1; }
-    unsigned char m4[128];
-    if (wpa_take_m3(e.data, e.len, ptk, ptk + 16, gtk, m4) < 0) { snprintf(last_err, sizeof(last_err), "пароль не подошёл"); return -1; }
+    if (!eapol_wait(&e, 2000)) { snprintf(last_err, sizeof(last_err), "нет третьего сообщения"); return -1; }
+    unsigned char m4[128], kid = 0;
+    int hm = wpa_take_m3(e.data, e.len, ptk, ptk + 16, gtk, m4, &kid);
+    if (hm < 0) {
+        snprintf(last_err, sizeof(last_err), "%s",
+                 hm == -3 ? "ключ не раскрылся" : hm == -2 ? "не то третье сообщение" : "подпись не сошлась");
+        return -1;
+    }
     key.kind = WLAN_KEY_GTK;
+    key.id = kid;
     memcpy(key.key, gtk, 16);
     wlanctl(WLAN_SET_KEY, &key, sizeof(key));
     wlanctl(WLAN_EAPOL_TX, m4, 99);
@@ -113,19 +125,31 @@ static int handshake(const char *ssid, const char *pass) {
     return 0;
 }
 
+static void publish(void);
+
 static int connect_ssid(const char *ssid, const char *pass, int secure) {
     struct wlan_connect_u c;
     memset(&c, 0, sizeof(c));
     snprintf(c.ssid, sizeof(c.ssid), "%s", ssid);
     c.secure = (unsigned char)(secure || (pass && pass[0]));
+    snprintf(last_err, sizeof(last_err), "подключение…");
+    publish();
     int rc = wlanctl(WLAN_CONNECT, &c, sizeof(c));
-    if (rc < 0) { snprintf(last_err, sizeof(last_err), "нет такой сети"); return rc; }
+    if (rc < 0) {
+        const char *why = rc == -2 ? "сеть не найдена, обновите список" :
+                          rc == -113 ? "точка не отвечает" :
+                          rc == -111 ? "точка отказала в подключении" :
+                          rc == -110 ? "точка не ответила на подключение" : "ошибка подключения";
+        snprintf(last_err, sizeof(last_err), "%s", why);
+        return rc;
+    }
     struct wlan_status_u st;
     wlanctl(WLAN_STATUS, &st, sizeof(st));
     if (st.state == WLAN_EAPOL) {
         if (!pass || !pass[0]) { snprintf(last_err, sizeof(last_err), "нужен пароль"); return -1; }
         if (handshake(ssid, pass)) return -1;
     }
+    last_err[0] = 0;
     remember(ssid, pass);
     return 0;
 }
@@ -160,23 +184,37 @@ static void publish(void) {
     memcpy(pub->mac, st.mac, 6);
     memcpy(pub->bssid, st.bssid, 6);
     snprintf(pub->error, sizeof(pub->error), "%s", last_err);
-    int n = 0;
-    if (have && st.state != WLAN_DOWN) n = wlanctl(WLAN_COUNT, 0, 0);
-    if (n < 0) n = 0;
-    if (n > 16) n = 16;
-    pub->count = (unsigned)n;
-    for (int i = 0; i < n; i++) {
+    static struct wpa_seen seen[64];
+    int n = 0, total = 0;
+    if (have && st.state != WLAN_DOWN) total = wlanctl(WLAN_COUNT, 0, 0);
+    if (total > 64) total = 64;
+    for (int i = 0; i < total; i++) {
         struct wlan_bss_u b; memset(&b, 0, sizeof(b)); b.index = (unsigned)i;
         if (wlanctl(WLAN_RESULT, &b, sizeof(b)) < 0) break;
-        memset(&pub->ap[i], 0, sizeof(pub->ap[i]));
-        memcpy(pub->ap[i].ssid, b.ssid, 33);
-        memcpy(pub->ap[i].bssid, b.bssid, 6);
-        pub->ap[i].channel = (unsigned char)b.channel;
-        pub->ap[i].bars = (unsigned char)b.bars;
-        pub->ap[i].secured = (unsigned char)b.secured;
-        pub->ap[i].rssi = b.rssi;
-        for (int s = 0; s < nnets; s++) if (!strcmp(nets[s].ssid, b.ssid)) pub->ap[i].saved = 1;
+        struct wpa_seen *s = &seen[n++];
+        memset(s, 0, sizeof(*s));
+        memcpy(s->ssid, b.ssid, 33);
+        s->ssid[32] = 0;
+        memcpy(s->bssid, b.bssid, 6);
+        s->channel = (int)b.channel;
+        s->bars = (int)b.bars;
+        s->secured = (int)b.secured;
+        s->rssi = b.rssi;
+        for (int k = 0; k < nnets; k++) if (!strcmp(nets[k].ssid, s->ssid)) s->saved = 1;
     }
+    n = wpa_order_seen(seen, n, st.state == WLAN_RUN || st.state == WLAN_EAPOL ? st.ssid : "");
+    if (n > WIFI_AP_MAX) n = WIFI_AP_MAX;
+    for (int i = 0; i < n; i++) {
+        memset(&pub->ap[i], 0, sizeof(pub->ap[i]));
+        memcpy(pub->ap[i].ssid, seen[i].ssid, 33);
+        memcpy(pub->ap[i].bssid, seen[i].bssid, 6);
+        pub->ap[i].channel = (unsigned char)seen[i].channel;
+        pub->ap[i].bars = (unsigned char)seen[i].bars;
+        pub->ap[i].secured = (unsigned char)seen[i].secured;
+        pub->ap[i].saved = (unsigned char)seen[i].saved;
+        pub->ap[i].rssi = seen[i].rssi;
+    }
+    pub->count = (unsigned)n;
     pub->seq++;
 }
 
@@ -242,9 +280,10 @@ int main(void) {
         share();
         struct wlan_status_u st;
         int have = wlanctl(WLAN_STATUS, &st, sizeof(st)) == 0 && st.state != WLAN_DOWN;
+        /* Скан занимает радио на полторы секунды; без сохранённых сетей он нужен только списку. */
         if (have && ticks() >= next && st.state != WLAN_RUN && st.state != WLAN_BLOCKED && st.state != WLAN_EAPOL) {
             autoconnect();
-            next = ticks() + 8000;
+            next = ticks() + (nnets ? 30000u : 60000u);
         }
         handle_req();
         publish();

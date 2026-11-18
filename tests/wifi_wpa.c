@@ -42,9 +42,49 @@ int main(void) {
     expect(memcmp(got_a, anonce, 32) == 0, "anonce");
     unsigned char m2[128];
     int n2 = wpa_build_m2(m2, replay, snonce, ptk);
-    expect(n2 == 99 && wpa_eapol_ok(ptk, m2, 99), "m2 mic");
+    expect(n2 == 121 && wpa_eapol_ok(ptk, m2, 121), "m2 mic");
+    expect(m2[2] == 0 && m2[3] == 117 && m2[97] == 0 && m2[98] == 22 && !memcmp(m2 + 99, wpa_rsn_ie, 22), "m2 rsn");
     m2[81] ^= 1;
-    expect(!wpa_eapol_ok(ptk, m2, 99), "m2 bad mic");
+    expect(!wpa_eapol_ok(ptk, m2, 121), "m2 bad mic");
+    unsigned char gtk_in[16], kde[24], gtk_wrap[32], m3[160], gtk_out[16], m4[128];
+    for (int i = 0; i < 16; i++) gtk_in[i] = (unsigned char)(0x40 + i);
+    kde[0] = 0xdd; kde[1] = 22; kde[2] = 0x00; kde[3] = 0x0f; kde[4] = 0xac; kde[5] = 1;
+    kde[6] = 1; kde[7] = 0;
+    memcpy(kde + 8, gtk_in, 16);
+    expect(wpa_aes_wrap(ptk + 16, kde, 24, gtk_wrap) == 32, "gtk wrap");
+    memset(m3, 0, sizeof(m3));
+    m3[0] = 1; m3[1] = 3; m3[2] = 0; m3[3] = 127; m3[4] = 2;
+    m3[5] = 0x13; m3[6] = 0xca;
+    memcpy(m3 + 17, anonce, 32);
+    m3[97] = 0; m3[98] = 32;
+    memcpy(m3 + 99, gtk_wrap, 32);
+    wpa_eapol_mic(ptk, m3, 131);
+    unsigned char kid = 9;
+    expect(wpa_take_m3(m3, 131, ptk, ptk + 16, gtk_out, m4, &kid) == 99, "m3");
+    /* Длиннее 128 байт MIC считается другим путём: его сверяем с эталоном HMAC-SHA1. */
+    unsigned char kck[16], longf[200], want179[16] = {
+        0xdf,0x8e,0x3c,0x80,0x2b,0xcb,0x60,0x1a,0x78,0xc4,0x51,0x38,0x3e,0x10,0xea,0xbb
+    };
+    for (int i = 0; i < 16; i++) kck[i] = (unsigned char)i;
+    memset(longf, 0x5a, 179);
+    wpa_eapol_mic(kck, longf, 179);
+    expect(memcmp(longf + 81, want179, 16) == 0, "mic 179");
+    expect(memcmp(gtk_out, gtk_in, 16) == 0 && kid == 1 && wpa_eapol_ok(ptk, m4, 99), "gtk and m4");
+    unsigned char wide[72], wide_wrap[80], m3b[200];
+    memset(wide, 0x11, sizeof(wide));
+    wide[0] = 0xdd; wide[1] = 22; wide[2] = 0x00; wide[3] = 0x0f; wide[4] = 0xac; wide[5] = 1;
+    wide[6] = 2; wide[7] = 0;
+    memcpy(wide + 8, gtk_in, 16);
+    expect(wpa_aes_wrap(ptk + 16, wide, 72, wide_wrap) == 80, "wide wrap");
+    memset(m3b, 0, sizeof(m3b));
+    m3b[0] = 1; m3b[1] = 3; m3b[2] = 0; m3b[3] = 175; m3b[4] = 2;
+    m3b[5] = 0x13; m3b[6] = 0xca;
+    memcpy(m3b + 17, anonce, 32);
+    m3b[97] = 0; m3b[98] = 80;
+    memcpy(m3b + 99, wide_wrap, 80);
+    wpa_eapol_mic(ptk, m3b, 179);
+    expect(wpa_take_m3(m3b, 179, ptk, ptk + 16, gtk_out, m4, &kid) == 99, "m3 179");
+    expect(memcmp(gtk_out, gtk_in, 16) == 0 && kid == 2, "gtk from 80");
     const char *text = "network {\nssid=Home\npsk=secret\npriority=1\n}\nnetwork {\nssid=Cafe\npriority=5\n}\n";
     struct wpa_net nets[4];
     int n = wpa_load(text, nets, 4);
@@ -54,6 +94,28 @@ int main(void) {
     memcpy(ssids[0], "Home", 4); memcpy(ssids[1], "Cafe", 4);
     int sec[2] = { 1, 0 }, rssi[2] = { -40, -70 };
     expect(wpa_choose(nets, n, ssids, sec, rssi, 2) == 1, "priority");
+    struct wpa_seen seen[6];
+    memset(seen, 0, sizeof(seen));
+    const char *names[6] = { "Zeta", "Alpha", "Home", "Alpha", "Beta", "Cafe" };
+    int bars[6] = { 3, 2, 1, 4, 3, 0 }, levels[6] = { -55, -65, -75, -45, -58, -90 };
+    for (int i = 0; i < 6; i++) {
+        strcpy(seen[i].ssid, names[i]);
+        seen[i].bssid[5] = (unsigned char)i;
+        seen[i].bars = bars[i];
+        seen[i].rssi = levels[i];
+    }
+    seen[2].saved = 1;
+    seen[1].secured = 1;
+    int m = wpa_order_seen(seen, 6, "Cafe");
+    expect(m == 5, "one row per ssid");
+    expect(!strcmp(seen[0].ssid, "Cafe") && !strcmp(seen[1].ssid, "Home"), "current then saved");
+    expect(!strcmp(seen[2].ssid, "Alpha") && seen[2].bars == 4 && seen[2].secured, "strongest bssid keeps lock");
+    expect(!strcmp(seen[3].ssid, "Beta") && !strcmp(seen[4].ssid, "Zeta"), "equal bars by name");
+    struct wpa_seen again[6];
+    memcpy(again, seen, sizeof(again));
+    struct wpa_seen t = again[3]; again[3] = again[4]; again[4] = t;
+    wpa_order_seen(again, 5, "Cafe");
+    expect(!memcmp(again, seen, 5 * sizeof(seen[0])), "order ignores arrival");
     if (fail) { printf("%d failures\n", fail); return 1; }
     printf("wifi wpa: PASS\n");
     return 0;

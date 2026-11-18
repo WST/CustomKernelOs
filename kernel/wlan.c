@@ -6,16 +6,20 @@
 #include "string.h"
 #include "timer.h"
 #include "syscall.h"
+#include "klog.h"
 
 /* Одна карта. Кадры EAPOL не попадают в IP. Ключ CCMP применяется здесь, не в устройстве. */
 
-#define BSS_MAX 32
+#define BSS_MAX 64
 #define EQ 8
+
+/* Сколько сканов подряд точка может не ответить и остаться в списке. */
+#define BSS_KEEP 2
 
 struct bss {
     char ssid[33];
     u8 bssid[6];
-    u8 channel, secured;
+    u8 channel, secured, miss;
     i32 rssi;
 };
 
@@ -23,13 +27,15 @@ static struct {
     struct netif *iface;
     struct wlan_ops ops;
     void *dev, *mod;
-    u8 mac[6], bssid[6], ptk[16], gtk[16], txpn[6];
+    u8 mac[6], bssid[6], ptk[16], gtk[16], gtk_id, txpn[6];
     char ssid[33];
     int state, blocked, port, channel, max_ch, secure;
     int have_ptk, have_gtk, nlist, seq;
-    int auth_ok, assoc_ok;
+    int auth_ok, assoc_ok, auth_seen, assoc_seen;
+    u16 auth_status, assoc_status, aid;
     i32 rssi;
-    struct bss list[BSS_MAX];
+    struct bss *list, *scan;
+    int nscan;
     u8 *qmem;
     u16 eapol_len[4];
     int eapol_n, eapol_h;
@@ -86,31 +92,36 @@ static int wlan_send(struct netif *n, const void *frame, u32 len) {
     int eapol = wlan_is_eapol_eth(eth, len);
     if ((!W.port && !eapol) || !W.ops.tx || W.blocked) return -1;
     u8 mpdu[1800], crypt[1900];
-    int m = wlan_eth_to_wifi(mpdu, sizeof(mpdu), frame, len, W.bssid, (u16)W.seq++);
+    /* Рукопожатие остаётся без QoS: так точка его уже приняла. Остальные данные — QoS. */
+    int m = wlan_eth_to_wifi(mpdu, sizeof(mpdu), frame, len, W.bssid, (u16)W.seq++, eapol ? 0 : 1);
     if (m < 0) return -1;
-    int group = eth[0] & 1;
-    if (W.have_ptk) {
-        const u8 *key = (group && W.have_gtk) ? W.gtk : W.ptk;
+    /* Станция всегда шлёт точке (To DS), даже широковещание IP. Такой кадр
+     * шифруется парным ключом. Групповой — только у кадров от точки. */
+    if (W.have_ptk && !eapol) {
         pn_inc(W.txpn);
-        int c = wlan_ccmp_encrypt(crypt, sizeof(crypt), mpdu, (u32)m, key, W.txpn, group ? 1 : 0);
+        int c = wlan_ccmp_encrypt(crypt, sizeof(crypt), mpdu, (u32)m, W.ptk, W.txpn, 0);
         if (c < 0) return -1;
         return W.ops.tx(W.dev, crypt, (u32)c) ? -1 : 0;
     }
     return W.ops.tx(W.dev, mpdu, (u32)m) ? -1 : 0;
 }
 
+/* Скан собирает новый список отдельно: видимый не пустеет на время обхода каналов.
+ * Маяки между сканами список не трогают, иначе уровень у порога делений
+ * переставляет строки несколько раз в секунду. */
 static void remember(const struct wlan_parsed *p, i32 rssi) {
     if (!p->ssid_len && !p->ssid[0]) return;
-    for (int i = 0; i < W.nlist; i++) {
-        if (!memcmp(W.list[i].bssid, p->bssid, 6)) {
-            W.list[i].rssi = rssi;
-            W.list[i].channel = p->channel;
-            W.list[i].secured = p->secured;
+    if (W.state != WLAN_SCANNING || !W.scan) return;
+    for (int i = 0; i < W.nscan; i++) {
+        if (!memcmp(W.scan[i].bssid, p->bssid, 6)) {
+            if (rssi > W.scan[i].rssi) W.scan[i].rssi = rssi;
+            W.scan[i].channel = p->channel;
+            W.scan[i].secured = p->secured;
             return;
         }
     }
-    if (W.nlist >= BSS_MAX) return;
-    struct bss *b = &W.list[W.nlist++];
+    if (W.nscan >= BSS_MAX) return;
+    struct bss *b = &W.scan[W.nscan++];
     memset(b, 0, sizeof(*b));
     memcpy(b->ssid, p->ssid, 33);
     memcpy(b->bssid, p->bssid, 6);
@@ -124,8 +135,22 @@ void wlan_rx(const void *pkt, u32 len, i32 rssi) {
     if (!mpdu || len < 24 || !W.iface) return;
     struct wlan_parsed parsed;
     if (wlan_parse_beacon(mpdu, len, &parsed) == 0) { remember(&parsed, rssi); return; }
-    if (wlan_auth_ok(mpdu, len)) { W.auth_ok = 1; return; }
-    if (wlan_assoc_ok(mpdu, len)) { W.assoc_ok = 1; return; }
+    if (len >= 30 && (mpdu[0] == 0xb0 || mpdu[0] == 0x10 || mpdu[0] == 0x30) && !memcmp(mpdu + 16, W.bssid, 6)) {
+        u16 status = (u16)(mpdu[26] | (mpdu[27] << 8));
+        if (mpdu[0] == 0xb0) {
+            W.auth_status = status;
+            W.auth_seen = 1;
+            if (wlan_auth_ok(mpdu, len)) W.auth_ok = 1;
+        } else {
+            W.assoc_status = status;
+            W.assoc_seen = 1;
+            if (status == 0) {
+                W.aid = (u16)((mpdu[28] | (mpdu[29] << 8)) & 0x3fff);
+                W.assoc_ok = 1;
+            }
+        }
+        return;
+    }
     if ((mpdu[0] & 0x0c) != 0x08) return;
     u8 plain[1800], eth[1600];
     const u8 *use = mpdu;
@@ -147,6 +172,7 @@ void wlan_rx(const void *pkt, u32 len, i32 rssi) {
         memcpy(eapol_at(i), eth + 14, (u32)e - 14);
         W.eapol_len[i] = (u16)(e - 14);
         W.eapol_n++;
+        klogf("WLAN: eapol %u\n", (u32)e - 14);
         return;
     }
     queue_eth(eth, (u32)e);
@@ -168,8 +194,10 @@ int wlan_attach(const char *name, const u8 mac[6], const struct wlan_ops *ops, v
     W.max_ch = max_channel >= 1 && max_channel <= 13 ? max_channel : 11;
     W.channel = 1;
     W.state = WLAN_IDLE;
-    W.qmem = kmalloc(4 * 512 + EQ * 1600);
+    W.qmem = kmalloc(4 * 512 + EQ * 1600 + 2 * BSS_MAX * sizeof(struct bss));
     if (!W.qmem) { memset(&W, 0, sizeof(W)); return -ENOMEM; }
+    W.list = (struct bss *)(W.qmem + 4 * 512 + EQ * 1600);
+    W.scan = W.list + BSS_MAX;
     W.mod = module_current();
     if (W.mod) module_hold(W.mod);
     struct netif proto;
@@ -217,8 +245,8 @@ static int do_scan(void) {
     if (!W.iface) return -ENODEV;
     if (W.blocked) return -EPERM;
     int prev = W.state;
+    W.nscan = 0;
     W.state = WLAN_SCANNING;
-    W.nlist = 0;
     if (W.ops.scan) {
         W.ops.scan(W.dev);
     } else {
@@ -232,6 +260,15 @@ static int do_scan(void) {
         }
     }
     W.state = prev == WLAN_RUN || prev == WLAN_EAPOL ? prev : WLAN_IDLE;
+    for (int i = 0; i < W.nlist && W.nscan < BSS_MAX; i++) {
+        int seen = 0;
+        for (int j = 0; j < W.nscan && !seen; j++) seen = !memcmp(W.scan[j].bssid, W.list[i].bssid, 6);
+        if (seen || W.list[i].miss >= BSS_KEEP) continue;
+        W.scan[W.nscan] = W.list[i];
+        W.scan[W.nscan++].miss++;
+    }
+    memcpy(W.list, W.scan, (u32)W.nscan * sizeof(struct bss));
+    W.nlist = W.nscan;
     return W.nlist;
 }
 
@@ -242,10 +279,12 @@ static int do_connect(struct wlan_connect_u *c) {
     if (W.nlist == 0) do_scan();
     struct bss *b = find_ssid(c->ssid, c->bssid, c->has_bssid);
     if (!b) return -ENOENT;
-    W.auth_ok = W.assoc_ok = 0;
+    W.auth_ok = W.assoc_ok = W.auth_seen = W.assoc_seen = 0;
+    W.eapol_n = W.eapol_h = 0;
     W.port = 0;
     W.have_ptk = W.have_gtk = 0;
     W.secure = b->secured || c->secure;
+    int rsn = b->secured;
     memcpy(W.ssid, b->ssid, 33);
     memcpy(W.bssid, b->bssid, 6);
     W.channel = b->channel ? b->channel : 1;
@@ -253,12 +292,33 @@ static int do_connect(struct wlan_connect_u *c) {
     W.state = WLAN_ASSOC;
     if (W.ops.set_channel) W.ops.set_channel(W.dev, W.channel);
     u8 frame[256];
-    tx_mpdu(frame, wlan_build_auth(frame, sizeof(frame), W.bssid, W.mac));
-    for (int i = 0; i < 50 && !W.auth_ok; i++) sleep_ms(10);
-    if (!W.auth_ok) { W.state = WLAN_IDLE; return -EIO; }
-    tx_mpdu(frame, wlan_build_assoc(frame, sizeof(frame), W.bssid, W.mac, (const u8 *)W.ssid, (u8)strlen(W.ssid)));
-    for (int i = 0; i < 50 && !W.assoc_ok; i++) sleep_ms(10);
-    if (!W.assoc_ok) { W.state = WLAN_IDLE; return -EIO; }
+    /* Три попытки, как у обычных клиентов: точка может пропустить кадр, пока занята. */
+    for (int t = 0; t < 3 && !W.auth_ok && !W.auth_seen; t++) {
+        tx_mpdu(frame, wlan_build_auth(frame, sizeof(frame), W.bssid, W.mac));
+        for (int i = 0; i < 30 && !W.auth_ok && !W.auth_seen; i++) sleep_ms(10);
+    }
+    if (!W.auth_ok) {
+        if (W.auth_seen) klogf("WLAN: auth %s ch %d refused, status %u\n", W.ssid, W.channel, W.auth_status);
+        else klogf("WLAN: auth %s ch %d: no answer\n", W.ssid, W.channel);
+        W.state = WLAN_IDLE;
+        return W.auth_seen ? -ECONNREFUSED : -EHOSTUNREACH;
+    }
+    for (int t = 0; t < 3 && !W.assoc_seen; t++) {
+        tx_mpdu(frame, wlan_build_assoc(frame, sizeof(frame), W.bssid, W.mac, (const u8 *)W.ssid, (u8)strlen(W.ssid), rsn));
+        for (int i = 0; i < 30 && !W.assoc_seen; i++) sleep_ms(10);
+    }
+    if (!W.assoc_ok) {
+        if (W.assoc_seen) klogf("WLAN: assoc %s refused, status %u\n", W.ssid, W.assoc_status);
+        else klogf("WLAN: assoc %s: no answer\n", W.ssid);
+        W.state = WLAN_IDLE;
+        return W.assoc_seen ? -ECONNREFUSED : -ETIMEDOUT;
+    }
+    klogf("WLAN: associated with %s ch %d aid %u\n", W.ssid, W.channel, W.aid);
+    if (W.ops.joined && W.ops.joined(W.dev, W.bssid, W.aid)) {
+        klogf("WLAN: card did not accept the association\n");
+        W.state = WLAN_IDLE;
+        return -EIO;
+    }
     if (!W.secure) { W.port = 1; W.state = WLAN_RUN; }
     else W.state = WLAN_EAPOL;
     return 0;
@@ -338,7 +398,7 @@ int wlan_ctl(int op, void *buf, u32 len) {
         if (!buf || len < sizeof(struct wlan_key_u)) return -EINVAL;
         struct wlan_key_u *k = buf;
         if (k->kind == WLAN_KEY_PTK) { memcpy(W.ptk, k->key, 16); W.have_ptk = 1; }
-        else if (k->kind == WLAN_KEY_GTK) { memcpy(W.gtk, k->key, 16); W.have_gtk = 1; }
+        else if (k->kind == WLAN_KEY_GTK) { memcpy(W.gtk, k->key, 16); W.gtk_id = k->id & 3; W.have_gtk = 1; }
         else return -EINVAL;
         return 0;
     }
