@@ -113,6 +113,43 @@ test ! -f escaped.txt || fail escaped
 test ! -f dot/escaped.txt || fail escaped-in
 test -f dot/ok/stay.txt || fail stay
 
+# bzip2 и xz: архив собран эталоном хоста, создание tar по-прежнему без сжатия
+python3 - << 'PY' || fail craft-comp
+import bz2, lzma
+raw = open("plain.tar","rb").read()
+open("plain.tar.bz2","wb").write(bz2.compress(raw))
+open("plain.tar.xz","wb").write(lzma.compress(raw))
+open("bad.bz2","wb").write(b"notbzip!!")
+open("bad.xz","wb").write(b"notxz!!!!")
+open("one.txt","w").write("hi\n")
+PY
+extract bz plain.tar.bz2
+diff -rq bz ours || fail bzip2-auto
+rm -rf bz-j
+mkdir bz-j
+"$T" -xjf plain.tar.bz2 -C bz-j || fail bzip2-flag
+diff -rq bz-j ours || fail bzip2-flag-diff
+extract xz plain.tar.xz
+diff -rq xz ours || fail xz-auto
+rm -rf xz-j
+mkdir xz-j
+"$T" -xJf plain.tar.xz -C xz-j || fail xz-flag
+diff -rq xz-j ours || fail xz-flag-diff
+if "$T" -xjf bad.bz2 -C /tmp >/tmp/tar-bad-bz 2>&1; then fail bad-bz-status; fi
+grep -q "not in bzip2 format" /tmp/tar-bad-bz || fail bad-bz-msg
+if "$T" -xJf bad.xz -C /tmp >/tmp/tar-bad-xz 2>&1; then fail bad-xz-status; fi
+grep -q "not in xz format" /tmp/tar-bad-xz || fail bad-xz-msg
+"$T" -cjf create.tar.bz2 one.txt || fail create-bz
+python3 - << 'PY' || fail create-uncompressed
+d=open("create.tar.bz2","rb").read()
+assert d[257:262]==b"ustar", d[:16]
+PY
+"$T" -cJf create.tar.xz one.txt || fail create-xz
+python3 - << 'PY' || fail create-xz-plain
+d=open("create.tar.xz","rb").read()
+assert d[257:262]==b"ustar", d[:16]
+PY
+
 # настоящий архив с исходниками zlib (релиз 1.3.1)
 URL=https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz
 curl -fsSL --max-time 40 -o zlib.tar.gz "$URL" || fail "download zlib"

@@ -642,3 +642,5 @@ int fs_automount(void) {
     }
     lookup_free(text);return result;
 }
+
+#include "fs-install.inc"

@@ -1,7 +1,8 @@
 #ifndef BLOCK_H
 #define BLOCK_H
 #include "types.h"
-#define BLOCK_MAX 10
+#define BLOCK_UNITS 5
+#define BLOCK_MAX (BLOCK_UNITS*5)
 struct block_device { char name[12]; u32 start, sectors; bool partition; };
 int block_init(void);
 int block_count(void);
@@ -20,6 +21,7 @@ int block_write(int id, u32 sector, const void *buf);
 int block_write_through(int id, u32 sector, const void *buf);
 int block_flush(void);
 int block_flush_device(int id);
+int block_cache_invalidate_disk(int disk); /* refuses to discard dirty sectors */
 void block_flush_idle(void); /* не ждёт, если диск уже занят ожидающей задачей */
 void block_cache_invalidate(void); /* drop cached sectors; dirty ones are discarded */
 void block_epoch_begin(void);      /* следующая запись кэша принадлежит новому вызову */

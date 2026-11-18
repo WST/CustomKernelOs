@@ -110,9 +110,18 @@ static int prepare_bitmap(u32 bytes) {
 /* ---------------------------------------------------------------- блоки */
 
 #include "myfs-journal.inc"
+static void cache_forget(void);
 static void sync_if_switching(int slot) {
-    if (slot != selected && !transaction_depth && mounted)
-        myfs_sync();
+    if (slot == selected || transaction_depth) return;
+    if (mounted && myfs_sync()) journal_failed[selected]=true;
+    /* После ошибки группа принадлежит отказавшему тому. Её адреса нельзя
+     * читать как метаданные следующего тома; журнал на диске восстановит mount. */
+    if (journal_failed[selected]) {
+        mounted=false;
+        transaction_count=transaction_error=0;
+        pending_data=0;undo_armed=false;undo_lost=false;
+        cache_forget();
+    }
 }
 static int bread(u32 b, void *buf) { return journal_read(b,buf); }
 static int bwrite(u32 b, const void *buf) {

@@ -12,8 +12,10 @@ BOUNCE equ 0x70000
 KERNEL equ 0x100000
 ; Layout limits are passed from kernel/bootinfo.h by the image builder.
 ROOT equ ROOT_PHYS
+%ifndef INSTALLED_ROOT
 %if ROOT_SECTORS*512 < ROOT_MIN_BYTES || ROOT_SECTORS*512 > ROOT_MAX_BYTES
 %error "Live root size is outside the supported range"
+%endif
 %endif
 start:
     cli
@@ -38,6 +40,18 @@ start:
     mov dword [INFO+8],ROOT
     mov dword [INFO+12],ROOT_SECTORS*512
     mov dword [INFO+16],FONT
+%ifdef INSTALLED_ROOT
+    mov dword [INFO+4],3
+    mov dword [INFO+8],0
+    mov dword [INFO+12],0
+    mov eax,[0x7c00+454] ; first MBR partition, selected by the installer
+    mov [INFO+44],eax
+    mov eax,[0x7c00+440]
+    mov [INFO+48],eax
+    mov dword [INFO+52],1 ; BOOT_DISK_ROOT
+    mov eax,[0x7c00+458]
+    mov [INFO+56],eax
+%endif
     ; E820 records remain in the legacy ABI at 0x8000.
     mov di,0x8004
     xor ebx,ebx
@@ -69,8 +83,13 @@ start:
     mov eax,KERNEL
     mov edx,KERNEL_END
     call usable
+%ifdef INSTALLED_ROOT
+    mov eax,KERNEL
+    mov edx,KERNEL_END+ROOT_RESERVE_BYTES
+%else
     mov eax,ROOT
     mov edx,ROOT+ROOT_SECTORS*512+ROOT_RESERVE_BYTES
+%endif
     call usable
     in al,0x92
     or al,2
@@ -99,10 +118,12 @@ start:
     mov dword [dap_lba],KERNEL_LBA
     mov dword [remaining],KERNEL_SECTORS
     call load
+%ifndef INSTALLED_ROOT
     mov dword [destination],ROOT
     mov dword [dap_lba],ROOT_LBA
     mov dword [remaining],ROOT_SECTORS
     call load
+%endif
     ; Capture the BIOS font before switching out of VGA text mode.
     mov ax,0x1130
     mov bh,6

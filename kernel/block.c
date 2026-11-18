@@ -2,6 +2,7 @@
 #include "ata.h"
 #ifndef HOST_TEST
 #include "ahci.h"
+#include "nvme.h"
 #include "pmm.h"
 #include "paging.h"
 #include "heap.h"
@@ -27,7 +28,7 @@ void *calloc(unsigned long, unsigned long);
  * the hardware barrier. File bytes stay cached until that barrier, idle,
  * pressure, or an explicit flush. Power loss drops whatever is still dirty. */
 static struct block_device devices[BLOCK_MAX];
-static bool tables[2];
+static bool tables[BLOCK_UNITS];
 static struct mutex block_lock;
 #define CACHE_RUN 32
 /* Пачка сброса и опережающего чтения. ATA PIO не берёт больше CACHE_RUN,
@@ -64,7 +65,7 @@ static u8 *data_blob;
 static int seq_unit;
 static u32 seq_lba;
 static bool seq_valid;
-static bool device_dirty[2];
+static bool device_dirty[BLOCK_UNITS];
 
 static u32 hash_of(int unit, u32 lba) {
     return (lba * 2654435761u ^ ((u32)unit * 0x9e3779b9u)) & hash_mask;
@@ -189,8 +190,10 @@ static int ensure_page(u32 i) { (void)i; return data_blob ? 0 : -1; }
 
 static u32 sectors(int u) {
 #ifdef HOST_TEST
-    return u==0 ? ata_sectors() : 0;
+    extern u32 ata_unit_sectors(int) __attribute__((weak));
+    return ata_unit_sectors?ata_unit_sectors(u):(u==0?ata_sectors():0);
 #else
+    if (nvme_present(u)) return nvme_sectors(u);
     if (ahci_present(u)) return ahci_sectors(u);
     return ata_unit_sectors(u);
 #endif
@@ -209,27 +212,36 @@ static int device_read_run(int u, u32 lba, void *buf, u32 n) {
     if (!ahci_present(u) && n > CACHE_RUN) return -1;
 #endif
 #ifdef HOST_TEST
-    if (u) return -1;
+    extern int ata_unit_read(int,u32,void*) __attribute__((weak));
+    if (u && !ata_unit_read) return -1;
     u8 *p = buf;
-    for (u32 i = 0; i < n; i++) if (ata_read(lba + i, p + i * 512)) return -1;
+    for (u32 i = 0; i < n; i++)
+        if (ata_unit_read ? ata_unit_read(u,lba+i,p+i*512) : ata_read(lba+i,p+i*512)) return -1;
     return 0;
 #else
+    if (nvme_present(u)) {
+        for (u32 i=0;i<n;i++) if (nvme_read(u,lba+i,(u8 *)buf+i*512)) return -1;
+        return 0;
+    }
     if (ahci_present(u)) return ahci_read_sectors(u, lba, buf, n);
     return ata_unit_read_sectors(u, lba, buf, n);
 #endif
 }
 static int device_write_run(int u, u32 lba, const void *buf, u32 n) {
-    if (u >= 0 && u < 2) device_dirty[u] = true;
+    if (u >= 0 && u < BLOCK_UNITS) device_dirty[u] = true;
     if (!n || n > RUN_MAX) return -1;
 #ifndef HOST_TEST
     if (!ahci_present(u) && n > CACHE_RUN) return -1;
 #endif
 #ifdef HOST_TEST
-    if (u) return -1;
+    extern int ata_unit_write(int,u32,const void*) __attribute__((weak));
+    if (u && !ata_unit_write) return -1;
     const u8 *p = buf;
-    for (u32 i = 0; i < n; i++) if (ata_write(lba + i, p + i * 512)) return -1;
+    for (u32 i=0;i<n;i++)
+        if (ata_unit_write ? ata_unit_write(u,lba+i,p+i*512) : ata_write(lba+i,p+i*512)) return -1;
     return 0;
 #else
+    if (nvme_present(u)) return nvme_write(u,lba,buf,n);
     if (ahci_present(u)) return ahci_write(u, lba, buf, n);
     return ata_unit_write_sectors(u, lba, (void *)buf, n);
 #endif
@@ -451,7 +463,7 @@ static int barrier_locked(int unit) {
     extern int ata_unit_flush(int) __attribute__((weak));
     int r = ata_unit_flush ? ata_unit_flush(unit) : 0;
 #else
-    int r = ahci_present(unit) ? ahci_flush(unit) : ata_unit_flush(unit);
+    int r = nvme_present(unit) ? nvme_flush(unit) : ahci_present(unit) ? ahci_flush(unit) : ata_unit_flush(unit);
 #endif
     if (!r) device_dirty[unit] = false;
     return r;
@@ -467,7 +479,7 @@ int block_flush_device(int id) {
 int block_flush(void) {
     mutex_lock(&block_lock);
     int rc = flush_locked();
-    for (int u = 0; u < 2; u++) if (barrier_locked(u)) rc = -1;
+    for (int u = 0; u < BLOCK_UNITS; u++) if (barrier_locked(u)) rc = -1;
     mutex_unlock(&block_lock);
     return rc;
 }
@@ -507,46 +519,66 @@ void block_cache_invalidate(void) {
     seq_valid = false;
     mutex_unlock(&block_lock);
 }
-static u32 le32(const u8 *p) { return p[0] | (u32)p[1] << 8 | (u32)p[2] << 16 | (u32)p[3] << 24; }
-const struct block_device *block_get(int id) { return id >= 0 && id < BLOCK_MAX && devices[id].sectors ? &devices[id] : NULL; }
-int block_count(void) { int n = 0; for (int i = 0; i < BLOCK_MAX; i++) if (block_get(i)) n++; return n; }
-int block_at(int index) { for (int i = 0; i < BLOCK_MAX; i++) if (block_get(i) && index-- == 0) return i; return -1; }
-bool block_disk_partitioned(int disk) { return disk >= 0 && disk < 2 && tables[disk]; }
+/* Пересканирование установщика не должно терять ещё не сброшенные записи. */
+int block_cache_invalidate_disk(int disk) {
+    if (disk<0 || disk>=BLOCK_UNITS) return -1;
+    mutex_lock(&block_lock);
+    for (u32 i=0;cache && i<cache_slots;i++)
+        if ((cache[i].flags&(F_VALID|F_DIRTY))==(F_VALID|F_DIRTY) && cache[i].unit==disk) {
+            mutex_unlock(&block_lock);return -1;
+        }
+    for (u32 i=0;cache && i<cache_slots;i++) if ((cache[i].flags&F_VALID) && cache[i].unit==disk) {
+        dirty_unlink(i);hash_unlink(i);cache[i].flags=0;
+    }
+    if (seq_unit==disk) seq_valid=false;
+    mutex_unlock(&block_lock);return 0;
+}
+static u32 le32(const u8 *p) { return p[0]|(u32)p[1]<<8|(u32)p[2]<<16|(u32)p[3]<<24; }
+const struct block_device *block_get(int id) { return id>=0 && id<BLOCK_MAX && devices[id].sectors ? &devices[id] : NULL; }
+int block_count(void) { int n=0; for(int i=0;i<BLOCK_MAX;i++) if(block_get(i)) n++; return n; }
+int block_at(int index) { for(int i=0;i<BLOCK_MAX;i++) if(block_get(i) && index--==0) return i; return -1; }
+bool block_disk_partitioned(int disk) { return disk>=0 && disk<BLOCK_UNITS && tables[disk]; }
 bool block_partitioned(void) { return tables[0]; }
 int block_find(const char *name) {
-    if (!strncmp(name, "/dev/", 5)) name += 5;
-    for (int i = 0; i < BLOCK_MAX; i++) if (block_get(i) && !strcmp(name, devices[i].name)) return i;
+    if(!strncmp(name,"/dev/",5)) name+=5;
+    for(int i=0;i<BLOCK_MAX;i++) if(block_get(i) && !strcmp(name,devices[i].name)) return i;
     return -1;
 }
 int block_rescan(int disk) {
-    if (disk < 0 || disk >= 2) return -1;
-    int base = disk * 5; memset(devices + base, 0, 5 * sizeof(*devices)); tables[disk] = false;
-    u32 total = sectors(disk); if (!total) return -1;
-    if (total > 0x10000000u) total = 0x10000000u;
-    struct block_device *whole = &devices[base]; strcpy(whole->name, disk ? "sdc" : "sdb"); whole->sectors = total;
-    u8 buf[512]; if (cache_load(disk, 0, buf)) return -1;
-    if (buf[510] != 0x55 || buf[511] != 0xaa) return 0;
-    tables[disk] = true;
-    for (int i = 0; i < 4; i++) {
-        const u8 *p = buf + 446 + i * 16; u32 start = le32(p + 8), size = le32(p + 12);
-        if (!p[4] || p[4] == 0xee || p[4] == 5 || p[4] == 0x0f || p[4] == 0x85) continue;
-        if (!start || !size || start >= total || size > total - start) continue;
-        bool overlap = false;
-        for (int j = 1; j <= i; j++) { const struct block_device *d = &devices[base + j];
-            if (d->sectors && start < d->start + d->sectors && d->start < start + size) overlap = true;
+    if(disk<0 || disk>=BLOCK_UNITS) return -1;
+    int base=disk*5; memset(devices+base,0,5*sizeof(*devices)); tables[disk]=false;
+    u32 total=sectors(disk); if(!total) return -1;
+    if(total>0x10000000u) total=0x10000000u;
+    struct block_device *whole=&devices[base]; strcpy(whole->name,"sdb"); whole->name[2]=(char)('b'+disk); whole->sectors=total;
+#ifndef HOST_TEST
+    if(disk>=3 && nvme_present(disk)){strcpy(whole->name,"nvme0");whole->name[4]='0'+disk-3;}
+#endif
+    u8 buf[512]; if(cache_load(disk,0,buf)) return -1;
+    if(buf[510]!=0x55 || buf[511]!=0xaa) return 0;
+    tables[disk]=true;
+    for(int i=0;i<4;i++) {
+        const u8 *p=buf+446+i*16; u32 start=le32(p+8),size=le32(p+12);
+        if(!p[4] || p[4]==0xee || p[4]==5 || p[4]==0x0f || p[4]==0x85) continue;
+        if(!start || !size || start>=total || size>total-start) continue;
+        bool overlap=false;
+        for(int j=1;j<=i;j++) { const struct block_device *d=&devices[base+j];
+            if(d->sectors && start<d->start+d->sectors && d->start<start+size) overlap=true;
         }
-        if (overlap) continue;
-        struct block_device *d = &devices[base + i + 1]; strcpy(d->name, whole->name); d->name[3] = '1' + i; d->name[4] = 0;
-        d->start = start; d->sectors = size; d->partition = true;
+        if(overlap) continue;
+        struct block_device *d=&devices[base+i+1]; strcpy(d->name,whole->name);
+        unsigned length=strlen(d->name);
+        if(disk>=3)d->name[length++]='p';
+        d->name[length++]='1'+i;d->name[length]=0;
+        d->start=start; d->sectors=size; d->partition=true;
     }
     return 0;
 }
 int block_init(void) {
 #ifdef HOST_TEST
     static bool hooked;
-    if (!hooked) { atexit(host_exit_flush); hooked = true; }
+    if (!hooked) { atexit(host_exit_flush); hooked=true; }
 #endif
-    int r = block_rescan(0); block_rescan(1); return r;
+    int r=block_rescan(0); for(int unit=1;unit<BLOCK_UNITS;unit++)block_rescan(unit); return r;
 }
 static int access_sector(int id, u32 sector, void *buf, bool write, bool through) {
     const struct block_device *d = block_get(id);

@@ -21,8 +21,8 @@ Centrino Wireless-N 1000 (PCI `8086:0083` и `8086:0084`) — softmac. Карт�
 `ifconfig dns` и `SYS_NETINFO` по-прежнему относятся к маршруту по умолчанию:
 старые номера вызовов не сдвигаются.
 
-`SYS_IFCTL`, `SYS_MODCTL` и `SYS_WLANCTL` стоят в конце списка, после
-`SYS_SIGRETURN`.
+`SYS_INSTALLCTL` остаётся 101, как в основной ветке. `SYS_IFCTL`,
+`SYS_MODCTL` и `SYS_WLANCTL` стоят следом, в конце списка.
 
 ## Кто держит пароль
 

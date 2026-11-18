@@ -1,7 +1,9 @@
-/* grep [-v] [-i] [-c] [-n] [-h] pattern [file...] — базовые регулярные выражения. */
+/* grep [-v] [-i] [-c] [-n] [-h] [-P] pattern [file...] — базовые регулярные выражения.
+ * -P отдаёт шаблон libpcre; без флага остаётся прежний разбор. */
 #include "myos.h"
+#include "pcre.h"
 
-static bool opt_v, opt_i, opt_c, opt_n, opt_h;
+static bool opt_v, opt_i, opt_c, opt_n, opt_h, opt_p;
 
 static int fold(int c) { return opt_i ? tolower(c) : c; }
 
@@ -49,6 +51,11 @@ static int re_len(const char *pat, const char *s) {
     }
     return -1;
 }
+static int pcre_hit(const pcre *re, const char *s) {
+    int ov[6];
+    return pcre_exec(re, NULL, s, (int)strlen(s), 0, 0, ov, 6) > 0;
+}
+
 static int matches(const char *pat, const char *s) {
     if (!pat[0]) return 1;
     int anchor = pat[0] == '^';
@@ -60,7 +67,7 @@ static int matches(const char *pat, const char *s) {
     return 0;
 }
 
-static int search(int fd, const char *pat, const char *name) {
+static int search(int fd, const char *pat, const pcre *re, const char *name) {
     char *buf = NULL; int n = 0, cap = 0, count = 0, lineno = 0;
     char ch;
     while (read(fd, &ch, 1) == 1) {
@@ -72,7 +79,7 @@ static int search(int fd, const char *pat, const char *name) {
         if (n + 1 > cap) { cap = n + 2; buf = realloc(buf, (size_t)cap); }
         buf[n] = 0;
         lineno++;
-        int hit = matches(pat, buf);
+        int hit = re ? pcre_hit(re, buf) : matches(pat, buf);
         if (hit == opt_v) { n = 0; continue; }
         count++;
         if (!opt_c) {
@@ -92,6 +99,7 @@ static int search(int fd, const char *pat, const char *name) {
 
 int main(int argc, char **argv) {
     int i = 1;
+    const pcre *re = NULL;
     for (; i < argc && argv[i][0] == '-' && argv[i][1]; i++)
         for (char *o = argv[i] + 1; *o; o++) {
             if (*o == 'v') opt_v = true;
@@ -99,18 +107,26 @@ int main(int argc, char **argv) {
             else if (*o == 'c') opt_c = true;
             else if (*o == 'n') opt_n = true;
             else if (*o == 'h') opt_h = true;
+            else if (*o == 'P') opt_p = true;
             else { dprintf(STDERR, "grep: unknown option -%c\n", *o); return 2; }
         }
-    if (i >= argc) { dprintf(STDERR, "usage: grep [-vichn] pattern [file...]\n"); return 2; }
+    if (i >= argc) { dprintf(STDERR, "usage: grep [-vichnP] pattern [file...]\n"); return 2; }
     const char *pat = argv[i++];
-    if (i == argc) return search(STDIN, pat, NULL);
+    if (opt_p) {
+        const char *err = NULL;
+        int off = 0;
+        re = pcre_compile(pat, opt_i ? PCRE_CASELESS : 0, &err, &off, NULL);
+        if (!re) { dprintf(STDERR, "grep: %s\n", err ? err : "bad pattern"); return 2; }
+    }
+    if (i == argc) return search(STDIN, pat, re, NULL);
     bool names = argc - i > 1;
     int rc = 1;
     for (; i < argc; i++) {
         int fd = open(argv[i], O_READ);
         if (fd < 0) { dprintf(STDERR, "grep: %s: %s\n", argv[i], strerror(errno)); continue; }
-        if (search(fd, pat, names ? argv[i] : NULL) == 0) rc = 0;
+        if (search(fd, pat, re, names ? argv[i] : NULL) == 0) rc = 0;
         close(fd);
     }
+    if (re) pcre_free((void *)re);
     return rc;
 }

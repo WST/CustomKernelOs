@@ -61,6 +61,20 @@ static int producer(int owner) {
     win_update_rect(w,0,0,1,1);
     require(!w->full_update,"timeout recovery publication");
     gfx_clear(0); stage(owner,8);
+
+    /* shm_map отдаёт уже отображённый буфер без новой ссылки: стол не должен
+     * завести на нём второе окно или снять отображение у живого окна. */
+    int desktop=win_desktop_pid();
+    struct msg reuse={0}; reuse.type=WM_CREATE; reuse.a=w->shm; reuse.b=w->w; reuse.c=w->h; reuse.d=WM_BUFFERED;
+    require(msg_send(desktop,&reuse)==0,"reused create send");
+    do require(msg_recv(&reuse,2000)==0,"reused create reply");
+    while(reuse.from!=desktop || reuse.type!=WM_CREATED);
+    require(reuse.a<0,"reused buffer refused for a new window");
+    memset(&reuse,0,sizeof(reuse)); reuse.type=WM_SETBUF; reuse.a=w->id; reuse.b=w->shm; reuse.c=w->w; reuse.d=w->h;
+    unsigned marker=WM_BUFFERED; memcpy(reuse.data,&marker,sizeof(marker));
+    require(msg_send(desktop,&reuse)==0,"reused buffer send");
+    gfx_clear(BLUE); win_update(w); gfx_clear(0);
+    stage(owner,9);
     win_destroy(w);
     return 0;
 }
@@ -84,7 +98,11 @@ int main(int argc,char **argv) {
     require(gfx_set_mode(argc>1 ? 2560:1024,argc>1 ? 1600:768)==0,"mode"); gfx_check_mode();
     SW=gfx_w; SH=gfx_h; back=gfx_buf;
     gpu_reset(); require(gpu_scene,"GPU compositor");
-    wallpaper=malloc(SW*SH*4); require(wallpaper!=NULL,"wallpaper");
+    /* Экран входа пересоздаёт обои при каждой смене режима: прежний буфер не должен оставаться в куче. */
+    make_wallpaper(); require(wallpaper!=NULL,"wallpaper");
+    void *heap_top=sbrk(0);
+    for(int i=0;i<3;i++) make_wallpaper();
+    require(wallpaper!=NULL && sbrk(0)==heap_top,"wallpaper rebuild keeps the heap");
     for(int i=0;i<SW*SH;i++) wallpaper[i]=RGB(35,28,52);
     load_apps(); dock_build(); update_clock(); mouse_x=900; mouse_y=700;
     require(service_register("desktop")==0,"desktop registration");
@@ -124,7 +142,7 @@ int main(int argc,char **argv) {
     }
     require(done,"producer completed");
     int status=-1; require(waitpid(child,&status,0)==child && status==0,"producer exit");
-    require(!wins[0].used,"window released");
+    require(!wins[0].used && !wins[1].used,"window released");
     free(wallpaper); gfx_close(); printf("FRAMECHECK PASS\n");
     return 0;
 }

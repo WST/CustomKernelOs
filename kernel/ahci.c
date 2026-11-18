@@ -34,7 +34,8 @@ static struct {
     u32 page;
     u32 sectors;
     char model[41];
-} unit[2];
+} unit[3] = {{.index=-1},{.index=-1},{.index=-1}};
+static bool driver_started;
 
 #ifdef HOST_TEST
 /* Register hooks model command completion and failed engines in host tests. */
@@ -48,7 +49,7 @@ static void wr(u32 off, u32 value) { *(volatile u32 *)(mmio + off) = value; }
 #endif
 static u32 port_off(int port) { return PORT_BASE + (u32)port * PORT_STRIDE; }
 
-bool ahci_present(int u) { return u >= 0 && u < 2 && unit[u].index >= 0; }
+bool ahci_present(int u) { return u >= 0 && u < 3 && unit[u].index >= 0; }
 u32 ahci_sectors(int u) { return ahci_present(u) ? unit[u].sectors : 0; }
 const char *ahci_model(void) { return unit[0].model; }
 
@@ -244,7 +245,7 @@ int ahci_port_info(unsigned index, struct hw_sata_info *out) {
     u32 status=rd(port_off(port)+0x28);
     out->detection=status&15; out->speed=(status>>4)&15; out->power=(status>>8)&15;
     out->signature=rd(port_off(port)+0x24);
-    for (unsigned i=0;i<2;i++) if (unit[i].index==(int)port) {
+    for (unsigned i=0;i<3;i++) if (unit[i].index==(int)port && unit[i].sectors) {
         out->driver_active=unit[i].sectors && !dma_failed;
         out->sectors=unit[i].sectors;
         memcpy(out->model,unit[i].model,sizeof(unit[i].model));
@@ -271,15 +272,11 @@ static bool ahci_inventory_init(void) {
     return true;
 }
 #endif
-bool ahci_init(void) {
+static bool ahci_start(bool installer) {
+    if(driver_started)return installer?(ahci_present(1)||ahci_present(2)):ahci_present(0);
     inventory_ready=false;
-    for (int i = 0; i < 2; i++) unit[i].index = -1;
-#ifdef MYOS_HARDWARE
-    ahci_inventory_init();
-    return false; /* Storage ownership remains with the Live RAM root. */
-#endif
-    const struct boot_info *live = boot_info_get();
-    if (live) return false;
+    for(int i=0;i<3;i++){unit[i].index=-1;unit[i].sectors=0;}
+    const struct boot_info *boot=boot_info_get();
     struct pci_dev dev;
     dma_failed = false;
     /* This QEMU reports programming interface 2 for an AHCI 1.0 register map.
@@ -288,11 +285,11 @@ bool ahci_init(void) {
     controller = dev;
     u32 bar = pci_read(dev.bus, dev.dev, dev.func, 0x24);
     if ((bar & 1) || ((bar & 6) == 4 && pci_read(dev.bus, dev.dev, dev.func, 0x28))) return false;
-    u32 phys = bar & ~0xfu;
-    if (!phys) return false;
+    u32 phys = bar & ~0xfu,base=phys&~4095u;
+    if (!phys || base>0xffffffffu-MMIO_PAGES*PAGE_SIZE) return false;
     for (u32 off = 0; off < MMIO_PAGES * PAGE_SIZE; off += PAGE_SIZE)
-        if (vmm_map(MMIO_VIRT + off, phys + off, PG_WRITE | 0x18)) return false;
-    mmio = (volatile u8 *)MMIO_VIRT;
+        if (vmm_map(MMIO_VIRT + off, base + off, PG_WRITE | 0x18)) return false;
+    mmio = (volatile u8 *)(MMIO_VIRT+(phys&4095u));
     u32 cmd = pci_read(dev.bus, dev.dev, dev.func, 0x04);
     pci_write(dev.bus, dev.dev, dev.func, 0x04, (cmd & 0xffff) | 0x06 | (1u << 10));
     wr(HBA_GHC, rd(HBA_GHC) | (1u << 31));
@@ -300,35 +297,62 @@ bool ahci_init(void) {
     inventory_ready=true;
     for (int i = 0; i < AHCI_DATA_PAGES; i++) {
         data_page[i] = pmm_alloc();
-        if (!data_page[i]) return false;
+        if (!data_page[i]) {
+            for(int j=0;j<i;j++){pmm_free(data_page[j]);data_page[j]=0;}
+            return false;
+        }
         memset((void *)data_page[i], 0, PAGE_SIZE);
     }
-    u32 pi = rd(HBA_PI);
-    int slot = 0;
-    for (int port = 0; port < 32 && slot < 2; port++) {
-        if (!(pi & (1u << port))) continue;
-        u32 ssts = rd(port_off(port) + 0x28);
-        if ((ssts & 0xf) == 1) {
-            u32 began = timer_ticks();
-            while ((ssts & 0xf) == 1 && (i32)(timer_ticks() - began) < (i32)TIMER_HZ) {
-                task_sleep_ticks(1);
-                ssts = rd(port_off(port) + 0x28);
+    driver_started=true;
+    u32 pi=rd(HBA_PI);int slot=installer?1:0;
+    bool installed=boot_disk_root(boot),found_root=!installed;
+    /* Installed roots are selected by the boot disk ID, not by port order. */
+    for(int pass=0;pass<(installed?2:1);pass++) {
+        if(installed && pass==1){if(!found_root)break;slot=1;}
+        for(int port=0;port<32 && slot<3;port++) {
+            if(!(pi&(1u<<port)) || (installed && pass==1 && unit[0].index==port))continue;
+            u32 status=rd(port_off(port)+0x28),sig=rd(port_off(port)+0x24);
+            if((status&15)!=3 || (sig && sig!=0x101u))continue;
+            if(!setup_port(port,slot)) {
+                if(unit[slot].index>=0) {
+                    if(!stop_port(port)){dma_failed=true;return false;}
+                    pmm_free(unit[slot].page);unit[slot].page=0;
+                }
+                unit[slot].index=-1;unit[slot].sectors=0;
+                if(dma_failed)break;
+                continue;
             }
+            u8 mbr[512]={0};bool read_ok=!ahci_read(slot,0,mbr);
+            u32 id=mbr[440]|(u32)mbr[441]<<8|(u32)mbr[442]<<16|(u32)mbr[443]<<24;
+            bool match=read_ok && boot && id && id==boot->root_disk_id && mbr[510]==0x55 && mbr[511]==0xaa;
+            bool keep=!(installer && match) && !(installed && !pass && !match);
+            if(!read_ok || !keep) {
+                if(!stop_port(port)){dma_failed=true;return false;}
+                pmm_free(unit[slot].page);unit[slot].page=0;unit[slot].index=-1;unit[slot].sectors=0;
+                continue;
+            }
+            kprintf("AHCI port %d: %s, %u KB\n",port,unit[slot].model,unit[slot].sectors/2);
+            if(installed && !pass){found_root=true;break;}
+            slot++;
         }
-        if ((ssts & 0xf) != 3) continue;
-        u32 sig = rd(port_off(port) + 0x24);
-        if (sig && sig != 0x00000101u) continue;
-        if (!setup_port(port, slot)) {
-            kprintf("AHCI port %d: identify failed\n", port);
-            unit[slot].index = -1;
-            if (dma_failed) break;
-            continue;
-        }
-        kprintf("AHCI port %d: %s, %u KB\n", port, unit[slot].model, unit[slot].sectors / 2);
-        slot++;
     }
-    return unit[0].index >= 0;
+    return installer?(ahci_present(1)||ahci_present(2)):ahci_present(0);
 }
+bool ahci_init(void) {
+#ifdef MYOS_HARDWARE
+    if(!boot_disk_root(boot_info_get())) {
+        for(int i=0;i<3;i++)unit[i].index=-1;
+        ahci_inventory_init();return false;
+    }
+#endif
+    return ahci_start(false);
+}
+int ahci_installer_probe(void) {
+    const struct boot_info *b=boot_info_get();
+    if(!boot_root_valid(b) || boot_disk_root(b))return -1;
+    return ahci_start(true)?0:-1;
+}
+const char *ahci_unit_model(int slot) {return ahci_present(slot)?unit[slot].model:"";}
 
 int ahci_read_sectors(int slot, u32 lba, void *buf, u32 count) {
     if (!count || count > AHCI_MAX_SECTORS || !ahci_present(slot) || lba >= unit[slot].sectors ||
@@ -352,10 +376,5 @@ int ahci_write(int slot, u32 lba, const void *buf, u32 count) {
 
 int ahci_flush(int slot) {
     if (!ahci_present(slot)) return -1;
-    /* QEMU считает команду записи выполненной, когда байты уже в его кэше.
-     * FLUSH CACHE EXT на таком диске — выход в гипервизор, а не сброс пластин,
-     * и журнал делает его четыре раза на каждую транзакцию. Настоящий диск
-     * по-прежнему получает барьер. */
-    if (!strncmp(unit[slot].model, "QEMU", 4)) return 0;
     return issue(slot, 0xea, 0, 0, false);
 }

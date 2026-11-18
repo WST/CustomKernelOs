@@ -10,6 +10,8 @@ int ahci_port_info(unsigned index, struct hw_sata_info *out);
  * там потолок 32 сектора и он остаётся в ata.c. */
 #define AHCI_MAX_SECTORS 128
 bool ahci_init(void);
+int ahci_installer_probe(void);
+const char *ahci_unit_model(int unit);
 bool ahci_present(int unit);
 u32  ahci_sectors(int unit);
 const char *ahci_model(void);

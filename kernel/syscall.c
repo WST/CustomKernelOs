@@ -1181,6 +1181,15 @@ void syscall_dispatch(struct regs *r) {
         break;
     case SYS_READ:    ret = sys_read(a, b, c); break;
     case SYS_OPEN:    ret = sys_open(a, b); break;
+    case SYS_INSTALLCTL: {
+        struct disk_install_info info;
+        if(!task_process(t)->authenticated || task_process(t)->uid){ret=-EPERM;break;}
+        if(a!=INSTALL_PROBE && (!user_buf_ok(c,sizeof(info),true) || !user_buf_ok(c,sizeof(info),false))){ret=-EFAULT;break;}
+        memset(&info,0,sizeof(info));if(a!=INSTALL_PROBE)memcpy(&info,(const void *)c,sizeof(info));
+        ret=fs_errno(fs_disk_install(a,b,&info));
+        if(!ret && a!=INSTALL_PROBE)memcpy((void *)c,&info,sizeof(info));
+        break;
+    }
     case SYS_SYNC: ret=fs_errno(fs_sync());break;
     case SYS_UMOUNT:
     case SYS_FSCK: {

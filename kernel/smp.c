@@ -13,6 +13,7 @@
 #include "timer.h"
 #include "syscall.h"
 #include "vga.h"
+#include "bootinfo.h"
 
 struct cpu_state cpu_states[SMP_MAX_CPUS];
 static u8 cpu_map[256];
@@ -220,7 +221,8 @@ static const void *acpi_map(u32 physical,u32 length,unsigned slot,void *context)
     return (const void *)(virtual+offset);
 }
 static u32 discover(u8 ids[SMP_MAX_CPUS],u32 *address) {
-    u32 rsdp=scan_rsdp(0xe0000,0x100000);
+    const struct boot_info *boot=boot_info_get();
+    u32 rsdp=boot_uefi(boot)?boot->rsdp:scan_rsdp(0xe0000,0x100000);
     if(!rsdp && ebda_base>=0x80000 && ebda_base<0xa0000)
         rsdp=scan_rsdp(ebda_base,ebda_base+1024);
     if(!rsdp) { kprintf("SMP: ACPI RSDP not found (EBDA=%x)\n",ebda_base); return 1; }
@@ -261,6 +263,8 @@ static void ap_main(void) {
     for(;;) { task_yield(); smp_idle(); }
 }
 void smp_init(void) {
+    const struct boot_info *boot=boot_info_get();
+    if(boot_uefi(boot) && !boot->ap_safe){kprintf("SMP: 1 CPU (UEFI AP trampoline page unavailable)\n");return;}
     u32 original,changed;
     __asm__ volatile("pushfl; popl %0":"=r"(original));
     changed=original^(1u<<21);

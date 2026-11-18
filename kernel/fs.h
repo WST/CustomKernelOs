@@ -1,6 +1,7 @@
 #ifndef FS_H
 #define FS_H
 #include "types.h"
+#include "../user/lib/installer.h"
 
 /* MyFS — простая файловая система в духе классической Unix FS.
  *
@@ -56,6 +57,7 @@ int fs_unmount(u32 cwd,const char *target);
 int fs_sync(void);
 int fs_automount(void);
 int fs_check_device(const char *device);
+int fs_disk_install(unsigned op,unsigned index,struct disk_install_info *info);
 int fs_mount_info(u32 index, char *device, char *target);
 int fs_mkfs(const char *device);
 int fs_partition(const char *device,u32 op,u32 slot,u32 start,u32 sectors);

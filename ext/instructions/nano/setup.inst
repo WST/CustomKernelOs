@@ -10,10 +10,7 @@ mkdir myos-include/sys
 copy config.h config.h
 copy myos-posix.h myos-posix.h
 copy myos-posix.c myos-posix.c
-copy myos-curses.c myos-curses.c
 copy Makefile Makefile
-copy curses.h myos-include/curses.h
-copy term.h myos-include/term.h
 copy termios.h myos-include/termios.h
 copy getopt.h myos-include/getopt.h
 copy langinfo.h myos-include/langinfo.h

@@ -5,6 +5,11 @@ MyOS — учебная операционная система для x86. За
 Вместе с ядром собраны библиотека программ, оболочка, рабочий стол, свой стек
 TCP/IP, браузер и компилятор Си.
 
+**Установка на диск** — `setup --list` и `setup /dev/sdc` из Live-системы:
+BIOS/CSM и UEFI x64, SATA/AHCI и PCIe NVMe, выбранный диск/namespace с явным подтверждением стирания.
+[Порядок установки и ограничения](docs/disk-installer.md).
+[Сборка и загрузка UEFI](docs/uefi.md).
+
 ![Оболочка](docs/screenshot-sh.png)
 
 | `mandel` — фрактал на `double` | `paint` — рисование мышью |
@@ -339,7 +344,7 @@ sh ──pipe()──> [fd 3: чтение | fd 4: запись]  (канал: �
 `top`, `htop`, `kill`, `mkdir`, `rm`, `sleep`, `yes`, `tar`, `gzip`, `ar`,
 `clear`, `edit`, `snake`, а также `hello`, `guess`, `count`, `primes`, `note`,
 `crash`. `htop` — свой монитор под статистику ядра, клавиши —
-в [docs/htop.md](docs/htop.md). `tar` распаковывает `.tar` и `.tar.gz`.
+в [docs/htop.md](docs/htop.md). `tar` распаковывает `.tar`, `.tar.gz`, `.tar.bz2` и `.tar.xz`.
 
 ## Оболочка
 
@@ -1076,7 +1081,7 @@ make browsertest  # браузер на Linux под AddressSanitizer
 make imgtest      # PNG, GIF, JPEG и BMP
 make x509test     # цепочки сертификатов
 make gfxtest      # пробная картинка контуров и шрифтов
-make tartest      # tar и tar.gz
+make tartest      # tar, tar.gz, tar.bz2 и tar.xz
 make cleandisk    # удалить disk.img; следующий запуск создаст том заново
 ```
 

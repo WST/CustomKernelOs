@@ -160,7 +160,7 @@ void path_fix_cubic(gfx_path *p, int x1, int y1, int x2, int y2, int x3, int y3)
 
 /* Рисование «на прозрачном» — для значков: рисуем дважды (pass 0 и 1), получаем 0xAARRGGBB
  *   for (int pass = 0; pass < 2; pass++) { gfx_canvas_begin(&cv, 48, 48, pass); ...рисуем...; }
- *   uint32_t *img = gfx_canvas_end(&cv);       // free(img), когда не нужен */
+ *   uint32_t *img = gfx_canvas_end(&cv);       // NULL — не хватило памяти; иначе free(img), когда не нужен */
 struct gfx_canvas {
     int w, h, save_w, save_h, saved_clip, cx, cy, cw, ch;
     color_t *save_buf, *black, *white;

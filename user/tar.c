@@ -1,7 +1,8 @@
 /* tar — распаковка ustar и чтение оглавления.
  * Флаги как у GNU tar: tar xf a.tar, tar xzf a.tar.gz, -C, -v, -k,
  * --strip-components, длинные имена GNU и заголовки pax (path, linkpath, size).
- * .tar.gz разжимает libz потоком и сразу разбирает, без файла в /tmp.
+ * .tar.gz, .tar.bz2 и .tar.xz разжимаются потоком и сразу разбираются, без файла в /tmp.
+ * При создании сжатие не делается: -z, -j и -J пишут обычный ustar, как и раньше -z.
  * Обычный tar читается потоком. Жёстких ссылок нет: содержимое копируется.
  * Устройства и FIFO пропускаются с сообщением. */
 #include "myos.h"
@@ -11,11 +12,13 @@
 #include "utime.h"
 #include "dirent.h"
 #include "zlib.h"
+#include "bzlib.h"
+#include "lzma.h"
 
 #define NAME_CAP    1024
 #define PAX_MAX     (64 * 1024)
 
-static int opt_list, opt_create, opt_gzip, opt_verbose, opt_keep, opt_absolute, opt_strip;
+static int opt_list, opt_create, opt_gzip, opt_bzip2, opt_xz, opt_verbose, opt_keep, opt_absolute, opt_strip;
 static const char *opt_file, *opt_dir;
 static int run_create(void);
 static char **opt_members;
@@ -132,12 +135,156 @@ static void gz_close(struct gz_in *g) {
     free(g);
 }
 
+/* bzip2 и xz устроены так же: небольшое окно, член за членом, без всего архива в памяти. */
+
+struct bz_in {
+    int fd, started, eof, finished;
+    bz_stream zs;
+    unsigned char pre[512];
+    int pre_len, pre_pos;
+    unsigned char in[4096];
+    unsigned char out[4096];
+    int out_len, out_pos;
+};
+
+struct xz_in {
+    int fd, started, eof, finished;
+    lzma_stream zs;
+    unsigned char pre[512];
+    int pre_len, pre_pos;
+    unsigned char in[4096];
+    unsigned char out[4096];
+    int out_len, out_pos;
+};
+
+static int bz_fill(struct bz_in *g) {
+    int n, r;
+    if (g->zs.avail_in) return 0;
+    if (g->pre_pos < g->pre_len) {
+        n = g->pre_len - g->pre_pos;
+        if (n > (int)sizeof g->in) n = (int)sizeof g->in;
+        memcpy(g->in, g->pre + g->pre_pos, (size_t)n);
+        g->pre_pos += n;
+        g->zs.next_in = (char *)g->in;
+        g->zs.avail_in = (unsigned)n;
+        return 0;
+    }
+    if (g->eof) return 0;
+    r = read(g->fd, g->in, sizeof g->in);
+    if (r < 0) return -1;
+    if (r == 0) { g->eof = 1; return 0; }
+    g->zs.next_in = (char *)g->in;
+    g->zs.avail_in = (unsigned)r;
+    return 0;
+}
+
+static int bz_pump(struct bz_in *g) {
+    int ret;
+    if (g->finished) return 0;
+    if (!g->started) {
+        if (BZ2_bzDecompressInit(&g->zs, 0, 0) != BZ_OK) { gz_fail("out of memory"); return -1; }
+        g->started = 1;
+    }
+    g->zs.next_out = (char *)g->out;
+    g->zs.avail_out = (unsigned)sizeof g->out;
+    for (;;) {
+        if (!g->zs.avail_in && bz_fill(g) < 0) { gz_fail("unexpected end of file"); return -1; }
+        ret = BZ2_bzDecompress(&g->zs);
+        if (ret == BZ_STREAM_END) {
+            g->out_len = (int)sizeof g->out - (int)g->zs.avail_out;
+            g->out_pos = 0;
+            g->finished = 1;
+            return 0;
+        }
+        if (ret == BZ_OK) {
+            if (!g->zs.avail_out) {
+                g->out_len = (int)sizeof g->out;
+                g->out_pos = 0;
+                return 0;
+            }
+            if (!g->zs.avail_in && g->eof) { gz_fail("unexpected end of file"); return -1; }
+            continue;
+        }
+        if (ret == BZ_DATA_ERROR_MAGIC) gz_fail("not in bzip2 format");
+        else gz_fail("invalid compressed data");
+        return -1;
+    }
+}
+
+static void bz_close(struct bz_in *g) {
+    if (!g) return;
+    if (g->started) BZ2_bzDecompressEnd(&g->zs);
+    free(g);
+}
+
+static int xz_fill(struct xz_in *g) {
+    int n, r;
+    if (g->zs.avail_in) return 0;
+    if (g->pre_pos < g->pre_len) {
+        n = g->pre_len - g->pre_pos;
+        if (n > (int)sizeof g->in) n = (int)sizeof g->in;
+        memcpy(g->in, g->pre + g->pre_pos, (size_t)n);
+        g->pre_pos += n;
+        g->zs.next_in = g->in;
+        g->zs.avail_in = (size_t)n;
+        return 0;
+    }
+    if (g->eof) return 0;
+    r = read(g->fd, g->in, sizeof g->in);
+    if (r < 0) return -1;
+    if (r == 0) { g->eof = 1; return 0; }
+    g->zs.next_in = g->in;
+    g->zs.avail_in = (size_t)r;
+    return 0;
+}
+
+static int xz_pump(struct xz_in *g) {
+    lzma_ret ret;
+    if (g->finished) return 0;
+    if (!g->started) {
+        if (lzma_stream_decoder(&g->zs, 64ull << 20, 0) != LZMA_OK) { gz_fail("out of memory"); return -1; }
+        g->started = 1;
+    }
+    g->zs.next_out = g->out;
+    g->zs.avail_out = sizeof g->out;
+    for (;;) {
+        if (!g->zs.avail_in && xz_fill(g) < 0) { gz_fail("unexpected end of file"); return -1; }
+        ret = lzma_code(&g->zs, g->eof ? LZMA_FINISH : LZMA_RUN);
+        if (ret == LZMA_STREAM_END) {
+            g->out_len = (int)sizeof g->out - (int)g->zs.avail_out;
+            g->out_pos = 0;
+            g->finished = 1;
+            return 0;
+        }
+        if (ret == LZMA_OK) {
+            if (!g->zs.avail_out) {
+                g->out_len = (int)sizeof g->out;
+                g->out_pos = 0;
+                return 0;
+            }
+            if (!g->zs.avail_in && g->eof) { gz_fail("unexpected end of file"); return -1; }
+            continue;
+        }
+        if (ret == LZMA_FORMAT_ERROR) gz_fail("not in xz format");
+        else gz_fail("invalid compressed data");
+        return -1;
+    }
+}
+
+static void xz_close(struct xz_in *g) {
+    if (!g) return;
+    if (g->started) lzma_end(&g->zs);
+    free(g);
+}
+
 
 /* ------------------------------------------------------- чтение архива */
 
 struct src {
     int fd;
     struct gz_in *gz;
+    struct bz_in *bz;
+    struct xz_in *xz;
     const unsigned char *mem;
     unsigned memlen, mempos;
     unsigned char peek[512];
@@ -180,6 +327,32 @@ static int src_read(struct src *s, void *buf, int n) {
             struct gz_in *g = s->gz;
             if (g->out_pos >= g->out_len) {
                 if (gz_pump(g) < 0) return -1;
+                if (g->out_pos >= g->out_len) break;
+            }
+            take = n - got;
+            if (take > g->out_len - g->out_pos) take = g->out_len - g->out_pos;
+            memcpy(p + got, g->out + g->out_pos, (size_t)take);
+            g->out_pos += take;
+            got += take;
+            continue;
+        }
+        if (s->bz) {
+            struct bz_in *g = s->bz;
+            if (g->out_pos >= g->out_len) {
+                if (bz_pump(g) < 0) return -1;
+                if (g->out_pos >= g->out_len) break;
+            }
+            take = n - got;
+            if (take > g->out_len - g->out_pos) take = g->out_len - g->out_pos;
+            memcpy(p + got, g->out + g->out_pos, (size_t)take);
+            g->out_pos += take;
+            got += take;
+            continue;
+        }
+        if (s->xz) {
+            struct xz_in *g = s->xz;
+            if (g->out_pos >= g->out_len) {
+                if (xz_pump(g) < 0) return -1;
                 if (g->out_pos >= g->out_len) break;
             }
             take = n - got;
@@ -773,9 +946,9 @@ static int run_archive(struct src *s) {
 
 static void usage(void) {
     fprintf(stderr,
-            "usage: tar -x|-t [-z] [-v] [-k] [-P] [-C DIR] [-f ARCHIVE]\n"
-            "           [--strip-components=N] [--gzip] [MEMBER...]\n"
-            "       tar xf ARCHIVE, tar xzf ARCHIVE.tgz\n");
+            "usage: tar -x|-t [-z|-j|-J] [-v] [-k] [-P] [-C DIR] [-f ARCHIVE]\n"
+            "           [--strip-components=N] [--gzip|--bzip2|--xz] [MEMBER...]\n"
+            "       tar xf ARCHIVE, tar xzf ARCHIVE.tgz, tar xjf ARCHIVE.tar.bz2\n");
 }
 
 static int need_op;
@@ -804,14 +977,12 @@ static int apply_short(int c, const char *arg) {
     if (c == 'f') { if (!arg) return -1; opt_file = arg; return 0; }
     if (c == 'C') { if (!arg) return -1; opt_dir = arg; return 0; }
     if (c == 'z') { opt_gzip = 1; return 0; }
+    if (c == 'j') { opt_bzip2 = 1; return 0; }
+    if (c == 'J') { opt_xz = 1; return 0; }
     if (c == 'v') { opt_verbose++; return 0; }
     if (c == 'k') { opt_keep = 1; return 0; }
     if (c == 'P') { opt_absolute = 1; return 0; }
     if (c == 'a' || c == 'm' || c == 'p' || c == 'o' || c == 'h') return 0;
-    if (c == 'j' || c == 'J') {
-        fprintf(stderr, "tar: option '%c' is not supported\n", c);
-        return -1;
-    }
     fprintf(stderr, "tar: unknown option '%c'\n", c);
     return -1;
 }
@@ -857,6 +1028,8 @@ static int parse_long(const char *s, int *i, int argc, char **argv) {
         return -1;
     }
     if (!strcmp(s, "--gzip") || !strcmp(s, "--gunzip") || !strcmp(s, "--ungzip")) { opt_gzip = 1; return 0; }
+    if (!strcmp(s, "--bzip2") || !strcmp(s, "--bunzip2")) { opt_bzip2 = 1; return 0; }
+    if (!strcmp(s, "--xz") || !strcmp(s, "--unxz")) { opt_xz = 1; return 0; }
     if (!strcmp(s, "--verbose")) { opt_verbose++; return 0; }
     if (!strcmp(s, "--keep-old-files") || !strcmp(s, "--skip-old-files")) { opt_keep = 1; return 0; }
     if (!strcmp(s, "--absolute-names")) { opt_absolute = 1; return 0; }
@@ -864,10 +1037,6 @@ static int parse_long(const char *s, int *i, int argc, char **argv) {
     if (!strcmp(s, "--auto-compress") || !strcmp(s, "--touch") ||
         !strcmp(s, "--preserve-permissions") || !strcmp(s, "--same-permissions") ||
         !strcmp(s, "--no-same-owner")) return 0;
-    if (!strcmp(s, "--bzip2") || !strcmp(s, "--xz")) {
-        fprintf(stderr, "tar: %s is not supported\n", s);
-        return -1;
-    }
     name = s;
     if (starts(s, "--file")) name = "--file";
     else if (starts(s, "--directory")) name = "--directory";
@@ -909,6 +1078,9 @@ int main(int argc, char **argv) {
     unsigned char first[512];
     struct src src;
     struct gz_in *gz = NULL;
+    struct bz_in *bz = NULL;
+    struct xz_in *xz = NULL;
+    int mag_gz, mag_bz, mag_xz, nopt;
     if (argc > 1 && argv[1][0] != '-' && old_style(argv[1])) {
         if (parse_cluster(argv[1], &i, argc, argv) < 0) return 2;
         i++;
@@ -929,6 +1101,8 @@ int main(int argc, char **argv) {
     }
     if (bad_op) { fprintf(stderr, "tar: you may not specify more than one operation\n"); return 2; }
     if (!need_op) { usage(); return 2; }
+    nopt = (opt_gzip ? 1 : 0) + (opt_bzip2 ? 1 : 0) + (opt_xz ? 1 : 0);
+    if (nopt > 1) { fprintf(stderr, "tar: conflicting compression options\n"); return 2; }
     opt_members = argv + i;
     opt_nmem = argc - i;
     if (opt_create) return run_create();
@@ -942,21 +1116,54 @@ int main(int argc, char **argv) {
     src.fd = fd;
     nfirst = src_read(&src, first, 512);
     if (nfirst < 0) { warn_sys(opt_file, -1); return 2; }
-    if (nfirst >= 2 && first[0] == 0x1f && first[1] == 0x8b) opt_gzip = 1;
-    else if (opt_gzip) { fprintf(stderr, "tar: %s: not in gzip format\n", opt_file); return 2; }
-    if (opt_gzip) {
-        gz = calloc(1, sizeof *gz);
-        if (!gz) {
-            fprintf(stderr, "tar: out of memory\n");
-            if (fd > 0) close(fd);
-            return 2;
+    mag_gz = nfirst >= 2 && first[0] == 0x1f && first[1] == 0x8b;
+    mag_bz = nfirst >= 3 && first[0] == 'B' && first[1] == 'Z' && first[2] == 'h';
+    mag_xz = nfirst >= 6 && first[0] == 0xfd && first[1] == '7' && first[2] == 'z' &&
+             first[3] == 'X' && first[4] == 'Z' && first[5] == 0;
+    if (!nopt) {
+        if (mag_gz) opt_gzip = 1;
+        else if (mag_bz) opt_bzip2 = 1;
+        else if (mag_xz) opt_xz = 1;
+    } else if (opt_gzip && !mag_gz) {
+        fprintf(stderr, "tar: %s: not in gzip format\n", opt_file);
+        if (fd > 0) close(fd);
+        return 2;
+    } else if (opt_bzip2 && !mag_bz) {
+        fprintf(stderr, "tar: %s: not in bzip2 format\n", opt_file);
+        if (fd > 0) close(fd);
+        return 2;
+    } else if (opt_xz && !mag_xz) {
+        fprintf(stderr, "tar: %s: not in xz format\n", opt_file);
+        if (fd > 0) close(fd);
+        return 2;
+    }
+    if (opt_gzip || opt_bzip2 || opt_xz) {
+        if (nfirst > 512) nfirst = 512;
+        if (opt_gzip) {
+            gz = calloc(1, sizeof *gz);
+            if (!gz) { fprintf(stderr, "tar: out of memory\n"); if (fd > 0) close(fd); return 2; }
+            gz->fd = fd;
+            if (nfirst > 0) memcpy(gz->pre, first, (size_t)nfirst);
+            gz->pre_len = nfirst;
+            memset(&src, 0, sizeof src);
+            src.gz = gz;
+        } else if (opt_bzip2) {
+            bz = calloc(1, sizeof *bz);
+            if (!bz) { fprintf(stderr, "tar: out of memory\n"); if (fd > 0) close(fd); return 2; }
+            bz->fd = fd;
+            if (nfirst > 0) memcpy(bz->pre, first, (size_t)nfirst);
+            bz->pre_len = nfirst;
+            memset(&src, 0, sizeof src);
+            src.bz = bz;
+        } else {
+            xz = calloc(1, sizeof *xz);
+            if (!xz) { fprintf(stderr, "tar: out of memory\n"); if (fd > 0) close(fd); return 2; }
+            xz->fd = fd;
+            if (nfirst > 0) memcpy(xz->pre, first, (size_t)nfirst);
+            xz->pre_len = nfirst;
+            memset(&src, 0, sizeof src);
+            src.xz = xz;
         }
-        gz->fd = fd;
-        if (nfirst > (int)sizeof gz->pre) nfirst = (int)sizeof gz->pre;
-        if (nfirst > 0) memcpy(gz->pre, first, (size_t)nfirst);
-        gz->pre_len = nfirst;
-        memset(&src, 0, sizeof src);
-        src.gz = gz;
     } else if (nfirst == 512) {
         memcpy(src.peek, first, 512);
         src.peek_len = 512;
@@ -973,13 +1180,15 @@ int main(int argc, char **argv) {
         if (cr < 0) {
             warn_sys(opt_dir, cr);
             gz_close(gz);
+            bz_close(bz);
+            xz_close(xz);
             if (fd > 0) close(fd);
             return 2;
         }
     }
     extraction_mask=umask(0);umask(extraction_mask);
     rc = run_archive(&src);
-    if (src.gz) {
+    if (src.gz || src.bz || src.xz) {
         unsigned char sink[4096];
         int n = 0;
         while (!gz_msg && (n = src_read(&src, sink, (int)sizeof sink)) > 0) {}
@@ -991,6 +1200,8 @@ int main(int argc, char **argv) {
     }
     rc |= finish_directory_modes(!rc);
     gz_close(gz);
+    bz_close(bz);
+    xz_close(xz);
     if (fd > 0) close(fd);
     return rc ? 1 : 0;
 }

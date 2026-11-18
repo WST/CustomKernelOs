@@ -50,7 +50,7 @@ int main(void) {
     for(int test=0;test<11;test++) {
         b=good();
         if(test==0)b.magic=0;
-        if(test==1)b.version=0;
+        if(test==1)b.version=5;
         if(test==2)b.font_phys=0;
         if(test==3)b.fb_phys++;
         if(test==4)b.bpp=24;
@@ -64,6 +64,13 @@ int main(void) {
     }
     b=good();b.width=2560;b.height=1600;b.pitch=10240;
     CHECK(video_firmware_init(&b,&info));
+    b.version=2;CHECK(video_firmware_init(&b,&info));
+    b.version=3;CHECK(video_firmware_init(&b,&info));
+    b.version=4;b.firmware=1;b.arena_phys=0x10000000;b.arena_bytes=131072;b.font_phys=b.arena_phys+4096;
+    CHECK(video_firmware_init(&b,&info)&&!strcmp(info.driver,"UEFI GOP framebuffer"));
+    nvidia_firmware_identify(&info);CHECK(!strcmp(info.driver,"NVIDIA UEFI GOP"));
+    b.font_phys=b.arena_phys-4096;CHECK(!video_firmware_init(&b,&info));
+    b.font_phys=b.arena_phys+b.arena_bytes;CHECK(!video_firmware_init(&b,&info));
     CHECK(!video_firmware_init(0,&info) && !video_firmware_init(&b,0));
     printf("Firmware geometry/pitch/overflow + NVIDIA 1660 SUPER/BAR/hybrid attribution: OK\n");
     return 0;

@@ -2,6 +2,7 @@
  *   левая кнопка — рисовать   правая — ластик   панель сверху — цвет и толщина
  *   1..5 — толщина   C — очистить   Q, Esc — выход */
 #include "gfx.h"
+#include "gd.h"
 
 #define BAR 44                                  /* высота панели инструментов */
 
@@ -35,10 +36,29 @@ static void draw_bar(void) {
     gfx_fill_rect(bx, 6, 70, 30, RGB(150, 40, 40));
     gfx_text(bx + 15, 13, "Clear", C_WHITE, TRANSPARENT);
     gfx_text(bx + 82, 6, "LMB draw  RMB erase", RGB(190, 190, 200), TRANSPARENT);
-    gfx_text(bx + 82, 22, "1-5 size  C  Q quit", RGB(190, 190, 200), TRANSPARENT);
+    gfx_text(bx + 82, 22, "1-5  C  S save  Q", RGB(190, 190, 200), TRANSPARENT);
 }
 
 static void clear_canvas(void) { gfx_fill_rect(0, BAR, gfx_w, gfx_h - BAR, PAPER); }
+
+/* Холст под панелью. S пишет /tmp/paint.png; каталог уже есть в установленной системе. */
+static void save_png(void) {
+    int w = gfx_w, h = gfx_h - BAR, x, y, n = 0, fd;
+    gdImagePtr im;
+    void *png;
+    if (h < 1) return;
+    im = gdImageCreateTrueColor(w, h);
+    if (!im) return;
+    for (y = 0; y < h; y++)
+        for (x = 0; x < w; x++)
+            gdImageSetPixel(im, x, y, (int)gfx_get(x, y + BAR));
+    png = gdImagePngPtr(im, &n);
+    gdImageDestroy(im);
+    if (!png) return;
+    fd = open("/tmp/paint.png", O_WRITE);
+    if (fd >= 0) { write(fd, png, (size_t)n); close(fd); }
+    free(png);
+}
 
 /* щелчок по панели */
 static void click_bar(int x, int y) {
@@ -65,6 +85,7 @@ int main(void) {
             if (k == 'q' || k == 'Q' || k == 27) goto quit;
             if (k >= '1' && k <= '5') { size = k - '1'; draw_bar(); dirty = true; }
             if (k == 'c' || k == 'C') { clear_canvas(); dirty = true; }
+            if (k == 's' || k == 'S') { save_png(); draw_bar(); dirty = true; }
         }
         prev = m;
         mouse_get(&m);

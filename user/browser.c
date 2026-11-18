@@ -2906,7 +2906,8 @@ static void after_js_ex(bool lazy) {
     if (page_is_dom && dom_url_changed()) {
         dom_get_url(url, sizeof(url));
         if (!editing_addr) snprintf(addr, sizeof(addr), "%s", url);
-        if (hist_pos >= 0 && hist_pos < n_hist) { free(history[hist_pos]); history[hist_pos] = malloc(strlen(url) + 1); strcpy(history[hist_pos], url); }
+        char *entry = hist_pos >= 0 && hist_pos < n_hist ? malloc(strlen(url) + 1) : NULL;
+        if (entry) { strcpy(entry, url); free(history[hist_pos]); history[hist_pos] = entry; }
         draw_toolbar();
         win_update_rect(win, 0, 0, W, BAR_H);
     }
@@ -3030,14 +3031,15 @@ static void navigate(const char *target, bool add_history) {
     if (outer) { loading = false; resized_while_busy = false; }
     hover_link[0] = 0;
     snprintf(page_status, sizeof(page_status), "%s", status);
-    if (add_history) {
+    char *entry = add_history ? malloc(strlen(url) + 1) : NULL;
+    if (entry) {
         if (hist_pos < n_hist - 1) {                      /* после «Назад» новая ветка */
             for (int i = hist_pos + 1; i < n_hist; i++) free(history[i]);
             n_hist = hist_pos + 1;
         }
         if (n_hist == 32) { free(history[0]); memmove(history, history + 1, sizeof(char *) * 31); n_hist--; }
-        history[n_hist] = malloc(strlen(url) + 1);
-        strcpy(history[n_hist], url);
+        strcpy(entry, url);
+        history[n_hist] = entry;
         hist_pos = n_hist++;
     }
     redraw();

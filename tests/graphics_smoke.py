@@ -23,7 +23,7 @@ subprocess.run(make + [str(b / 'os.img'), str(b / 'myfs'), str(b / 'ld.so'), str
 image = b / ('graphics-' + args.backend + '.img')
 if not args.reuse:
     with image.open('wb') as f:
-        f.truncate(16 * 1024 * 1024)
+        f.truncate(128 * 1024 * 1024)
     subprocess.run(make + ['-j4', 'install', 'DISK=' + str(image)], check=True, stdout=subprocess.DEVNULL)
 else:
     subprocess.run([str(b / 'myfs'), str(image), 'put', str(b / 'user/desktop'), '/bin/desktop'], check=True, stdout=subprocess.DEVNULL)

@@ -6,6 +6,7 @@
 #include "hwinfo.h"
 #include "scheduler.h"
 #include "kernelinfo.h"
+#include "installer.h"
 int sysinfo(struct system_info *out, unsigned size);
 /* Returns online CPU count, or negative errno; capacity is in records. */
 int cpuinfo(struct cpu_info *out, unsigned capacity);
@@ -73,7 +74,7 @@ enum {
     SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO,
     SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
     SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
-    SYS_SIGNAL, SYS_SIGRETURN,
+    SYS_SIGNAL, SYS_SIGRETURN, SYS_INSTALLCTL,
     SYS_IFCTL, SYS_MODCTL, SYS_WLANCTL
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
@@ -101,6 +102,9 @@ _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 _Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
+_Static_assert(SYS_SIGRETURN == 100, "SYS_SIGRETURN stays 100");
+_Static_assert(SYS_INSTALLCTL == 101, "SYS_INSTALLCTL stays 101");
+_Static_assert(SYS_IFCTL == 102 && SYS_MODCTL == 103 && SYS_WLANCTL == 104, "wifi syscalls follow the installer");
 
 #define PROT_READ  1
 #define PROT_WRITE 2

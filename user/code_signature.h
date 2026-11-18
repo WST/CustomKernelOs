@@ -166,7 +166,7 @@ static bool paired_key(int k) {
     if(!close || !code) return false;
     if(cur_c<lens[cur_r] && ident((unsigned char)lines[cur_r][cur_c])) return false;
     if((k=='"' || k=='\'') && cur_c && ident((unsigned char)lines[cur_r][cur_c-1])) return false;
-    ensure_cap(cur_r,lens[cur_r]+3);
+    if(!ensure_cap(cur_r,lens[cur_r]+3)) return true;
     memmove(lines[cur_r]+cur_c+2,lines[cur_r]+cur_c,lens[cur_r]-cur_c);
     lines[cur_r][cur_c++]=k;lines[cur_r][cur_c]=close;lens[cur_r]+=2;
     changed();drop_selection();return true;

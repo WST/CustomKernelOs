@@ -4,7 +4,7 @@ subprocess.run(['make', 'build/myfs', 'build/os.img', 'build/user/desktop', 'bui
 b = pathlib.Path('build')
 image = b / 'clipboard-gui-smoke.img'
 with image.open('wb') as fresh:
-    fresh.truncate(4 * 1024 * 1024)
+    fresh.truncate(128 * 1024 * 1024)
 subprocess.run(['make', 'install', 'DISK=' + str(image)], check=True)
 for app in ('desktop', 'notepad'):
     subprocess.run(['build/myfs', str(image), 'put', str(b / 'user' / app), '/bin/' + app], check=True)
