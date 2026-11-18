@@ -40,6 +40,8 @@ struct wlan_ops {
     int (*set_channel)(void *dev, int channel);
     int (*tx)(void *dev, const void *mpdu, u32 len);
     int (*radio)(void *dev); /* 1 радио выключено аппаратно */
+    /* Своими силами обходит каналы и вызывает wlan_rx. NULL — пробные кадры. */
+    int (*scan)(void *dev);
 };
 
 int wlan_attach(const char *name, const u8 mac[6], const struct wlan_ops *ops, void *dev, int max_channel);

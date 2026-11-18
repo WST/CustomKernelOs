@@ -219,13 +219,17 @@ static int do_scan(void) {
     int prev = W.state;
     W.state = WLAN_SCANNING;
     W.nlist = 0;
-    u8 probe[128];
-    for (int ch = 1; ch <= W.max_ch; ch++) {
-        if (W.ops.set_channel && W.ops.set_channel(W.dev, ch)) continue;
-        W.channel = ch;
-        int n = wlan_build_probe(probe, sizeof(probe), W.mac, NULL, 0);
-        tx_mpdu(probe, n);
-        sleep_ms(20);
+    if (W.ops.scan) {
+        W.ops.scan(W.dev);
+    } else {
+        u8 probe[128];
+        for (int ch = 1; ch <= W.max_ch; ch++) {
+            if (W.ops.set_channel && W.ops.set_channel(W.dev, ch)) continue;
+            W.channel = ch;
+            int n = wlan_build_probe(probe, sizeof(probe), W.mac, NULL, 0);
+            tx_mpdu(probe, n);
+            sleep_ms(20);
+        }
     }
     W.state = prev == WLAN_RUN || prev == WLAN_EAPOL ? prev : WLAN_IDLE;
     return W.nlist;
@@ -250,10 +254,10 @@ static int do_connect(struct wlan_connect_u *c) {
     if (W.ops.set_channel) W.ops.set_channel(W.dev, W.channel);
     u8 frame[256];
     tx_mpdu(frame, wlan_build_auth(frame, sizeof(frame), W.bssid, W.mac));
-    for (int i = 0; i < 20 && !W.auth_ok; i++) sleep_ms(10);
+    for (int i = 0; i < 50 && !W.auth_ok; i++) sleep_ms(10);
     if (!W.auth_ok) { W.state = WLAN_IDLE; return -EIO; }
     tx_mpdu(frame, wlan_build_assoc(frame, sizeof(frame), W.bssid, W.mac, (const u8 *)W.ssid, (u8)strlen(W.ssid)));
-    for (int i = 0; i < 20 && !W.assoc_ok; i++) sleep_ms(10);
+    for (int i = 0; i < 50 && !W.assoc_ok; i++) sleep_ms(10);
     if (!W.assoc_ok) { W.state = WLAN_IDLE; return -EIO; }
     if (!W.secure) { W.port = 1; W.state = WLAN_RUN; }
     else W.state = WLAN_EAPOL;

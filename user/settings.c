@@ -54,7 +54,19 @@ static void row(int y,int kind,const char *title,const char *description) {
 }
 
 static char dns[16], path[128], status[100], wifi_pass[64], wifi_ssid[33];
-static int win_h = H;
+/* Wi-Fi не удлиняет окно: на панели ноутбука 780 уже выше экрана.
+ * Три вкладки делят прежнюю страницу, поле DNS остаётся на FIELD_Y. */
+static int net_tab;
+static const char *net_tabs[] = {"Проводная", "Wi-Fi", "Общие"};
+#define NET_BAR_Y 96
+#define NET_BAR_H 32
+#define WIFI_TOP 140
+#define WIFI_BTN_Y (WIFI_TOP + 32)
+#define WIFI_ROW_Y (WIFI_TOP + 80)
+#define WIFI_ROW_H 24
+#define WIFI_ROWS 4
+#define WIFI_PASS_Y (WIFI_ROW_Y + WIFI_ROWS * WIFI_ROW_H + 16)
+#define WIFI_ACT_Y (WIFI_PASS_Y + 46)
 static int wlan_present(void) {
     struct if_info inf;
     for (int i = 0; i < 4; i++) {
@@ -120,7 +132,18 @@ static void gallery(void) {
 static int page, focus;
 static int hover_region(void) {
     for(int i=0;i<4;i++)if(i!=page && over(12,102+i*52,166,44))return i+1;
-    if(page<2 && over(CX,ACTION_Y,180,38))return 10;
+    if(page==0) {
+        int tw=CW/3;
+        for(int i=0;i<3;i++) if(i!=net_tab && over(CX+i*tw,NET_BAR_Y,tw,NET_BAR_H)) return 40+i;
+        if(net_tab==1 && wlan_present() && wifi_link()) {
+            if(over(CX,WIFI_BTN_Y,160,38)) return 11;
+            if(over(CX+172,WIFI_BTN_Y,160,38)) return 12;
+            for(int i=0;i<WIFI_ROWS;i++) if(over(CX,WIFI_ROW_Y+i*WIFI_ROW_H,CW,WIFI_ROW_H)) return 15+i;
+            if(over(CX,WIFI_ACT_Y,140,38)) return 13;
+            if(over(CX+150,WIFI_ACT_Y,120,38)) return 14;
+        }
+    }
+    if(((page==0 && net_tab==0) || page==1) && over(CX,ACTION_Y,180,38))return 10;
     if(page==1) {
         for(int i=0;i<6;i++)if(over(CX+i%3*180,100+i/3*120,162,108))return 20+i;
         if(over(CX+194,ACTION_Y,180,38))return 26;
@@ -149,6 +172,92 @@ static void detail(int x,int y,const char *name,const char *value) {
     label(12,x,y,name,MUTED);
     text_draw(FONT_UI_MEDIUM,15,x,y+20,value,INK);
 }
+static void apply_dns(void) {
+    unsigned ip;
+    if(!ip_parse(dns,&ip) || !ip) strcpy(status,"Введите корректный IPv4 адрес DNS");
+    else strcpy(status,set_dns(ip)<0 ? "Ошибка смены DNS" : "DNS изменён до перезагрузки");
+}
+static void net_bar(void) {
+    int tw=CW/3;
+    gfx_round_frame(CX,NET_BAR_Y,CW,NET_BAR_H,8,BORDER,C_WHITE);
+    for(int i=0;i<3;i++) {
+        int x=CX+i*tw, on=i==net_tab;
+        if(on) gfx_round_rect(x+2,NET_BAR_Y+2,tw-4,NET_BAR_H-4,6,RGB(251,236,228));
+        else if(over(x,NET_BAR_Y,tw,NET_BAR_H)) gfx_round_rect(x+2,NET_BAR_Y+2,tw-4,NET_BAR_H-4,6,RGB(244,246,248));
+        int width=text_width(FONT_UI_MEDIUM,13,net_tabs[i]);
+        text_draw(on ? FONT_UI_MEDIUM : FONT_UI,13,x+(tw-width)/2,NET_BAR_Y+8,net_tabs[i],on ? UI_ACCENT : INK);
+    }
+}
+static void draw_wired(char *line,char *a,char *b) {
+    struct net_info n; memset(&n,0,sizeof(n)); netinfo(&n);
+    card(CX,140,CW,68);
+    gfx_round_rect(CX+16,152,44,44,10,RGB(235,247,239));
+    icon(0,CX+27,164,RGB(55,137,88));
+    text_draw(FONT_UI_MEDIUM,16,CX+76,150,n.up ? "Intel e1000 · Проводная сеть" : "Адаптер не найден",INK);
+    snprintf(line,160,"eth0 · %02x:%02x:%02x:%02x:%02x:%02x",n.mac[0],n.mac[1],n.mac[2],n.mac[3],n.mac[4],n.mac[5]);
+    label(12,CX+76,176,line,MUTED);
+    gfx_fill_circle(CX+CW-113,173,4,n.up && n.ip ? RGB(61,156,100) : MUTED);
+    label(12,CX+CW-102,166,n.up && n.ip ? "Подключено" : "Нет адреса",MUTED);
+    card(CX,216,CW,116);
+    detail(CX+20,228,"IPv4-адрес",ip_str(n.ip,a));
+    detail(CX+280,228,"Маска подсети",ip_str(n.mask,b));
+    detail(CX+20,276,"Шлюз",ip_str(n.gw,a));
+    snprintf(line,160,"%s · RX %u / TX %u",n.dhcp ? "DHCP" : "Static",n.rx_packets,n.tx_packets);
+    detail(CX+280,276,"Получение адреса / пакеты",line);
+    snprintf(line,160,"DNS-сервер · сейчас %s",ip_str(n.dns,a));
+    label(13,CX,348,line,MUTED);
+    field(FIELD_Y,dns,focus==1);
+    button(CX,ACTION_Y,180,"Применить DNS",true);
+    label(12,CX+198,ACTION_Y+12,"Действует до перезагрузки",MUTED);
+}
+static void draw_wifi(char *line) {
+    if(!(wlan_present() && wifi_link())) {
+        card(CX,140,CW,76);
+        text_draw(FONT_UI_MEDIUM,16,CX+20,156,wlan_present() ? "Служба Wi-Fi недоступна" : "Адаптер Wi-Fi не найден",INK);
+        label(12,CX+20,184,wlan_present() ? "wifid не опубликовал состояние" : "В этой машине нет wlan0",MUTED);
+        return;
+    }
+    label(13,CX,WIFI_TOP,wifi_view->blocked ? "Радио выключено" : "Wi-Fi",INK);
+    snprintf(line,160,"%s",wifi_view->ssid[0] ? wifi_view->ssid : "не подключено");
+    label(12,CX+180,WIFI_TOP,line,MUTED);
+    button(CX,WIFI_BTN_Y,160,"Сканировать",false);
+    button(CX+172,WIFI_BTN_Y,160,wifi_view->blocked ? "Включить" : "Выключить",false);
+    int rows=(int)wifi_view->count; if(rows>WIFI_ROWS) rows=WIFI_ROWS;
+    if(!rows) label(12,CX,WIFI_ROW_Y,"Список сетей пуст",MUTED);
+    for(int i=0;i<rows;i++) {
+        struct wifi_ap *ap=&wifi_view->ap[i];
+        int ry=WIFI_ROW_Y+i*WIFI_ROW_H;
+        int on=!strcmp(ap->ssid,wifi_ssid);
+        if(on || over(CX,ry,CW,WIFI_ROW_H)) gfx_round_rect(CX,ry-2,CW,WIFI_ROW_H,6,on ? RGB(251,236,228) : RGB(244,246,248));
+        snprintf(line,160,"%s%s  %d",ap->ssid[0] ? ap->ssid : "(скрытая)",ap->secured ? "  замок" : "",ap->bars);
+        label(12,CX+8,ry,line,on ? UI_ACCENT : INK);
+    }
+    field(WIFI_PASS_Y,wifi_pass,focus==2);
+    button(CX,WIFI_ACT_Y,140,"Подключить",true);
+    button(CX+150,WIFI_ACT_Y,120,"Забыть",false);
+    if(wifi_view->error[0]) label(12,CX,WIFI_ACT_Y+46,wifi_view->error,MUTED);
+}
+static void draw_general(char *line,char *a,char *b) {
+    struct net_info n; memset(&n,0,sizeof(n)); netinfo(&n);
+    card(CX,140,CW,148);
+    text_draw(FONT_UI_MEDIUM,16,CX+20,156,"Маршрут по умолчанию",INK);
+    detail(CX+20,188,"IPv4-адрес",ip_str(n.ip,a));
+    detail(CX+280,188,"Шлюз",ip_str(n.gw,b));
+    detail(CX+20,244,"DNS",ip_str(n.dns,a));
+    label(12,CX,304,"Интерфейсы",MUTED);
+    int y=328, shown=0;
+    for(int i=0;i<4 && y+56<=470;i++) {
+        struct if_info inf;
+        if(ifctl(i,&inf)<0) break;
+        card(CX,y,CW,56);
+        snprintf(line,160,"%s · предпочтение %u",inf.name,inf.prefer);
+        text_draw(FONT_UI_MEDIUM,15,CX+20,y+8,line,INK);
+        snprintf(line,160,"%s · %s",ip_str(inf.ip,a),inf.up && inf.ip ? "подключено" : "нет адреса");
+        label(12,CX+20,y+30,line,MUTED);
+        y+=64; shown++;
+    }
+    if(!shown) label(12,CX,328,"Интерфейсов нет",MUTED);
+}
 static void draw(void) {
     char line[160], a[32], b[32];
     static const char *subtitles[]={"Подключение, адреса и DNS", "Выберите фон, который вам нравится", "Изображение, разрешение и курсор", "Информация и полезные инструменты"};
@@ -174,26 +283,10 @@ static void draw(void) {
     text_draw(FONT_UI_BOLD,26,CX,24,tabs[page],INK);
     label(13,CX,62,subtitles[page],MUTED);
     if(page==0) {
-        struct net_info n; memset(&n,0,sizeof(n)); netinfo(&n);
-        card(CX,100,CW,76);
-        gfx_round_rect(CX+16,116,44,44,10,RGB(235,247,239));
-        icon(0,CX+27,128,RGB(55,137,88));
-        text_draw(FONT_UI_MEDIUM,16,CX+76,116,n.up ? "Intel e1000 · Проводная сеть" : "Адаптер не найден",INK);
-        snprintf(line,sizeof(line),"eth0 · %02x:%02x:%02x:%02x:%02x:%02x",n.mac[0],n.mac[1],n.mac[2],n.mac[3],n.mac[4],n.mac[5]);
-        label(12,CX+76,143,line,MUTED);
-        gfx_fill_circle(CX+CW-113,137,4,n.up && n.ip ? RGB(61,156,100) : MUTED);
-        label(12,CX+CW-102,130,n.up && n.ip ? "Подключено" : "Нет адреса",MUTED);
-        card(CX,192,CW,136);
-        detail(CX+20,208,"IPv4-адрес",ip_str(n.ip,a));
-        detail(CX+280,208,"Маска подсети",ip_str(n.mask,b));
-        detail(CX+20,266,"Шлюз",ip_str(n.gw,a));
-        snprintf(line,sizeof(line),"%s · RX %u / TX %u",n.dhcp ? "DHCP" : "Static",n.rx_packets,n.tx_packets);
-        detail(CX+280,266,"Получение адреса / пакеты",line);
-        snprintf(line,sizeof(line),"DNS-сервер · сейчас %s",ip_str(n.dns,a));
-        label(13,CX,352,line,MUTED);
-        field(FIELD_Y,dns,focus==1);
-        button(CX,ACTION_Y,180,"Применить DNS",true);
-        label(12,CX+198,ACTION_Y+12,"Действует до перезагрузки",MUTED);
+        net_bar();
+        if(net_tab==0) draw_wired(line,a,b);
+        else if(net_tab==1) draw_wifi(line);
+        else draw_general(line,a,b);
     } else if(page==1) {
         gallery();
         label(13,CX,352,"Своё изображение",INK);
@@ -227,29 +320,12 @@ static void draw(void) {
         row(386,3,"О системе","Сведения о вашей операционной системе");
     }
     if(status[0]) {
-        gfx_fill_circle(CX+4,win_h-22,3,UI_ACCENT);
-        gfx_set_clip(CX+14,win_h-34,CW-14,28);
-        label(12,CX+14,win_h-30,status,MUTED); gfx_no_clip();
-    } else label(12,CX,win_h-30,page==1 ? "Выбор сохраняется · Стрелки влево/вправо — сменить фон" : "Alt+Shift или Win+Space — сменить язык",MUTED);
-    if (page==0 && wlan_present() && wifi_link()) {
-        int y = 500;
-        label(13, CX, y, wifi_view->blocked ? "Wi-Fi: радио выключено" : "Wi-Fi", INK);
-        snprintf(line, sizeof(line), "%s", wifi_view->ssid[0] ? wifi_view->ssid : "не подключено");
-        label(12, CX+160, y, line, MUTED);
-        button(CX, y+24, 140, "Сканировать", false);
-        button(CX+150, y+24, 140, wifi_view->blocked ? "Включить" : "Выключить", false);
-        int rows = (int)wifi_view->count; if (rows > 4) rows = 4;
-        for (int i = 0; i < rows; i++) {
-            struct wifi_ap *ap = &wifi_view->ap[i];
-            int ry = y + 72 + i * 22;
-            snprintf(line, sizeof(line), "%s%s  %d", ap->ssid[0] ? ap->ssid : "(скрытая)", ap->secured ? "  замок" : "", ap->bars);
-            label(12, CX, ry, line, !strcmp(ap->ssid, wifi_ssid) ? UI_ACCENT : INK);
-        }
-        field(y+168, wifi_pass, focus==2);
-        button(CX, y+214, 140, "Подключить", true);
-        button(CX+150, y+214, 120, "Забыть", false);
-        if (wifi_view->error[0]) label(12, CX, y+258, wifi_view->error, MUTED);
-    }
+        gfx_fill_circle(CX+4,H-22,3,UI_ACCENT);
+        gfx_set_clip(CX+14,H-34,CW-14,28);
+        label(12,CX+14,H-30,status,MUTED); gfx_no_clip();
+    } else if(page==1) label(12,CX,H-30,"Выбор сохраняется · Стрелки влево/вправо — сменить фон",MUTED);
+    else if(page==0) label(12,CX,H-30,"Влево/вправо — вкладка сети",MUTED);
+    else label(12,CX,H-30,"Alt+Shift или Win+Space — сменить язык",MUTED);
     win_update(win);
 }
 static void wallpaper_save(int reset) {
@@ -277,8 +353,7 @@ static void wallpaper_save(int reset) {
 
 }
 int main(void) {
-    if (wlan_present()) win_h = 780;
-    win=win_create("Панель управления",W,win_h); if(!win) return 1;
+    win=win_create("Панель управления",W,H); if(!win) return 1;
     struct net_info n; if(netinfo(&n)==0) ip_str(n.dns,dns);
     int fd=open("/etc/wallpaper",O_READ); if(fd>=0) { int k=read(fd,path,sizeof(path)-1); if(k>0) path[k]=0; close(fd); }
     if(!path[0]) wall_path(0,path,sizeof(path));
@@ -297,21 +372,23 @@ int main(void) {
             focus=0;
             for(int i=0;i<4;i++) if(ui_inside(e.x,e.y,12,100+i*52,166,44)) { page=i; status[0]=0; }
             if(page==0) {
-                if(ui_inside(e.x,e.y,CX,FIELD_Y,CW,38)) focus=1;
-                if(ui_inside(e.x,e.y,CX,ACTION_Y,180,38)) { unsigned ip; if(!ip_parse(dns,&ip) || !ip) strcpy(status,"Введите корректный IPv4 адрес DNS"); else strcpy(status,set_dns(ip)<0 ? "Ошибка смены DNS" : "DNS изменён до перезагрузки"); }
-                if (wlan_present() && wifi_link()) {
-                    int y = 500;
-                    if (ui_inside(e.x,e.y,CX,y+24,140,38)) wifi_order(WIFI_SCAN, 0, 0, 0);
-                    if (ui_inside(e.x,e.y,CX+150,y+24,140,38)) wifi_order(WIFI_RADIO, 0, 0, wifi_view->blocked ? 1u : 0u);
-                    int rows = (int)wifi_view->count; if (rows > 4) rows = 4;
-                    for (int i = 0; i < rows; i++) if (ui_inside(e.x,e.y,CX,y+68+i*22,CW,20)) {
+                int tw=CW/3, switched=0;
+                for(int i=0;i<3;i++) if(ui_inside(e.x,e.y,CX+i*tw,NET_BAR_Y,tw,NET_BAR_H)) { net_tab=i; status[0]=0; switched=1; }
+                if(!switched && net_tab==0) {
+                    if(ui_inside(e.x,e.y,CX,FIELD_Y,CW,38)) focus=1;
+                    if(ui_inside(e.x,e.y,CX,ACTION_Y,180,38)) apply_dns();
+                } else if(!switched && net_tab==1 && wlan_present() && wifi_link()) {
+                    if(ui_inside(e.x,e.y,CX,WIFI_BTN_Y,160,38)) wifi_order(WIFI_SCAN, 0, 0, 0);
+                    if(ui_inside(e.x,e.y,CX+172,WIFI_BTN_Y,160,38)) wifi_order(WIFI_RADIO, 0, 0, wifi_view->blocked ? 1u : 0u);
+                    int rows=(int)wifi_view->count; if(rows>WIFI_ROWS) rows=WIFI_ROWS;
+                    for(int i=0;i<rows;i++) if(ui_inside(e.x,e.y,CX,WIFI_ROW_Y+i*WIFI_ROW_H,CW,WIFI_ROW_H)) {
                         snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", wifi_view->ap[i].ssid);
-                        if (!wifi_view->ap[i].secured) wifi_order(WIFI_CONNECT, wifi_ssid, "", 0);
-                        else focus = 2;
+                        if(!wifi_view->ap[i].secured) wifi_order(WIFI_CONNECT, wifi_ssid, "", 0);
+                        else focus=2;
                     }
-                    if (ui_inside(e.x,e.y,CX,y+168,CW,38)) focus = 2;
-                    if (ui_inside(e.x,e.y,CX,y+214,140,38) && wifi_ssid[0]) wifi_order(WIFI_CONNECT, wifi_ssid, wifi_pass, 0);
-                    if (ui_inside(e.x,e.y,CX+150,y+214,120,38) && wifi_ssid[0]) wifi_order(WIFI_FORGET, wifi_ssid, 0, 0);
+                    if(ui_inside(e.x,e.y,CX,WIFI_PASS_Y,CW,38)) focus=2;
+                    if(ui_inside(e.x,e.y,CX,WIFI_ACT_Y,140,38) && wifi_ssid[0]) wifi_order(WIFI_CONNECT, wifi_ssid, wifi_pass, 0);
+                    if(ui_inside(e.x,e.y,CX+150,WIFI_ACT_Y,120,38) && wifi_ssid[0]) wifi_order(WIFI_FORGET, wifi_ssid, 0, 0);
                 }
             } else if(page==1) {
                 for(int i=0;i<6;i++) if(ui_inside(e.x,e.y,CX+(i%3)*180,100+(i/3)*120,162,108)) {
@@ -338,6 +415,9 @@ int main(void) {
                 if(len+count<cap) { memcpy(s+len,u,count); s[len+count]=0; }
             }
         }
+        if(e.type==EV_KEY && !focus && page==0 && (e.key==KEY_LEFT || e.key==KEY_RIGHT)) {
+            net_tab=(net_tab+(e.key==KEY_RIGHT ? 1 : 2))%3; status[0]=0;
+        }
         if(e.type==EV_KEY && !focus && page==1 && (e.key==KEY_LEFT || e.key==KEY_RIGHT)) {
             int selected=0;
             for(int i=0;i<6;i++) { char name[128]; wall_path(i,name,sizeof(name)); if(!strcmp(path,name)) selected=i; }
@@ -345,9 +425,14 @@ int main(void) {
             wall_path(selected,path,sizeof(path)); wallpaper_save(0);
         }
         if(e.type==EV_KEY && !focus && (e.key==KEY_DOWN || e.key==KEY_UP)) { page=(page+(e.key==KEY_DOWN ? 1 : 3))%4; status[0]=0; }
-        if(e.type==EV_KEY && e.key=='\t' && page<2) focus=!focus;
+        if(e.type==EV_KEY && e.key=='\t' && page<2) {
+            if(page==0 && net_tab==1) focus=focus==2 ? 0 : 2;
+            else if(page==0 && net_tab!=0) focus=0;
+            else focus=!focus;
+        }
         if(e.type==EV_KEY && (e.key=='\n' || e.key=='\r')) {
-            if(page==0) { unsigned ip; if(!ip_parse(dns,&ip) || !ip) strcpy(status,"Введите корректный IPv4 адрес DNS"); else strcpy(status,set_dns(ip)<0 ? "Ошибка смены DNS" : "DNS изменён до перезагрузки"); }
+            if(page==0 && net_tab==0) apply_dns();
+            else if(page==0 && net_tab==1 && wifi_ssid[0] && wlan_present() && wifi_link()) wifi_order(WIFI_CONNECT, wifi_ssid, wifi_pass, 0);
             if(page==1) wallpaper_save(0);
         }
         while(waitpid(-1,0,WNOHANG)>0) {}
