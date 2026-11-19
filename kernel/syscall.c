@@ -30,6 +30,8 @@
 #include "mouse.h"
 #include "vga.h"
 #include "net.h"
+#include "module.h"
+#include "wlan.h"
 #include "ipc.h"
 #include "e1000.h"
 #include "display.h"
@@ -994,18 +996,50 @@ static int sys_recvfrom(u32 fd, u32 buf, u32 len, u32 uaddr, u32 timeout) {
 
 static int sys_netinfo(u32 uinfo) {
     if (!user_buf_ok(uinfo, sizeof(struct net_info), true)) return -EFAULT;
+    netcfg_sync();
     struct net_info *n = (void *)uinfo;
     memcpy(n->mac, netcfg.mac, 6);
     n->up = netcfg.up; n->dhcp = netcfg.dhcp;
     n->ip = netcfg.ip; n->mask = netcfg.mask; n->gw = netcfg.gw; n->dns = netcfg.dns;
     n->lease = netcfg.lease;
-    e1000_stats(&n->rx_packets, &n->tx_packets, &n->rx_bytes, &n->tx_bytes);
+    struct netif *ifc = netif_default();
+    if (ifc && ifc->kind == NETIF_ETH)
+        e1000_stats(&n->rx_packets, &n->tx_packets, &n->rx_bytes, &n->tx_bytes);
+    else if (ifc) {
+        n->rx_packets = ifc->rx_packets; n->tx_packets = ifc->tx_packets;
+        n->rx_bytes = ifc->rx_bytes; n->tx_bytes = ifc->tx_bytes;
+    }
     return 0;
 }
 
 static int sys_netconfig(u32 what, u32 value) {
-    if (what == 1) { netcfg.dns = value; return 0; }
+    if (what == 1) {
+        struct netif *ifc = netif_default();
+        if (ifc) ifc->dns = value;
+        netcfg.dns = value;
+        return 0;
+    }
     return -EINVAL;
+}
+
+static int sys_ifctl(u32 index, u32 uinfo) {
+    if (!user_buf_ok(uinfo, sizeof(struct if_info), true)) return -EFAULT;
+    struct netif *ifc = netif_by_index((int)index);
+    if (!ifc) return -ENOENT;
+    struct if_info *o = (void *)uinfo;
+    memset(o, 0, sizeof(*o));
+    memcpy(o->name, ifc->name, sizeof(o->name) - 1);
+    memcpy(o->mac, ifc->mac, 6);
+    o->kind = ifc->kind; o->prefer = ifc->prefer;
+    o->up = ifc->up; o->link = netif_is_linked(ifc); o->dhcp = ifc->dhcp;
+    o->ip = ifc->ip; o->mask = ifc->mask; o->gw = ifc->gw; o->dns = ifc->dns; o->lease = ifc->lease;
+    if (ifc->kind == NETIF_ETH)
+        e1000_stats(&o->rx_packets, &o->tx_packets, &o->rx_bytes, &o->tx_bytes);
+    else {
+        o->rx_packets = ifc->rx_packets; o->tx_packets = ifc->tx_packets;
+        o->rx_bytes = ifc->rx_bytes; o->tx_bytes = ifc->tx_bytes;
+    }
+    return 0;
 }
 
 /* ---------------------------------------------------------------- общение процессов */
@@ -1364,6 +1398,29 @@ void syscall_dispatch(struct regs *r) {
     case SYS_NETINFO:     ret = sys_netinfo(a); break;
     case SYS_PING:        ret = netcfg.up ? net_ping(a, (u16)b, c) : -ENETDOWN; break;
     case SYS_NETCONFIG:   ret = sys_netconfig(a, b); break;
+    case SYS_IFCTL:       ret = sys_ifctl(a, b); break;
+    case SYS_MODCTL:
+    case SYS_WLANCTL: {
+        if (!task_process(t)->authenticated || task_process(t)->uid != 0) { ret = -EPERM; break; }
+        if (r->eax == SYS_WLANCTL) {
+            if (b && c && !user_buf_ok(b, c, true)) { ret = -EFAULT; break; }
+            ret = wlan_ctl((int)a, (void *)b, c);
+        } else {
+            char path[96];
+            path[0] = 0;
+            if (a == MOD_LOAD || a == MOD_UNLOAD) {
+                if (!user_str(b, path, sizeof(path))) { ret = -EFAULT; break; }
+            }
+            struct mod_info info;
+            memset(&info, 0, sizeof(info));
+            ret = module_ctl((int)a, path, (int)b, &info);
+            if (!ret && c && (a == MOD_STAT || a == MOD_COUNT)) {
+                if (!user_buf_ok(c, sizeof(info), true)) ret = -EFAULT;
+                else memcpy((void *)c, &info, sizeof(info));
+            }
+        }
+        break;
+    }
     case SYS_SHM_ALLOC: { u32 f=irq_save(); ret=shm_alloc(a); irq_restore(f); break; }
     case SYS_SHM_MAP: { u32 f=irq_save(); ret=sys_shm_map(a); irq_restore(f); break; }
     case SYS_SHM_UNMAP: { u32 f=irq_save(); ret=shm_unmap(a); irq_restore(f); break; }

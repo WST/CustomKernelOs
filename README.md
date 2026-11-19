@@ -728,7 +728,7 @@ QEMU ставит перед MyOS маршрутизатор с NAT (`-nic user,
 
 ```
 sh:/$ ifconfig
-eth0  Intel e1000   MAC 52:54:00:12:34:56
+eth0  Ethernet   MAC 52:54:00:12:34:56  link up
       inet 10.0.2.15  mask 255.255.255.0  (DHCP, lease 86400 s)
       gateway 10.0.2.2  dns 10.0.2.3
 sh:/$ ping 10.0.2.2
@@ -779,6 +779,13 @@ int main(void) {
 
 На реальном ПК тот же стек сидит на нескольких контроллерах Intel, не только
 на QEMU `e1000`. Список и порядок включения — в [docs/ethernet.md](docs/ethernet.md).
+
+Рядом может быть `wlan0`. Провод с адресом остаётся маршрутом по умолчанию;
+без кабеля маршрут уходит на Wi-Fi. Centrino Wireless-N 1000 — загружаемый
+модуль, только 2.4 ГГц, открытая сеть и WPA2-PSK. Профили лежат в
+`/etc/wifi/networks`, служба — `wifid`. Подробности — в [docs/wifi.md](docs/wifi.md)
+и [docs/kmod.md](docs/kmod.md). QEMU эту карту не эмулирует: учебная точка
+включается файлом `/etc/wifi/sim`, в обычный образ он не входит.
 
 ### HTTPS в браузере
 
@@ -1114,7 +1121,11 @@ kernel/pci.c          конфигурация PCI
 kernel/fb.c           SVGA II и Bochs VBE
 kernel/display.c      смена разрешения, /etc/display
 kernel/e1000.c        Intel e1000
-kernel/net.c          Ethernet, ARP, IPv4, ICMP, UDP, DHCP
+kernel/net.c          Ethernet, ARP, IPv4, ICMP, UDP, DHCP, несколько netif
+kernel/module.c       загрузчик ELF .ko
+kernel/wlan.c         802.11, EAPOL, программный CCMP
+drivers/net/iwl1000.c модуль Centrino Wireless-N 1000
+user/wifid.c          служба WPA2 и сохранённые сети
 kernel/tcp.c          TCP
 kernel/socket.c       сокеты
 kernel/ipc.c          общая память, сообщения, службы, часы RTC
@@ -1164,6 +1175,8 @@ Makefile
 | Редактор Code | [docs/code-editor.md](docs/code-editor.md) |
 | VirtIO-GPU | [docs/gpu.md](docs/gpu.md) |
 | Ethernet на ПК | [docs/ethernet.md](docs/ethernet.md) |
+| Модули ядра | [docs/kmod.md](docs/kmod.md) |
+| Wi-Fi | [docs/wifi.md](docs/wifi.md) |
 | `sysinfo` | [docs/sysinfo.md](docs/sysinfo.md) |
 | Загрузка с USB | [docs/hardware.md](docs/hardware.md) |
 | PCI и порты | [docs/hardware-inventory.md](docs/hardware-inventory.md) |

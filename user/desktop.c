@@ -29,6 +29,7 @@
  * числе по-русски. Справа в панели — раскладка клавиатуры (en/ru). */
 #include "win.h"
 #include "img.h"
+#include "wifi_ui.h"
 
 static int iabs(int v) { return v < 0 ? -v : v; }
 
@@ -566,12 +567,73 @@ static struct rect clock_rect(void) {
 }
 
 static color_t TOP_BG = RGB(22, 22, 22);
+static int wifi_menu, wifi_typing;
+static char wifi_pass[64], wifi_ssid[33];
+
+static int tray_has_wifi(void) {
+    struct if_info inf;
+    for (int i = 0; i < 4; i++) {
+        if (ifctl(i, &inf) < 0) break;
+        if (inf.kind == 2) return 1;
+    }
+    return 0;
+}
+static struct rect wifi_menu_rect(void) {
+    int rows = wifi_view ? (int)wifi_view->count : 0;
+    if (rows > 8) rows = 8;
+    return mkrect(SW - 300, TOPBAR_H + 6, 288, 76 + rows * 22 + (wifi_typing ? 28 : 0));
+}
+static void close_wifi(void) {
+    if (!wifi_menu) return;
+    wifi_menu = 0; wifi_typing = 0;
+    add_dirty(SW - 312, TOPBAR_H, 312, 420);
+    add_dirty(0, 0, SW, TOPBAR_H);
+}
+static void wifi_glyph(int x, int y) {
+    color_t c = RGB(240, 240, 240);
+    int bars = 0, killed = 0, lock = 0, up = 0;
+    if (wifi_link()) {
+        bars = (int)wifi_view->bars; killed = (int)wifi_view->blocked;
+        up = wifi_view->state == WLAN_RUN; lock = up && wifi_view->secured;
+        /* Ноль делений при живой сети выглядит как отсутствие связи. */
+        if (up && bars < 1) bars = 1;
+    }
+    if (killed) { gfx_line(x, y + 2, x + 14, y + 14, c); gfx_line(x + 14, y + 2, x, y + 14, c); return; }
+    gfx_fill_circle(x + 7, y + 13, 1, c);
+    for (int i = 1; i <= 4; i++) {
+        color_t col = (up && i <= bars) ? c : RGB(90, 90, 90);
+        gfx_ellipse(x + 7 - i * 2, y + 12 - i * 3, i * 4, i * 3, col, 255);
+        gfx_ellipse(x + 8 - i * 2, y + 13 - i * 3, i * 4 - 2, i * 3 - 2, TOP_BG, 255);
+    }
+    if (lock) gfx_fill_rect(x + 11, y, 3, 4, c);
+}
+static void draw_wifi_menu(void) {
+    if (!wifi_link()) return;
+    struct rect r = wifi_menu_rect();
+    gfx_round_rect(r.x, r.y, r.w, r.h, 10, C_WHITE);
+    int joined = wifi_view->state == WLAN_RUN && wifi_view->ssid[0];
+    char head[80];
+    if (joined) snprintf(head, sizeof(head), "Подключено: %.40s", wifi_view->ssid);
+    else snprintf(head, sizeof(head), "Не подключено");
+    text_draw(FONT_UI, 13, r.x + 12, r.y + 8, head, joined ? RGB(55, 137, 88) : RGB(118, 125, 136));
+    int rows = (int)wifi_view->count; if (rows > 8) rows = 8;
+    for (int i = 0; i < rows; i++) {
+        struct wifi_ap *ap = &wifi_view->ap[i];
+        int live = joined && ap->ssid[0] && !strcmp(ap->ssid, wifi_view->ssid);
+        char line[80];
+        snprintf(line, sizeof(line), "%s%s%s", ap->ssid[0] ? ap->ssid : "(скрытая)", ap->secured ? " *" : "", live ? "  ●" : "");
+        text_draw(FONT_UI, 13, r.x + 12, r.y + 36 + i * 22, line, live ? RGB(55, 137, 88) : RGB(39, 44, 52));
+    }
+    int y = r.y + 40 + rows * 22;
+    if (wifi_typing) text_draw(FONT_UI, 13, r.x + 12, y, wifi_pass[0] ? wifi_pass : "пароль", RGB(118, 125, 136));
+    text_draw(FONT_UI, 13, r.x + 12, r.y + r.h - 28, joined ? "Отключиться" : "Закрыть", joined ? RGB(39, 44, 52) : RGB(118, 125, 136));
+}
 
 /* мелкие белые значки панели (16x16) */
 static void tray_icons(int x, int y) {
     color_t c = RGB(240, 240, 240);
-    /* сеть (провод): три столбика */
-    for (int i = 0; i < 3; i++) gfx_round_rect(x + 1 + i * 5, y + 11 - i * 4, 4, 5 + i * 4, 1, c);
+    if (tray_has_wifi()) wifi_glyph(x, y);
+    else for (int i = 0; i < 3; i++) gfx_round_rect(x + 1 + i * 5, y + 11 - i * 4, 4, 5 + i * 4, 1, c);
     x += 26;
     /* звук: динамик и две дуги */
     gfx_path p;
@@ -1053,6 +1115,7 @@ static void compose(struct rect r) {
     if (intersect(r, dock_rect(), NULL)) draw_dock();
     if (r.y < TOPBAR_H) draw_topbar();
     if (sysmenu_open && intersect(r, mkrect(SW - SM_W - 40, TOPBAR_H, SM_W + 40, sysmenu_rect().h + 30), NULL)) draw_sysmenu();
+    if (wifi_menu && intersect(r, wifi_menu_rect(), NULL)) draw_wifi_menu();
     if (intersect(r, tip_rect(), NULL)) draw_tip();
     gfx_no_clip();
     struct rect cur = { mouse_x - 14, mouse_y - 14, CURSOR_W + 16, CURSOR_H + 16 };
@@ -1663,7 +1726,7 @@ static void set_overview(bool on) {
     add_dirty(0, 0, SW, SH);
 }
 
-static void close_popups(void) { close_sysmenu(); }
+static void close_popups(void) { close_sysmenu(); close_wifi(); }
 
 /* клавиши в обзоре: печать — поиск, Enter — запустить, стрелки — выбрать */
 static void overview_key(int k) {
@@ -1721,6 +1784,27 @@ static void dock_click(int i) {
 
 static void mouse_down(int x, int y) {
     motions_finish();
+    if (wifi_menu && wifi_link()) {
+        struct rect r = wifi_menu_rect();
+        if (ui_inside(x, y, r.x, r.y, r.w, r.h)) {
+            int rows = (int)wifi_view->count; if (rows > 8) rows = 8;
+            int rel = y - r.y - 34;
+            int row = rel >= 0 ? rel / 22 : -1;
+            if (row >= 0 && row < rows) {
+                int live = wifi_view->state == WLAN_RUN && wifi_view->ssid[0]
+                    && !strcmp(wifi_view->ap[row].ssid, wifi_view->ssid);
+                if (live) return;
+                snprintf(wifi_ssid, sizeof(wifi_ssid), "%s", wifi_view->ap[row].ssid);
+                if (!wifi_view->ap[row].secured) { wifi_order(WIFI_CONNECT, wifi_ssid, "", 0); close_wifi(); }
+                else { wifi_typing = 1; wifi_pass[0] = 0; add_dirty(r.x, r.y, r.w, r.h); }
+            } else if (y >= r.y + r.h - 32) {
+                if (wifi_view->state == WLAN_RUN) wifi_order(WIFI_DISCONNECT, 0, 0, 0);
+                close_wifi();
+            }
+            return;
+        }
+        close_wifi();
+    }
     if (sysmenu_open) {
         int it = sysmenu_at(x, y);
         if (it >= 0) {
@@ -1740,6 +1824,15 @@ static void mouse_down(int x, int y) {
         if (ui_inside(x, y, l.x, 0, l.w, TOPBAR_H)) { kb_lang = kblayout(!kb_lang); add_dirty(0, 0, SW, TOPBAR_H); return; }
         if (x < a.x + a.w) set_overview(!overview_open);
         else if (x >= t.x) {
+            if (tray_has_wifi() && x < t.x + 34) {
+                close_sysmenu();
+                wifi_menu = !wifi_menu;
+                wifi_typing = 0;
+                add_dirty(SW - 312, TOPBAR_H, 312, 420);
+                add_dirty(0, 0, SW, TOPBAR_H);
+                return;
+            }
+            close_wifi();
             sysmenu_open = true;
             hover_sm = -1;
             struct rect r = sysmenu_rect();
@@ -2105,6 +2198,15 @@ start_session:
         if (lang != kb_lang) { kb_lang = lang; add_dirty(0, 0, SW, TOPBAR_H); }
         int k;
         while ((k = readkey()) > 0) {
+            if (wifi_typing) {
+                int n = (int)strlen(wifi_pass);
+                if (k == 27) { wifi_typing = 0; close_wifi(); continue; }
+                if (k == '\n' || k == '\r') { wifi_order(WIFI_CONNECT, wifi_ssid, wifi_pass, 0); wifi_pass[0] = 0; close_wifi(); continue; }
+                if ((k == 8 || k == 127) && n) wifi_pass[n - 1] = 0;
+                else if (k >= 32 && k < 127 && n < 63) { wifi_pass[n] = (char)k; wifi_pass[n + 1] = 0; }
+                add_dirty(SW - 312, TOPBAR_H, 312, 420);
+                continue;
+            }
             if (overview_open) { close_sysmenu(); overview_key(k); continue; }
             if (k == 27 && sysmenu_open) { close_sysmenu(); continue; }
             if (focus >= 0 && wins[focus].used && !overview_open) send(wins[focus].owner, WM_KEY, focus, k, 0, 0);

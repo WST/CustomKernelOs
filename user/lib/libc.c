@@ -2055,6 +2055,9 @@ int klog_read(void *buffer,unsigned capacity,struct klog_cursor *cursor) {
 }
 int reboot(int how) { return ioerr(syscall3(SYS_REBOOT, how, 0, 0)); }
 int netinfo(struct net_info *out)          { return syscall3(SYS_NETINFO, (int)out, 0, 0); }
+int ifctl(int index, struct if_info *out)  { return syscall3(SYS_IFCTL, index, (int)out, 0); }
+int modctl(int op, int arg, void *info)    { return syscall3(SYS_MODCTL, op, arg, (int)info); }
+int wlanctl(int op, void *buf, unsigned len){ return syscall3(SYS_WLANCTL, op, (int)buf, (int)len); }
 int ping(unsigned ip, int seq, unsigned t) { return syscall3(SYS_PING, (int)ip, seq, (int)t); }
 int set_dns(unsigned ip)                   { return syscall3(SYS_NETCONFIG, 1, (int)ip, 0); }
 

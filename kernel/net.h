@@ -46,6 +46,43 @@ struct net_config {
 extern struct net_config netcfg;
 extern struct mutex net_lock;       /* весь стек — под одним мьютексом */
 
+/* Несколько интерфейсов. netcfg — снимок маршрута по умолчанию для старого SYS_NETINFO.
+ * prefer меньше — приоритетнее, когда линк и адрес есть у обоих (провод перед Wi-Fi). */
+#define NETIF_ETH  1
+#define NETIF_WLAN 2
+#define NETIF_MAX  4
+
+struct netif {
+    char name[8];
+    u8 mac[6];
+    u8 kind, prefer;
+    bool up, dhcp, linked;
+    u32 ip, mask, gw, dns, lease;
+    u32 rx_packets, tx_packets, rx_bytes, tx_bytes;
+    u32 dhcp_retry;
+    int (*send)(struct netif *n, const void *frame, u32 len); /* 0 или -1 */
+    bool (*link)(struct netif *n);                            /* NULL — поле linked */
+    int (*recv)(struct netif *n, void *buf, u32 cap);         /* NULL — кадры приходят через netif_rx */
+    void (*diagnose)(struct netif *n);
+};
+
+struct if_info {
+    char name[8];
+    u8 mac[6];
+    u8 kind, prefer, up, link, dhcp, pad;
+    u32 ip, mask, gw, dns, lease;
+    u32 rx_packets, tx_packets, rx_bytes, tx_bytes;
+};
+
+struct netif *netif_add(const struct netif *src);
+void netif_del(struct netif *n);
+struct netif *netif_default(void);
+struct netif *netif_by_index(int index);
+int netif_count(void);
+void netcfg_sync(void);
+void netif_rx(struct netif *n, const void *frame, u32 len); /* держать net_lock */
+bool netif_is_linked(struct netif *n);
+
 bool net_init(void);                /* найти карту и запустить сетевой поток */
 u16  net_checksum(const void *data, u32 len, u32 sum);   /* интернет-контрольная сумма */
 u32  net_src_ip(u32 dst);          /* с какого адреса слать: 127.x — с себя же */

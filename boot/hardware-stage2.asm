@@ -162,6 +162,13 @@ start:
     ; Prefer the monitor's first detailed timing when DDC/EDID is available.
     call edid_preferred
     jc .fallback
+    ; Потолок для запасных режимов: режим шире или выше панели (типично
+    ; 1920x1080 на LVDS 1366x768) гасит внутренний экран, а VBIOS может
+    ; не вернуться из INT 10h AH=4Fh.
+    mov ax,[want_w]
+    mov [panel_w],ax
+    mov ax,[want_h]
+    mov [panel_h],ax
     call find_mode
     jnc video_done
 .fallback:
@@ -175,6 +182,15 @@ start:
     lodsw
     mov [want_h],ax
     mov [preference],si
+    cmp word [panel_w],0
+    je .attempt
+    mov ax,[want_w]
+    cmp ax,[panel_w]
+    ja .try
+    mov ax,[want_h]
+    cmp ax,[panel_h]
+    ja .try
+.attempt:
     call find_mode
     jc .try
     jmp video_done
@@ -430,6 +446,7 @@ find_mode:
     add edx,eax
     jc .next
     mov [candidate_phys],eax
+    call announce_mode
     mov bx,[mode]
     or bx,0x4000
     mov ax,0x4f02
@@ -445,6 +462,7 @@ find_mode:
     movzx eax,word [want_h]
     mov [INFO+28],eax
     mov dword [INFO+32],32
+    call mark_fb
     clc
     ret
 .fail:
@@ -529,6 +547,78 @@ print:
     jmp print
 .done:
     ret
+; Строка остаётся на экране, если INT 10h AH=4Fh зависает уже после гашения текста.
+announce_mode:
+    mov si,mode_msg
+    call print
+    mov ax,[want_w]
+    call print_dec
+    mov al,'x'
+    mov ah,0x0e
+    int 0x10
+    mov ax,[want_h]
+    call print_dec
+    mov si,crlf
+    call print
+    ret
+print_dec:
+    pusha
+    mov cx,0
+    mov bx,10
+.div:
+    xor dx,dx
+    div bx
+    push dx
+    inc cx
+    test ax,ax
+    jnz .div
+.digit:
+    pop ax
+    add al,'0'
+    mov ah,0x0e
+    int 0x10
+    loop .digit
+    popa
+    ret
+; Белая полоса в линейном framebuffer: если она остаётся, режим на панели,
+; а ядро не дошло до перерисовки. Стек не трогаем: старшие биты ESP в
+; protected mode здесь не обнулены.
+mark_fb:
+    cli
+    lgdt [gdt_desc]
+    mov eax,cr0
+    or al,1
+    mov cr0,eax
+    jmp 8:mark32
+[bits 32]
+mark32:
+    mov ax,16
+    mov ds,ax
+    mov es,ax
+    mov edi,[candidate_phys]
+    mov ecx,[candidate_pitch]
+    shl ecx,1
+    shr ecx,2
+    mov eax,0x00ffffff
+    rep stosd
+    jmp 24:mark16
+[bits 16]
+mark16:
+    mov ax,32
+    mov ds,ax
+    mov es,ax
+    mov ss,ax
+    mov eax,cr0
+    and al,0xfe
+    mov cr0,eax
+    jmp 0:mark_real
+mark_real:
+    xor ax,ax
+    mov ds,ax
+    mov es,ax
+    mov ss,ax
+    sti
+    ret
 memory_error:
     mov si,mem_error
     jmp fatal
@@ -574,10 +664,14 @@ video_modes: dw 1920,1080, 1920,1200, 1600,900, 1680,1050
              dw 1280,1024, 1280,720, 1024,768, 800,600, 640,480, 0
 want_w: dw 0
 want_h: dw 0
+panel_w: dw 0
+panel_h: dw 0
 video_start: dw 0
 select_modes: dw 0,0, 640,480, 800,600, 1024,768, 1280,720
               dw 1280,1024, 1600,900, 1920,1080, 1920,1200, 2560,1440
 video_hint: db 'Press V for resolution menu, Enter to boot (3 seconds).',13,10,0
+mode_msg: db 'MyOS: VBE ',0
+crlf: db 13,10,0
 video_choices: db 'Resolution (BIOS must support it):',13,10
     db '0 Auto, 1 640x480, 2 800x600, 3 1024x768, 4 1280x720',13,10
     db '5 1280x1024, 6 1600x900, 7 1920x1080, 8 1920x1200, 9 2560x1440',13,10

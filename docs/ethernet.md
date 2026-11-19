@@ -120,6 +120,10 @@ in this environment. QEMU does not emulate it; successful emulator tests do not
 establish compatibility with a particular PHY/firmware revision. A boot photo
 including the `NET:` messages is needed to diagnose a hardware failure.
 
+Wi-Fi is not this driver. Centrino Wireless-N 1000 is a loadable module and a
+second `netif`; a linked `eth0` with an address keeps the default route.
+See [wifi.md](wifi.md).
+
 ## Verification
 
 `make ethernettest` runs the real driver against a PCI/MMIO/MDIO model under

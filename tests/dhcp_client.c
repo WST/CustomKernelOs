@@ -106,6 +106,23 @@ int main(void) {
     make_reply(&m,2);m.options[1]=0;m.options[2]=255;
     dhcp_input((const void *)&m,243);CHECK(dh.state==1 && dh.rejected==2);
     dhcp_input((const void *)&m,230);CHECK(dh.rejected==3);
+    setup(0);
+    CHECK(dhcp_run());
+    struct netif *eth = netif_by_index(0);
+    CHECK(eth && eth->ip == IP(192,168,7,20) && netif_default() == eth);
+    struct netif wifi;
+    memset(&wifi, 0, sizeof(wifi));
+    memcpy(wifi.name, "wlan0", 6);
+    wifi.mac[0] = 2; wifi.mac[5] = 99;
+    wifi.kind = NETIF_WLAN; wifi.prefer = 1; wifi.linked = true; wifi.up = true;
+    wifi.ip = IP(10,9,9,9); wifi.mask = IP(255,255,255,0); wifi.gw = IP(10,9,9,1);
+    struct netif *w = netif_add(&wifi);
+    CHECK(w && netif_default() == eth);
+    eth->ip = 0;
+    CHECK(netif_default() == w && netif_default()->gw == IP(10,9,9,1));
+    eth->ip = IP(192,168,7,20);
+    netcfg_sync();
+    CHECK(netcfg.ip == IP(192,168,7,20) && netcfg.gw == IP(192,168,7,1));
     printf("DHCP: strict 300-byte server, delayed OFFER/ACK, REQUEST retry, NAK, no-server timeout, malformed replies and TX backpressure: PASS\n");
     return 0;
 }

@@ -644,7 +644,20 @@ $(BUILD)/ld.so: user/ldso.c $(BUILD)/cc-host $(CCROOT_READY)
 $(BUILD)/cert.pem: certs/roots.der tools/roots_pem.py
 	python3 tools/roots_pem.py certs/roots.der $@
 
-install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BASE_SOS) $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so $(BUILD)/cert.pem | $(DISK)
+$(BUILD)/modules:
+	mkdir -p $@
+$(BUILD)/modules/iwl1000.o: drivers/net/iwl1000.c drivers/net/iwl_fw.h kernel/*.h | $(BUILD)/modules
+	$(CC) $(CFLAGS) -Ikernel -Idrivers/net -c drivers/net/iwl1000.c -o $@
+$(BUILD)/modules/iwl_fw.o: drivers/net/iwl_fw.c drivers/net/iwl_fw.h | $(BUILD)/modules
+	$(CC) $(CFLAGS) -Ikernel -Idrivers/net -c drivers/net/iwl_fw.c -o $@
+$(BUILD)/modules/iwl1000.ko: $(BUILD)/modules/iwl1000.o $(BUILD)/modules/iwl_fw.o
+	$(LD) -r -m elf_i386 -o $@ $^
+$(BUILD)/modules/aliases: drivers/net/iwl1000.c tools/gen_modalias.py | $(BUILD)/modules
+	python3 tools/gen_modalias.py drivers/net/iwl1000.c > $@
+$(BUILD)/wifid.enabled:
+	: > $@
+
+install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(BASE_SOS) $(BUILD)/user/libm.so $(BUILD)/user/libdl.so $(BUILD)/user/libpthread.so $(BUILD)/user/libexpat.so $(BUILD)/user/libsqlite3.so $(BUILD)/user/libffi.so $(BUILD)/user/libcrypto.so $(BUILD)/user/libssl.so $(BUILD)/user/libcurl.so $(BUILD)/cert.pem $(BUILD)/modules/iwl1000.ko $(BUILD)/modules/aliases $(BUILD)/wifid.enabled | $(DISK)
 	@echo "==> устанавливаю программы в /bin на $(DISK)"
 	@for p in $(PROGRAMS); do $(BUILD)/myfs $(DISK) put $(BUILD)/user/$$p /bin/$$p || exit 1; done
 	@$(BUILD)/myfs $(DISK) put $(BUILD)/user/gzip /bin/gunzip || exit 1
@@ -734,6 +747,15 @@ install: $(UBINS) $(MLIBS) $(BUILD)/myfs $(BUILD)/ld.so $(BUILD)/user/libz.so $(
 	@for f in services/*.service; do \
 	  $(BUILD)/myfs $(DISK) cat /etc/services/$$(basename $$f) >/dev/null 2>&1 || \
 	  $(BUILD)/myfs $(DISK) put $$f /etc/services/$$(basename $$f) >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) cat /etc/services/enabled/wifid.service >/dev/null 2>&1 || \
+	  $(BUILD)/myfs $(DISK) put $(BUILD)/wifid.enabled /etc/services/enabled/wifid.service >/dev/null
+
+	@echo "==> модуль Wi-Fi и прошивка Intel 1000"
+	@for d in /boot /boot/modules /lib/firmware; do $(BUILD)/myfs $(DISK) mkdir $$d >/dev/null || exit 1; done
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/modules/iwl1000.ko /boot/modules/iwl1000.ko >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put $(BUILD)/modules/aliases /boot/modules/aliases >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put firmware/iwlwifi-1000-5.ucode /lib/firmware/iwlwifi-1000-5.ucode >/dev/null || exit 1
+	@$(BUILD)/myfs $(DISK) put firmware/LICENCE.iwlwifi_firmware /lib/firmware/LICENCE.iwlwifi_firmware >/dev/null || exit 1
 
 	@python3 tools/configure_ext_auto.py --disk "$(DISK)"
 	@python3 tools/configure_ssh_keys.py --disk "$(DISK)"
@@ -1139,6 +1161,7 @@ $(BUILD)/user/settings $(BUILD)/user/desktop: $(BUILD)/user/%: $(BUILD)/user/%.o
 
 .PHONY: settingstest
 settingstest:
+	python3 tests/settings_wifi_contract.py
 	python3 tests/settings_smoke.py
 
 $(BUILD)/user/sysinfocheck.o: tests/sysinfocheck.c user/lib/myos.h user/lib/sysinfo.h | $(BUILD)/user
@@ -1174,7 +1197,28 @@ $(BUILD)/user/consoleload.o: tests/console_load.c user/lib/myos.h | $(BUILD)/use
 	$(CC) $(UCFLAGS) -c $< -o $@
 $(BUILD)/user/consoleload: $(BUILD)/user/consoleload.o $(BUILD)/user/libmyos.a user/user.ld
 	$(LD) $(ULDFLAGS) $< $(BUILD)/user/libmyos.a -o $@
-.PHONY: usb-image usbtest consoletest consoleloadtest ethernettest ethernet-smoke dhcptest
+.PHONY: usb-image usbtest consoletest consoleloadtest ethernettest ethernet-smoke dhcptest kmodtest wlantest wifitest wifisim
+kmodtest: | $(BUILD)
+	$(CC) $(CFLAGS) -Ikernel -DHOST_TEST -c kernel/module.c -o $(BUILD)/kmod_module.o
+	$(CC) $(CFLAGS) -Ikernel -c kernel/string.c -o $(BUILD)/kmod_string.o
+	$(CC) $(CFLAGS) -Ikernel -c tests/kmod_sample.c -o $(BUILD)/kmod_sample.o
+	$(LD) -r -m elf_i386 -o $(BUILD)/kmod_sample.ko $(BUILD)/kmod_sample.o
+	$(CC) $(CFLAGS) -Ikernel -c tests/kmod_loader.c -o $(BUILD)/kmod_loader.o
+	$(LD) -m elf_i386 -nostdlib -o $(BUILD)/kmodtest $(BUILD)/kmod_loader.o $(BUILD)/kmod_module.o $(BUILD)/kmod_string.o
+	./$(BUILD)/kmodtest
+	python3 tools/gen_modalias.py drivers/net/iwl1000.c | grep -qx '8086 0083 iwl1000.ko'
+	python3 tools/gen_modalias.py drivers/net/iwl1000.c | grep -qx '8086 0084 iwl1000.ko'
+wlantest: | $(BUILD)
+	$(CC) $(CFLAGS) -Ikernel -DWLAN_NOSTD -c tests/wlan_frames.c -o $(BUILD)/wlan_frames.o
+	$(CC) $(CFLAGS) -Ikernel -c kernel/wlan_frame.c -o $(BUILD)/wlan_frame_test.o
+	$(CC) $(CFLAGS) -Ikernel -c kernel/string.c -o $(BUILD)/wlan_string.o
+	$(LD) -m elf_i386 -nostdlib -o $(BUILD)/wlantest $(BUILD)/wlan_frames.o $(BUILD)/wlan_frame_test.o $(BUILD)/wlan_string.o
+	./$(BUILD)/wlantest
+wifitest: | $(BUILD)
+	$(HOSTCC) -std=gnu11 -O1 -Wall -Iuser/lib tests/wifi_wpa.c user/lib/wpa.c -o $(BUILD)/wifitest
+	./$(BUILD)/wifitest
+wifisim: $(BUILD)/myfs
+	python3 tests/wifi_sim_smoke.py
 dhcptest: | $(BUILD)
 	$(HOSTCC) -m32 -std=gnu11 -g -O1 -fsanitize=address,undefined -fno-builtin -ffunction-sections -fdata-sections tests/dhcp_client.c -Wl,--gc-sections -o $(BUILD)/dhcp-client-test
 	./$(BUILD)/dhcp-client-test

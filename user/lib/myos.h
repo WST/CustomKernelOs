@@ -74,7 +74,8 @@ enum {
     SYS_THREAD_CTL, SYS_HWINFO, SYS_SCHEDINFO, SYS_KERNELINFO,
     SYS_UMOUNT, SYS_SYNC, SYS_FSYNC, SYS_FSCK,
     SYS_PREAD, SYS_PWRITE, SYS_GETPGID,
-    SYS_SIGNAL, SYS_SIGRETURN, SYS_INSTALLCTL
+    SYS_SIGNAL, SYS_SIGRETURN, SYS_INSTALLCTL,
+    SYS_IFCTL, SYS_MODCTL, SYS_WLANCTL
 };
 /* Совпадают с kernel/syscall.h. Первое поле thread_tcb — errno этого потока. */
 #define TC_SET_TCB   0
@@ -101,6 +102,9 @@ _Static_assert(SYS_IPCCTL == 86, "Keep the published SYS_IPCCTL ABI stable");
 _Static_assert(SYS_MMAP == 69, "SYS_MMAP must stay 69: user/ldso.c hardcodes it");
 _Static_assert(SYS_MUNMAP == 70, "SYS_MUNMAP must stay 70: user/ldso.c hardcodes it");
 _Static_assert(SYS_SIGNAL == SYS_GETPGID + 1, "SYS_SIGNAL follows SYS_GETPGID");
+_Static_assert(SYS_SIGRETURN == 100, "SYS_SIGRETURN stays 100");
+_Static_assert(SYS_INSTALLCTL == 101, "SYS_INSTALLCTL stays 101");
+_Static_assert(SYS_IFCTL == 102 && SYS_MODCTL == 103 && SYS_WLANCTL == 104, "wifi syscalls follow the installer");
 
 #define PROT_READ  1
 #define PROT_WRITE 2
@@ -404,6 +408,43 @@ struct net_info {
 int  netinfo(struct net_info *out);
 int  ping(unsigned ip, int seq, unsigned timeout_ms);  /* -> время ответа в мс или -errno */
 int  set_dns(unsigned ip);
+/* Раскладка совпадает с kernel/net.h struct if_info. index с нуля, -ENOENT — конец. */
+struct if_info {
+    char name[8];
+    unsigned char mac[6];
+    unsigned char kind, prefer, up, link, dhcp, pad;
+    unsigned ip, mask, gw, dns, lease;
+    unsigned rx_packets, tx_packets, rx_bytes, tx_bytes;
+};
+int  ifctl(int index, struct if_info *out);
+int  modctl(int op, int arg, void *info);
+int  wlanctl(int op, void *buf, unsigned len);
+enum { WLAN_STATUS = 1, WLAN_SCAN, WLAN_RESULT, WLAN_CONNECT, WLAN_DISCONNECT,
+       WLAN_EAPOL_TX, WLAN_EAPOL_RX, WLAN_SET_KEY, WLAN_PORT, WLAN_RADIO, WLAN_COUNT };
+enum { WLAN_DOWN = 0, WLAN_IDLE, WLAN_SCANNING, WLAN_ASSOC, WLAN_EAPOL, WLAN_RUN, WLAN_BLOCKED };
+enum { WLAN_KEY_PTK = 1, WLAN_KEY_GTK = 2 };
+struct wlan_status_u {
+    unsigned state, bars, secured, blocked, channel;
+    int rssi;
+    unsigned char mac[6], bssid[6];
+    char ssid[33];
+    unsigned char pad;
+};
+struct wlan_bss_u {
+    unsigned index;
+    int rssi;
+    unsigned channel, secured, bars;
+    unsigned char bssid[6];
+    char ssid[33];
+    unsigned char pad[3];
+};
+struct wlan_connect_u {
+    char ssid[33];
+    unsigned char bssid[6];
+    unsigned char has_bssid, secure;
+};
+struct wlan_eapol_u { unsigned short len; unsigned char data[512]; };
+struct wlan_key_u { unsigned char kind, id; unsigned char key[16]; };
 int  ip_parse(const char *s, unsigned *ip);             /* "10.0.2.2" -> 1, иначе 0 */
 char *ip_str(unsigned ip, char *buf);                   /* buf минимум 16 байт */
 int  resolve(const char *name, unsigned *ip);           /* имя или IP -> 0 / -errno (DNS) */
